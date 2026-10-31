@@ -6,38 +6,45 @@ transaction id is marked "simulated". On the sandbox or testnet the same
 story signs real transactions and waits in real time; its payees are
 sub-accounts of the root that ``holdup deploy --profile demo`` creates.
 
-The story: a forwarded scam DM gets braked and cancelled, the next senders
-are braked by a rule within seconds, a changed invoice is stopped by a
-guardian, a trusted payee is paid instantly and an ordinary payment goes
-through.
+The story: a forwarded scam DM is braked by the rules within seconds and then
+by the full AI check, and cancelled; a changed invoice at a small business is
+stopped by a guardian; a trusted payee is paid instantly and an ordinary
+payment goes through; finally the next senders to the reported wallet are
+braked by the rules before any model is asked.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from .bot.texts import why_text
 from .chain import links
+from .chain.fake import SimClock
 from .chain.profiles import DEMO_PAYEES
 from .chain.prove import prove, prove_fake
-from .config import Settings
+from .config import Settings, offline_settings
 from .engine import Engine
-from .messages import fmt_amount, fmt_duration, fmt_utc
+from .messages import finding_tag, fmt_amount, fmt_duration, fmt_utc
 from .models import (
     AssetInfo,
     Hold,
     PaymentContext,
     PaymentOutcome,
+    StepRecord,
     UserAccount,
     VaultConfig,
     parse_amount,
     reasons_from_bits,
 )
-from .workers.runtime import Runtime, offline_runtime
+from .runtime import Runtime, build_runtime
 
 SECOND_MS = 1_000
+
+Buttons = list[list[tuple[str, str]]]
 
 HERO_DM = (
     "Unusual login. Move your USDC to the protected wallet {payee} within 30 minutes or it will "
@@ -86,17 +93,20 @@ class Transcript:
 
 
 class TranscriptNotifier:
-    """A ``Notifier`` that writes bot messages into the transcript."""
+    """A ``Notifier`` that writes bot messages into the transcript.
+
+    ``annotate``, when set, is called after each message and may return extra
+    transcript lines about it.
+    """
 
     def __init__(self, transcript: Transcript, names: dict[str, str] | None = None) -> None:
         self.transcript = transcript
         self.names = names if names is not None else {}
         self.quiet: set[str] = set()
-        self.sent: list[tuple[str, str, list[list[tuple[str, str]]] | None]] = []
+        self.sent: list[tuple[str, str, Buttons | None]] = []
+        self.annotate: Callable[[str, str, Buttons | None], list[str]] | None = None
 
-    async def notify(
-        self, user_key: str, text: str, buttons: list[list[tuple[str, str]]] | None = None
-    ) -> None:
+    async def notify(self, user_key: str, text: str, buttons: Buttons | None = None) -> None:
         self.sent.append((user_key, text, buttons))
         name = self.names.get(user_key, user_key)
         lines = text.splitlines() or [""]
@@ -109,6 +119,53 @@ class TranscriptNotifier:
         if buttons and user_key not in self.quiet:
             labels = "  ".join(f"[{label}]" for row in buttons for label, _ in row)
             self.transcript(" " * len(prefix) + labels)
+        if self.annotate is not None:
+            for line in self.annotate(user_key, text, buttons):
+                self.transcript(line)
+
+
+def _hold_in(buttons: Buttons | None, action: str) -> int | None:
+    """The hold id behind a ``<action>:<id>`` button, if the message has one."""
+    for row in buttons or []:
+        for _, data in row:
+            if match := re.fullmatch(rf"{action}:(\d+)", data):
+                return int(match.group(1))
+    return None
+
+
+def _requests_text(steps: Sequence[str]) -> str:
+    if not steps:
+        return "no model was asked: there was no message or image to check, so the rules decided alone."
+    names = ", ".join(dict.fromkeys(steps))
+    plural = "s" if len(steps) != 1 else ""
+    return f"{len(steps)} model request{plural} through Otari ({names}), answered from recorded fixtures."
+
+
+def _step_text(step: StepRecord) -> str:
+    """One AI step as the /why page lists it: model, provider, fallback, attempts, cost, time, tools."""
+    parts = [step.model or "deterministic rules"]
+    if step.provider:
+        parts.append(f"via {step.provider}")
+    if step.fallback:
+        parts.append("fallback")
+    if step.attempts:
+        parts.append(f"{step.attempts} attempt{'s' if step.attempts != 1 else ''}")
+    if step.cost_usd is not None:
+        parts.append(f"{step.cost_usd:.6f} USD")
+    if step.latency_ms is not None:
+        parts.append(f"{step.latency_ms} ms")
+    tools = [str(call.get("name") or call.get("type") or "") for call in step.tool_calls]
+    tools = [t for t in dict.fromkeys(tools) if t]
+    if tools:
+        parts.append("tools: " + ", ".join(tools))
+    if step.guardrail:
+        verdict = step.guardrail.get("valid")
+        parts.append("guardrail: " + ("flagged" if verdict is False else "passed" if verdict else "no verdict"))
+    if step.error == "guardrail_violation":
+        parts.append("the guardrail blocked the text, so later steps only saw facts HoldUp extracted")
+    elif step.error:
+        parts.append(f"error: {step.error}")
+    return f"{step.step}: " + ", ".join(parts)
 
 
 @dataclass
@@ -121,6 +178,9 @@ class Story:
     stable: AssetInfo
     config: VaultConfig
     holds: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.notifier.annotate = self._annotate
 
     @property
     def engine(self) -> Engine:
@@ -138,6 +198,22 @@ class Story:
 
     def tx(self, tx_hash: str) -> str:
         return links.describe_tx(self.settings, tx_hash, simulated=self.engine.simulated)
+
+    def _annotate(self, user_key: str, text: str, buttons: Buttons | None) -> list[str]:
+        """Under a quick brake: whether it reached the chain before any model was asked."""
+        hold_id = _hold_in(buttons, "cancel")
+        if hold_id is None or not text.startswith("Brakes on"):
+            return []
+        verdicts = self.runtime.store.list_verdicts(hold_id)
+        if not verdicts or verdicts[-1].get("kind") != "provisional":
+            return []
+        steps = self.runtime.model_requests(hold_id)
+        if steps is None:
+            return ["  checks: this quick brake is the rules' alone, on chain before the AI step starts."]
+        return [
+            "  checks: this quick brake is the rules' alone: it was on chain before any model was asked "
+            f"({len(steps)} model requests for this payment so far)."
+        ]
 
     async def join(self, key: str, name: str) -> UserAccount:
         self.notifier.names[key] = name
@@ -166,13 +242,17 @@ class Story:
     ) -> PaymentOutcome:
         name = self.notifier.names.get(key, key)
         self.say(f"{name}: send {amount_text} {typed_symbol} to {payee}")
-        if self.runtime.risk.resolver is not None:
-            self.runtime.risk.resolver.current = scenario
+        if self.runtime.resolver is not None:
+            self.runtime.resolver.current = scenario
         amount = parse_amount(amount_text, self.stable.decimals)
         outcome = await self.engine.pay(key, payee, self.stable.asset_id, amount)
         if outcome.refused:
             self.say(f"  refused: {outcome.message}")
         await self.engine.wait_idle()
+        if outcome.hold is not None and not outcome.instant:
+            steps = self.runtime.model_requests(outcome.hold.id)
+            if steps is not None:
+                self.say("  checks: " + _requests_text(steps))
         return outcome
 
     async def show_hold(self, hold_id: int) -> Hold:
@@ -198,6 +278,22 @@ class Story:
             )
         return hold
 
+    async def why(self, key: str, hold_id: int) -> None:
+        """What the sender sees after tapping "Why?", then the sources and steps behind it."""
+        name = self.notifier.names.get(key, key)
+        self.say(f'{name} taps "Why?".')
+        view = await self.engine.why(hold_id)
+        if view is None:
+            return
+        now = await self.runtime.vault.now_ms()
+        await self.notifier.notify(key, why_text(self.settings, view, now))
+        cited = [f"  {finding_tag(f)} cites: " + ", ".join(f.citations) for f in view.findings if f.citations]
+        for line in dict.fromkeys(cited):
+            self.say(line)
+        for step in view.steps:
+            if step.model:
+                self.say("  step " + _step_text(step))
+
     async def wait(self, ms: int) -> None:
         """Let time pass (simulated offline, real on a network), then run the keeper once."""
         advance = getattr(self.runtime.clock, "advance", None)
@@ -211,13 +307,17 @@ class Story:
 
 
 def _stable_asset(settings: Settings) -> tuple[AssetInfo, str]:
-    usdc = settings.asset_by_symbol("USDC")
-    if usdc is not None:
-        return usdc, ""
-    husd = settings.asset_by_symbol("HUSD")
-    if husd is None:
-        raise RuntimeError("no stablecoin is configured (set HOLDUP_HUSD_TOKEN or HOLDUP_USDC_TOKEN)")
-    return husd, "USDC is not configured here, so HUSD, the HoldUp demo token, stands in. HUSD is not Circle USDC."
+    """The stablecoin new users are funded with: USDC when they get some, else the HUSD demo token."""
+    for symbol in ("USDC", "HUSD"):
+        info = settings.asset_by_symbol(symbol)
+        if info is not None and settings.demo_funds.get(info.asset_id):
+            if symbol == "USDC":
+                return info, ""
+            return info, (
+                "New users here are funded with HUSD, the HoldUp demo token, so it stands in for USDC. "
+                "HUSD is not Circle USDC."
+            )
+    raise RuntimeError("no funded stablecoin is configured (set HOLDUP_HUSD_TOKEN, or deploy with holdup deploy)")
 
 
 def _intro(story: Story, title: str, note: str) -> None:
@@ -229,7 +329,7 @@ def _intro(story: Story, title: str, note: str) -> None:
         f"{fmt_duration(config.new_payee_hold_ms)}; the oracle can only add time, up to "
         f"{fmt_duration(config.max_hold_ms)} in total."
     )
-    story.say(f"Checks: {story.runtime.risk.label}.")
+    story.say(f"Checks: {story.runtime.checks}.")
     if note:
         story.say(note)
 
@@ -250,34 +350,21 @@ async def _hero(story: Story) -> None:
         return
     story.holds["hero"] = outcome.hold.id
     await story.show_hold(outcome.hold.id)
+    await story.why("demo:priya", outcome.hold.id)
     story.say('Priya taps "Cancel & refund".')
     await story.engine.cancel("demo:priya", outcome.hold.id)
+    balance = await story.engine.balance("demo:priya")
+    story.say(
+        "  chain: Priya's HoldUp balance is back to "
+        + ", ".join(fmt_amount(story.settings, a, v) for a, v in balance.items())
+        + "."
+    )
     stats = await story.runtime.vault.get_payee_stats(wallet)
     story.say(f"  chain: {wallet} now has {stats.cancelled_after_flag} report(s): a cancel after a warning.")
 
 
-async def _network_effect(story: Story) -> None:
-    story.transcript.heading("2. The next senders are braked by a rule")
-    wallet = story.payee("safe-wallet-77")
-    story.say("Leo got the same DM. He pays, is braked, and cancels (messages shortened).")
-    await story.join("demo:leo", "Leo")
-    story.notifier.quiet.add("demo:leo")
-    await story.forward("demo:leo", HERO_DM.format(payee=wallet, url="(same link)"), sender="CoinHaven Support")
-    leo = await story.pay("demo:leo", wallet, "30", "hero")
-    if leo.hold is not None:
-        await story.engine.cancel("demo:leo", leo.hold.id)
-    stats = await story.runtime.vault.get_payee_stats(wallet)
-    story.say(f"  chain: {stats.cancelled_after_flag} reports now. Mei pays the same account without forwarding anything.")
-    await story.join("demo:mei", "Mei")
-    mei = await story.pay("demo:mei", wallet, "20", "benign")
-    if mei.hold is not None:
-        story.holds["reported"] = mei.hold.id
-        await story.show_hold(mei.hold.id)
-        await story.engine.cancel("demo:mei", mei.hold.id)
-
-
 async def _invoice(story: Story) -> None:
-    story.transcript.heading("3. A changed invoice at a small business")
+    story.transcript.heading("2. A changed invoice at a small business")
     usual, changed = story.payee("northwindpaper"), story.payee("northwind-paper")
     await story.join("demo:dana", "Dana")
     await story.join("demo:omar", "Omar")
@@ -297,7 +384,7 @@ async def _invoice(story: Story) -> None:
 
 
 async def _everyday(story: Story) -> None:
-    story.transcript.heading("4. Everyday payments still work")
+    story.transcript.heading("3. Everyday payments still work")
     mum, ravi = story.payee("mum"), story.payee("ravi")
     story.say(f"Priya trusts {mum}. Trust takes effect after a short delay.")
     await story.engine.trust("demo:priya", mum)
@@ -315,6 +402,33 @@ async def _everyday(story: Story) -> None:
     now = await story.runtime.vault.now_ms()
     await story.wait(max(hold.release_at_ms - now, 0) + SECOND_MS)
     await story.show_hold(dinner.hold.id)
+
+
+async def _network_effect(story: Story) -> None:
+    story.transcript.heading("4. The next senders to the reported wallet are braked by the rules first")
+    wallet = story.payee("safe-wallet-77")
+    stats = await story.runtime.vault.get_payee_stats(wallet)
+    story.say(
+        f"{wallet} has {stats.cancelled_after_flag} report(s) on chain. Leo got the same DM: he pays, the rules "
+        "brake him before any model is asked, the AI check confirms it, and he cancels (messages shortened)."
+    )
+    await story.join("demo:leo", "Leo")
+    story.notifier.quiet.add("demo:leo")
+    await story.forward("demo:leo", HERO_DM.format(payee=wallet, url="(same link)"), sender="CoinHaven Support")
+    leo = await story.pay("demo:leo", wallet, "30", "hero")
+    if leo.hold is not None:
+        story.holds["second"] = leo.hold.id
+        await story.engine.cancel("demo:leo", leo.hold.id)
+    stats = await story.runtime.vault.get_payee_stats(wallet)
+    story.say(
+        f"  chain: {stats.cancelled_after_flag} reports now. Mei pays the same wallet without forwarding anything."
+    )
+    await story.join("demo:mei", "Mei")
+    mei = await story.pay("demo:mei", wallet, "20", "benign")
+    if mei.hold is not None:
+        story.holds["reported"] = mei.hold.id
+        await story.show_hold(mei.hold.id)
+        await story.engine.cancel("demo:mei", mei.hold.id)
 
 
 async def _summary(story: Story) -> None:
@@ -349,13 +463,13 @@ async def _story(runtime: Runtime, transcript: Transcript, notifier: TranscriptN
 
 
 async def run_demo(runtime: Runtime, transcript: Transcript, notifier: TranscriptNotifier) -> DemoResult:
-    """The whole story on ``runtime`` (whose notifier must be ``notifier``)."""
+    """The whole story on ``runtime`` (whose default notifier must be ``notifier``)."""
     story, note = await _story(runtime, transcript, notifier)
     _intro(story, "HoldUp demo", note)
     await _hero(story)
-    await _network_effect(story)
     await _invoice(story)
     await _everyday(story)
+    await _network_effect(story)
     await _summary(story)
     return DemoResult(transcript, runtime, story.holds, notifier)
 
@@ -410,18 +524,20 @@ async def run_attack(runtime: Runtime, transcript: Transcript, notifier: Transcr
     return DemoResult(transcript, runtime, story.holds, notifier)
 
 
-async def run_offline_demo(
-    *, out: Callable[[str], None] | None = print, builtin_risk: bool = False
-) -> DemoResult:
+def offline_demo_runtime(notifier: TranscriptNotifier, *, rules_only: bool = False) -> Runtime:
+    """The in-memory world on simulated time, with recorded AI answers (or the rules alone)."""
+    settings = offline_settings(otari_mode="off" if rules_only else "replay")
+    return build_runtime(settings, notifier=notifier, clock=SimClock(), web=False)
+
+
+async def run_offline_demo(*, out: Callable[[str], None] | None = print, rules_only: bool = False) -> DemoResult:
     """The full story on the in-memory vault. Takes about a second."""
     transcript = Transcript(out)
     notifier = TranscriptNotifier(transcript)
-    return await run_demo(offline_runtime(notifier, builtin_risk=builtin_risk), transcript, notifier)
+    return await run_demo(offline_demo_runtime(notifier, rules_only=rules_only), transcript, notifier)
 
 
-async def run_offline_attack(
-    *, out: Callable[[str], None] | None = print, builtin_risk: bool = False
-) -> DemoResult:
+async def run_offline_attack(*, out: Callable[[str], None] | None = print, rules_only: bool = False) -> DemoResult:
     transcript = Transcript(out)
     notifier = TranscriptNotifier(transcript)
-    return await run_attack(offline_runtime(notifier, builtin_risk=builtin_risk), transcript, notifier)
+    return await run_attack(offline_demo_runtime(notifier, rules_only=rules_only), transcript, notifier)

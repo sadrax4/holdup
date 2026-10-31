@@ -306,9 +306,10 @@ def test_lookalike_of_ignores_the_payee_itself() -> None:
 
 def test_the_runtime_loads_these_rules_with_the_fixture_table() -> None:
     from holdup.chain.fake import SimClock
-    from holdup.workers.runtime import load_risk, offline_settings, offline_vault
+    from holdup.config import offline_settings
+    from holdup.runtime import build_runtime
 
-    settings = offline_settings()
-    risk = load_risk(settings, offline_vault(settings, SimClock()))
-    assert isinstance(risk.fast, RulesRisk) and isinstance(risk.intel, PayeeIntel)
-    assert risk.intel._table["safe-wallet-77.testnet"]["distinct_inbound_senders_24h"] == 14
+    runtime = build_runtime(offline_settings(), clock=SimClock(), web=False)
+    assert isinstance(runtime.fast_risk, RulesRisk) and isinstance(runtime.intel, PayeeIntel)
+    assert runtime.engine.fast_risk is runtime.fast_risk
+    assert runtime.intel._table["safe-wallet-77.testnet"]["distinct_inbound_senders_24h"] == 14

@@ -30,9 +30,10 @@ from holdup.chain.vault import NearVault
 from holdup.chain.verify import verify_deploy
 from holdup.config import Settings, load_settings
 from holdup.engine import Engine
+from holdup.intel import PayeeIntel
 from holdup.models import HoldStatus, PaymentContext
+from holdup.risk.rules import RulesRisk
 from holdup.store import Store
-from holdup.workers.runtime import BuiltinRules
 
 pytestmark = pytest.mark.sandbox
 
@@ -94,7 +95,7 @@ async def test_the_deployment_verifies(deployed: Settings) -> None:
 async def test_held_payment_brake_cancel_and_release(deployed: Settings) -> None:
     vault = NearVault(deployed)
     notifier = Recorder()
-    engine = Engine(deployed, vault, BuiltinRules(vault, profiles={}), None, Store(":memory:"), notifier)
+    engine = Engine(deployed, vault, RulesRisk(PayeeIntel(deployed, vault), vault), None, Store(":memory:"), notifier)
     try:
         account, created = await engine.start("sandbox:priya", "Priya")
         assert created and (await vault.get_user(account.account_id)) is not None

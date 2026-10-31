@@ -19,6 +19,7 @@ from ..chain import errors as E
 from ..chain.errors import VaultError
 from ..interfaces import VaultPort
 from ..models import Hold, TxResult, VaultConfig, Verdict
+from ..risk.evidence import build_evidence
 
 log = logging.getLogger(__name__)
 
@@ -45,17 +46,6 @@ def evidence_digest(evidence_json: str) -> str:
     return hashlib.sha256(evidence_json.encode()).hexdigest()
 
 
-def _load_builder() -> EvidenceBuilder:
-    try:
-        from ..risk.evidence import build_evidence
-    except ImportError:
-        return fallback_evidence
-    except Exception:  # a broken risk module must not stop the brake
-        log.exception("holdup.risk.evidence failed to import; using the built-in evidence format")
-        return fallback_evidence
-    return build_evidence
-
-
 class Oracle:
     """Applies verdicts to holds through ``extend_hold``. Safe to call twice."""
 
@@ -72,7 +62,7 @@ class Oracle:
         self.store = store
         self.clock = clock
         self.network = network
-        self._builder = evidence_builder or _load_builder()
+        self._builder = evidence_builder or build_evidence
         self._config: VaultConfig | None = None
         self._locks: dict[int, asyncio.Lock] = {}
         self._applied: dict[str, OracleResult] = {}
@@ -144,18 +134,21 @@ class Oracle:
         return self._config
 
     def _evidence(self, hold: Hold, verdict: Verdict, now: int) -> str:
+        """The evidence JSON, decided at chain time ``now``; a failing builder must not stop the brake."""
         prompts = {s.step: s.prompt_sha256[:16] for s in verdict.steps if s.prompt_sha256}
-        kwargs = {"network": self.network, "vault_id": self.vault.vault_id, "prompt_versions": prompts}
+        kwargs: dict[str, Any] = {
+            "network": self.network,
+            "vault_id": self.vault.vault_id,
+            "prompt_versions": prompts,
+            "decided_ms": now,
+        }
         try:
-            if self._builder is fallback_evidence:
-                text = fallback_evidence(hold, verdict, **kwargs, decided_ms=now)
-            else:
-                text = self._builder(hold, verdict, **kwargs)
+            text = self._builder(hold, verdict, **kwargs)
         except Exception:
             log.exception("evidence builder failed for hold %s; using the built-in format", hold.id)
-            text = fallback_evidence(hold, verdict, **kwargs, decided_ms=now)
+            text = fallback_evidence(hold, verdict, **kwargs)
         if len(text.encode()) > MAX_EVIDENCE_BYTES:
-            text = fallback_evidence(hold, verdict, **kwargs, decided_ms=now, compact=True)
+            text = fallback_evidence(hold, verdict, **kwargs, compact=True)
         return text
 
 
@@ -193,7 +186,7 @@ def fallback_evidence(
     decided_ms: int | None = None,
     compact: bool = False,
 ) -> str:
-    """Canonical evidence JSON in the shared schema, used when the risk package has none.
+    """Canonical evidence JSON in the shared schema, used when the evidence builder fails.
 
     Sorted keys, compact separators, no raw message text, at most 4096 bytes.
     """

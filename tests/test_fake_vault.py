@@ -54,7 +54,7 @@ def clock() -> SimClock:
 def vault(clock: SimClock) -> HoldVaultModel:
     model = HoldVaultModel(make_config(), vault_id=VAULT, clock=clock)
     for account in (ALICE, BOB, GUARD):
-        model.deposit_near_for(ALICE, account, FEE + 20 * YOCTO)
+        model.deposit_near_for(account, account, FEE + 20 * YOCTO)
         model.ft_on_transfer(TOKEN, "treasury.testnet", 1_000 * HUSD, json.dumps({"credit_to": account}))
     model.world.create(SHOP, near=YOCTO, created_ms=clock())
     model.take_events()
@@ -110,20 +110,32 @@ def test_invalid_configs_are_rejected(clock: SimClock, overrides: dict[str, obje
 
 def test_registration_keeps_the_fee_and_credits_the_rest(clock: SimClock) -> None:
     model = HoldVaultModel(make_config(), vault_id=VAULT, clock=clock)
-    assert code_of(lambda: model.deposit_near_for(ALICE, BOB, FEE - 1)) == E.E_FEE_TOO_LOW
+    assert code_of(lambda: model.deposit_near_for(BOB, BOB, FEE - 1)) == E.E_FEE_TOO_LOW
     assert not model.is_registered(BOB)
 
-    assert model.deposit_near_for(ALICE, BOB, FEE + 5 * YOCTO) == str(5 * YOCTO)
+    assert model.deposit_near_for(BOB, BOB, FEE + 5 * YOCTO) == str(5 * YOCTO)
     names = [e["event"] for e in model.take_events()]
     assert names == ["user_registered", "deposit"]
-    assert model.deposit_near_for(ALICE, BOB, YOCTO) == str(6 * YOCTO)
+    assert model.deposit_near_for(ALICE, BOB, YOCTO) == str(6 * YOCTO)  # anyone may top up a registered account
     deposit = model.take_events()[0]["data"][0]
     assert deposit == {"account_id": BOB, "asset": NEAR, "amount": str(YOCTO), "balance": str(6 * YOCTO)}
     assert model.near_liabilities == 6 * YOCTO
 
-    model.deposit_near_for(ALICE, GUARD, FEE)
+    model.deposit_near_for(GUARD, GUARD, FEE)
     assert [e["event"] for e in model.take_events()] == ["user_registered"]
     assert balance(model, GUARD) == 0
+
+
+def test_only_the_account_or_its_parent_can_register_it(clock: SimClock) -> None:
+    model = HoldVaultModel(make_config(), vault_id=VAULT, clock=clock)
+    user = "u1.holdup.testnet"
+    # Checked before the fee, as the contract does: a stranger is refused whatever it attaches.
+    assert code_of(lambda: model.deposit_near_for(ALICE, user, FEE + YOCTO)) == E.E_NOT_REGISTERED
+    assert code_of(lambda: model.deposit_near_for("testnet", user, FEE + YOCTO)) == E.E_NOT_REGISTERED
+    assert code_of(lambda: model.deposit_near_for(ALICE, BOB, FEE - 1)) == E.E_NOT_REGISTERED
+    assert not model.is_registered(user) and model.take_events() == []
+    assert model.deposit_near_for("holdup.testnet", user, FEE + YOCTO) == str(YOCTO)  # the parent (treasury)
+    assert model.is_registered(user)
 
 
 def test_token_deposits_need_an_allowed_token_and_a_registered_target(vault: HoldVaultModel) -> None:
@@ -473,7 +485,7 @@ def test_views_for_unknown_accounts(vault: HoldVaultModel) -> None:
 
 def test_registration_fails_when_the_reserve_cannot_cover_storage(clock: SimClock) -> None:
     model = HoldVaultModel(make_config(), vault_id=VAULT, clock=clock, reserve=YOCTO)
-    assert code_of(lambda: model.deposit_near_for(ALICE, BOB, FEE)) == E.E_INSOLVENT
+    assert code_of(lambda: model.deposit_near_for(BOB, BOB, FEE)) == E.E_INSOLVENT
     assert not model.is_registered(BOB)
 
 
@@ -508,7 +520,7 @@ def test_release_time_only_grows_and_money_is_conserved(ops: list[tuple[str, int
     clock = SimClock()
     vault = HoldVaultModel(make_config(), vault_id=VAULT, clock=clock)
     for account in (ALICE, BOB):
-        vault.deposit_near_for(ALICE, account, FEE + 20 * YOCTO)
+        vault.deposit_near_for(account, account, FEE + 20 * YOCTO)
     vault.world.create(SHOP, near=0, created_ms=clock())
     deposited = vault.near_liabilities
     seen: dict[int, int] = {}

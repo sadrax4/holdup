@@ -16,7 +16,8 @@ from holdup.models import NEAR, Finding, Hold, HoldStatus, Reason, StepRecord, V
 from holdup.store import Store
 from holdup.workers.keeper import Keeper
 from holdup.workers.oracle import Oracle, fallback_evidence
-from holdup.workers.runtime import offline_settings, offline_vault
+from holdup.config import offline_settings
+from holdup.runtime import offline_vault
 
 HOUR = 3_600_000
 MAX_HOLD = 72 * HOUR

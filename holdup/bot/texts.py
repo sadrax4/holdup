@@ -61,7 +61,9 @@ def steps_summary(steps: Sequence[StepRecord]) -> str:
         label = step.step if not step.model else f"{step.step} {short_model(step.model)}"
         if step.fallback:
             label += " (fallback)"
-        if step.error:
+        if step.error == "guardrail_violation":
+            label += " (blocked the text)"  # the guardrail doing its job, not a failure
+        elif step.error:
             label += " (failed)"
         if label not in parts:
             parts.append(label)
@@ -161,7 +163,7 @@ def why_text(settings: Settings, view: WhyView, now_ms: int, *, page: str = "", 
     status, _ = hold_status(hold, now_ms)
     lines = [
         f"Payment #{hold.id}: {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee}",
-        status.capitalize() + ".",
+        status[:1].upper() + status[1:] + ".",  # str.capitalize() would also lowercase "Nov" and "UTC"
     ]
     findings = [f for f in view.findings if f.reason]
     if findings:

@@ -98,6 +98,11 @@ def _fail(code: str, message: str) -> VaultError:
     return VaultError(code, message)
 
 
+def _is_self_or_parent(caller: str, account_id: str) -> bool:
+    """Whether ``caller`` is ``account_id`` itself or the account that created it."""
+    return caller == account_id or ("." in account_id and account_id.split(".", 1)[1] == caller)
+
+
 def _require_account_id(value: Any, what: str) -> str:
     if not isinstance(value, str) or not is_valid_account_id(value):
         raise _fail(E.E_BAD_ARGS, f"{what} is not a valid account id: {value!r}")
@@ -301,12 +306,21 @@ class HoldVaultModel:
     # ------------------------------------------------------------------
 
     def deposit_near_for(self, predecessor: str, account_id: str, attached: int) -> str:
-        """Payable. Registers ``account_id`` on its first deposit; the fee stays as reserve."""
+        """Payable. Registers ``account_id`` on its first deposit; the fee stays as reserve.
+
+        Anyone may deposit for a registered account, but only the account itself or its
+        parent may register it: registration turns later payouts to it into vault credits.
+        """
         _require_account_id(account_id, "account_id")
         now = self.now()
         fee = self.config.registration_fee
         newly_registered = account_id not in self.users
         if newly_registered:
+            if not _is_self_or_parent(predecessor, account_id):
+                raise _fail(
+                    E.E_NOT_REGISTERED,
+                    f"{account_id} is not registered; only it or its parent account can register it",
+                )
             if attached < fee:
                 raise _fail(E.E_FEE_TOO_LOW, f"registration needs at least {fee} yoctoNEAR")
             credit = attached - fee

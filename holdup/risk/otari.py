@@ -740,6 +740,7 @@ class OtariClient:
             attempts = 1
         record.model = model
         record.provider = headers.get("otari-provider")
+        record.served_model = headers.get("otari-model")
         record.fallback = fell_back or headers.get("otari-fallback") == "true"
         record.attempts = (record.attempts or 0) + attempts
         record.request_id = headers.get("otari-request-id") or record.request_id

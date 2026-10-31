@@ -13,7 +13,7 @@ from holdup.config import Settings
 from holdup.risk.otari import INVESTIGATOR_MODEL, OtariClient, OtariRequestError
 from holdup.risk.prompts.contracts import InvestigatorResult, ReviewerResult, TriageResult, VisionResult
 from holdup.risk.replay import FIXTURES_DIR, ReplayTransport, available_scenarios, replay_client
-from holdup.workers.runtime import ScenarioResolver
+from holdup.runtime import ScenarioResolver
 
 REQUIRED = {
     "hero",

@@ -106,13 +106,15 @@ async def test_fixture_history_adds_to_what_the_vault_records(vault: TinyVault) 
     assert (await intel.profile("northwindpaper.testnet"))["age_hours"] == 2 * 365 * 24
 
 
-def test_the_fixture_table_matches_the_offline_world() -> None:
-    from holdup.workers.runtime import OFFLINE_PAYEES
+def test_the_offline_world_is_built_from_the_fixture_table() -> None:
+    from holdup.chain.fake import SimClock
+    from holdup.config import offline_settings
+    from holdup.runtime import offline_vault
 
-    table = load_payee_fixtures()["payees"]
-    for account, facts in OFFLINE_PAYEES.items():
-        assert table[account]["age_hours"] == facts["age_hours"], account
-        assert table[account]["distinct_inbound_senders_24h"] == facts["distinct_inbound_senders_24h"], account
+    clock = SimClock()
+    vault = offline_vault(offline_settings(), clock)
+    for account, facts in load_payee_fixtures()["payees"].items():
+        assert vault.account_created_ms(account) == clock() - int(facts["age_hours"] * HOUR), account
 
 
 async def test_accounts_outside_the_table_come_from_the_chain(vault: TinyVault) -> None:

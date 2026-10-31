@@ -1,7 +1,8 @@
-"""``holdup`` command line: demo, attack, prove, verify-deploy, deploy, chat, keeper, serve.
+"""``holdup`` command line: demo, attack, prove, verify-deploy, deploy, chat, keeper, serve, probe.
 
 Commands run offline (in memory, nothing sent anywhere) unless a network is
-chosen with ``--network`` or ``HOLDUP_NETWORK``.
+chosen with ``--network`` or ``HOLDUP_NETWORK``. Every command gets its vault,
+checks, store and engine from :func:`holdup.runtime.build_runtime`.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ import os
 import re
 import sys
 from collections.abc import Callable, Sequence
-from dataclasses import replace
 from typing import Any
 
 from .config import Settings, load_settings
@@ -26,21 +26,47 @@ log = logging.getLogger("holdup")
 
 NETWORKS = ("sandbox", "testnet")
 
+# What a command on a real network needs, and why; `holdup deploy` writes all of it to
+# .holdup/credentials.json, and the matching environment variables override that file.
+LIVE_NEEDS = (
+    ("secret", "HOLDUP_SECRET", "derives every user's NEAR account and key; generate it once and keep it"),
+    ("treasury_private_key", "HOLDUP_TREASURY_KEY", "full-access key of the root account, which onboards users"),
+    ("oracle_private_key", "HOLDUP_ORACLE_KEY", "the oracle's only key, limited to extend_hold on the vault"),
+    ("keeper_private_key", "HOLDUP_KEEPER_KEY", "the keeper's only key, limited to release on the vault"),
+    ("husd_token", "HOLDUP_HUSD_TOKEN", "the HUSD demo token that new users are funded with"),
+)
+
 
 def _settings_for(args: argparse.Namespace) -> Settings:
-    settings = load_settings()
-    network = getattr(args, "network", None)
     if getattr(args, "offline", False):
-        return replace(settings, network="offline")
-    if network and network != settings.network:
-        from .config import RPC_URLS
-
-        settings = replace(settings, network=network, rpc_url=RPC_URLS.get(network, settings.rpc_url))
-    return settings
+        return load_settings(network="offline")
+    return load_settings(network=getattr(args, "network", None))
 
 
 def _offline(settings: Settings) -> bool:
     return settings.network == "offline"
+
+
+def missing_credentials(settings: Settings) -> list[str]:
+    """What a live command still needs, as ``NAME (why)`` lines; empty when nothing is missing."""
+    return [f"{name} ({why})" for attr, name, why in LIVE_NEEDS if not getattr(settings, attr)]
+
+
+def _explain_missing(settings: Settings, command: str) -> int:
+    """Print what is missing for ``command`` on a real network and return 2, or return 0 when ready."""
+    missing = missing_credentials(settings)
+    if not missing:
+        return 0
+    print(
+        f"`holdup {command}` on {settings.network} signs real transactions and needs a deployment.\n"
+        f"Run `holdup deploy --network {settings.network} --profile demo` first: it needs HOLDUP_ROOT_ACCOUNT "
+        "and HOLDUP_TREASURY_KEY (the root account and its full-access key) and writes "
+        ".holdup/credentials.json. Still missing:",
+        file=sys.stderr,
+    )
+    for line in missing:
+        print(f"  {line}", file=sys.stderr)
+    return 2
 
 
 # ----------------------------------------------------------------------
@@ -48,48 +74,42 @@ def _offline(settings: Settings) -> bool:
 # ----------------------------------------------------------------------
 
 
-def cmd_demo(args: argparse.Namespace) -> int:
-    from .demo import Transcript, TranscriptNotifier, run_demo, run_offline_demo
-    from .workers.runtime import live_runtime
+def _run_story(args: argparse.Namespace, offline_story: Callable[..., Any], story: Callable[..., Any]) -> int:
+    from .demo import Transcript, TranscriptNotifier
+    from .runtime import build_runtime
 
     settings = _settings_for(args)
     if _offline(settings):
-        asyncio.run(run_offline_demo(builtin_risk=args.builtin_risk))
+        asyncio.run(offline_story(rules_only=args.rules_only))
         return 0
+    if code := _explain_missing(settings, args.command):
+        return code
+    if args.rules_only:
+        settings.otari_mode = "off"
 
     async def live() -> None:
         transcript = Transcript()
         notifier = TranscriptNotifier(transcript)
-        runtime = live_runtime(settings, notifier)
+        runtime = build_runtime(settings, notifier=notifier, web=False)
         try:
-            await run_demo(runtime, transcript, notifier)
+            await story(runtime, transcript, notifier)
         finally:
-            await runtime.vault.aclose()
+            await runtime.aclose()
 
     asyncio.run(live())
     return 0
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    from .demo import run_demo, run_offline_demo
+
+    return _run_story(args, run_offline_demo, run_demo)
 
 
 def cmd_attack(args: argparse.Namespace) -> int:
-    from .demo import Transcript, TranscriptNotifier, run_attack, run_offline_attack
-    from .workers.runtime import live_runtime
+    from .demo import run_attack, run_offline_attack
 
-    settings = _settings_for(args)
-    if _offline(settings):
-        asyncio.run(run_offline_attack(builtin_risk=args.builtin_risk))
-        return 0
-
-    async def live() -> None:
-        transcript = Transcript()
-        notifier = TranscriptNotifier(transcript)
-        runtime = live_runtime(settings, notifier)
-        try:
-            await run_attack(runtime, transcript, notifier)
-        finally:
-            await runtime.vault.aclose()
-
-    asyncio.run(live())
-    return 0
+    return _run_story(args, run_offline_attack, run_attack)
 
 
 # ----------------------------------------------------------------------
@@ -104,15 +124,21 @@ def _print_checks(rows: Sequence[tuple[bool, str, str]], *, simulated: bool) -> 
         print(f"[{'ok' if ok else 'FAIL'}] {name}: {text}")
 
 
+def _offline_runtime(settings: Settings) -> Any:
+    """The in-memory world on simulated time, without the web app."""
+    from .chain.fake import SimClock
+    from .runtime import build_runtime
+
+    return build_runtime(settings, clock=SimClock(), web=False)
+
+
 def cmd_prove(args: argparse.Namespace) -> int:
     from .chain.keys import derive_user
     from .chain.prove import prove, prove_fake
-    from .demo import Transcript, TranscriptNotifier
-    from .workers.runtime import offline_runtime
 
     settings = _settings_for(args)
     if _offline(settings):
-        runtime = offline_runtime(TranscriptNotifier(Transcript(None)))
+        runtime = _offline_runtime(settings)
         user = runtime.engine.account_for("demo:priya")
         asyncio.run(runtime.engine.start("demo:priya", "Priya"))
         report = prove_fake(runtime.fake, runtime.settings, user=user)
@@ -134,12 +160,10 @@ def cmd_prove(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     from .chain.verify import verify_deploy, verify_fake
-    from .demo import Transcript, TranscriptNotifier
-    from .workers.runtime import offline_runtime
 
     settings = _settings_for(args)
     if _offline(settings):
-        runtime = offline_runtime(TranscriptNotifier(Transcript(None)))
+        runtime = _offline_runtime(settings)
         report = verify_fake(runtime.fake, runtime.settings)
     else:
         report = asyncio.run(verify_deploy(settings))
@@ -154,17 +178,28 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_deploy(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
     from .chain.deploy import deploy
 
-    base = load_settings()
+    # Settings of the target network: never the offline world's (its secret is public).
+    base = load_settings(network=args.network)
+    credentials = Path(os.environ.get("HOLDUP_CREDENTIALS") or ".holdup/credentials.json")
     data = asyncio.run(
-        deploy(base, network=args.network, profile=args.profile, root=args.root, reserve_near=args.reserve)
+        deploy(
+            base,
+            network=args.network,
+            profile=args.profile,
+            root=args.root,
+            reserve_near=args.reserve,
+            credentials_path=credentials,
+        )
     )
     print(f"Deployed to {data['network']}: vault {data['vault_account']}, oracle {data['oracle_accounts'][0]}, "
           f"keeper {data['keeper_account']}, token {data['husd_token']}.")
     for label, tx_hash in data["deployment"]["transactions"]:
         print(f"  {label}: {tx_hash}")
-    print("Credentials written to .holdup/credentials.json. Run `holdup verify-deploy` next.")
+    print(f"Credentials written to {credentials}. Run `holdup verify-deploy --network {data['network']}` next.")
     return 0
 
 
@@ -266,8 +301,10 @@ class Console:
             elif word == "wait":
                 await self._wait(float(rest or "0"))
             elif word == "scenario":
-                if self.runtime.risk.resolver is not None:
-                    self.runtime.risk.resolver.current = rest or None
+                if self.runtime.resolver is None:
+                    self.out("Scenarios only exist when recorded AI responses are replayed (OTARI_MODE=replay).")
+                else:
+                    self.runtime.resolver.current = rest or None
                     self.out(f"Replaying the {rest or 'automatic'} scenario.")
             else:
                 self.out("Unknown command. Type help.")
@@ -308,25 +345,32 @@ class Console:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
+    from .chain.fake import SimClock
     from .demo import Transcript, TranscriptNotifier
-    from .workers.runtime import live_runtime, offline_runtime
+    from .runtime import build_runtime
 
     settings = _settings_for(args)
+    if not _offline(settings) and (code := _explain_missing(settings, "chat")):
+        return code
     notifier = TranscriptNotifier(Transcript())
-    runtime = offline_runtime(notifier) if _offline(settings) else live_runtime(settings, notifier)
+    clock = SimClock() if _offline(settings) else None
+    runtime = build_runtime(settings, notifier=notifier, clock=clock, web=False)
 
     async def loop() -> None:
         console = Console(runtime, notifier)
         where = "offline, in memory" if _offline(settings) else settings.network
-        print(f"HoldUp console ({where}; checks: {runtime.risk.label}). Type help.")
-        await console.login(args.name)
-        while True:
-            try:
-                line = await asyncio.to_thread(input, "> ")
-            except EOFError:
-                break
-            if not await console.handle(line):
-                break
+        print(f"HoldUp console ({where}; checks: {runtime.checks}). Type help.")
+        try:
+            await console.login(args.name)
+            while True:
+                try:
+                    line = await asyncio.to_thread(input, "> ")
+                except EOFError:
+                    break
+                if not await console.handle(line):
+                    break
+        finally:
+            await runtime.aclose()
 
     asyncio.run(loop())
     return 0
@@ -338,102 +382,61 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def cmd_keeper(args: argparse.Namespace) -> int:
-    from .workers.runtime import LogNotifier, live_runtime
+    from .runtime import build_runtime
 
     settings = _settings_for(args)
     if _offline(settings):
         print("The keeper releases holds on a real network; offline holds live in memory. "
               "Use `holdup chat` and its wait command to see releases offline.")
         return 2
-    runtime = live_runtime(settings, LogNotifier())
+    if code := _explain_missing(settings, "keeper"):
+        return code
+    runtime = build_runtime(settings, web=False)
     print(f"Keeper running on {settings.network} every {args.interval} s (Ctrl-C to stop).")
+
+    async def run() -> None:
+        try:
+            await runtime.engine.make_keeper(args.interval).run()
+        finally:
+            await runtime.aclose()
+
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(runtime.engine.make_keeper(args.interval).run())
+        asyncio.run(run())
     return 0
-
-
-def _channel_notifier(bot_app: Any) -> Any:
-    """Telegram and web-console delivery, when those packages are present."""
-    from .workers.runtime import LogNotifier
-
-    try:
-        from .bot.notify import RoutingNotifier, TelegramNotifier
-        from .web.console import ConsoleNotifier
-
-        routes: dict[str, Any] = {"web": ConsoleNotifier()}
-        if bot_app is not None:
-            routes["tg"] = TelegramNotifier(bot_app.bot)
-        return RoutingNotifier(routes)
-    except Exception as exc:
-        log.warning("chat channels unavailable (%s); notifications go to the log", exc)
-        return LogNotifier()
 
 
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
-    from .workers.runtime import LogNotifier, live_runtime, offline_runtime
-
-    try:
-        from .web.app import create_app
-    except ImportError as exc:
-        print(f"The web app is not available ({exc}).", file=sys.stderr)
-        return 2
+    from .runtime import build_runtime
 
     settings = _settings_for(args)
-    base = settings.public_base_url
-    if _offline(settings):
-        runtime = offline_runtime(LogNotifier(), clock=_wall_clock(), public_base_url=base)
-    else:
-        runtime = live_runtime(settings, LogNotifier(), mcp_url=f"{base}/mcp", guard_url=f"{base}/validate")
-    engine = runtime.engine
-
-    bot_app = None
-    if runtime.settings.telegram_bot_token:
-        from .bot.app import build_bot
-
-        bot_app = build_bot(runtime.settings, engine)
-    engine.notifier = _channel_notifier(bot_app)
-
-    mcp = guard_router = None
-    try:
-        from .mcp_server import build_mcp
-
-        mcp = build_mcp(runtime.settings, runtime.vault, runtime.risk.intel, runtime.store, runtime.store.record_mcp_call)
-    except Exception as exc:
-        log.warning("MCP server not mounted (%s)", exc)
-    try:
-        from .guard import build_router
-
-        classifier = None
-        if runtime.settings.otari_mode == "live" and runtime.risk.client is not None:
-            from .risk.guard_models import make_classifier
-
-            classifier = make_classifier(runtime.risk.client)
-        guard_router = build_router(runtime.settings, classifier)
-    except Exception as exc:
-        log.warning("guardrail endpoint not mounted (%s)", exc)
-
-    app = create_app(runtime.settings, engine, runtime.vault, runtime.store, bot_app=bot_app, mcp=mcp, guard_router=guard_router)
+    if not _offline(settings) and (code := _explain_missing(settings, "serve")):
+        return code
+    runtime = build_runtime(settings)
+    where = "offline, in-memory vault" if _offline(settings) else settings.network
+    bot = "on" if runtime.bot is not None else "off (TELEGRAM_BOT_TOKEN is not set)"
+    print(f"HoldUp on http://{args.host}:{args.port} ({where}; checks: {runtime.checks}; Telegram {bot}).")
 
     async def run() -> None:
-        server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="info"))
+        server = uvicorn.Server(uvicorn.Config(runtime.app, host=args.host, port=args.port, log_level="info"))
         stop = asyncio.Event()
-        keeper = asyncio.create_task(engine.make_keeper(args.interval).run(stop))
+        keeper = asyncio.create_task(runtime.engine.make_keeper(args.interval).run(stop))
         try:
             await server.serve()
         finally:
             stop.set()
             await keeper
+            await runtime.aclose()
 
     asyncio.run(run())
     return 0
 
 
-def _wall_clock() -> Callable[[], int]:
-    from .chain.fake import wall_clock_ms
+def cmd_probe(args: argparse.Namespace) -> int:
+    from .risk.probe import main as probe_main
 
-    return wall_clock_ms
+    return probe_main(args.probe_args)
 
 
 # ----------------------------------------------------------------------
@@ -453,11 +456,11 @@ def build_parser() -> argparse.ArgumentParser:
         return p
 
     demo = with_network(sub.add_parser("demo", help="run the scripted story"))
-    demo.add_argument("--builtin-risk", action="store_true", help="use the built-in rules only")
+    demo.add_argument("--rules-only", action="store_true", help="deterministic rules only, no AI step")
     demo.set_defaults(func=cmd_demo)
 
     attack = with_network(sub.add_parser("attack", help="three attacks and why they fail"))
-    attack.add_argument("--builtin-risk", action="store_true", help="use the built-in rules only")
+    attack.add_argument("--rules-only", action="store_true", help="deterministic rules only, no AI step")
     attack.set_defaults(func=cmd_attack)
 
     prove = with_network(sub.add_parser("prove", help="show that the oracle and user keys cannot move money"))
@@ -488,11 +491,20 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--interval", type=float, default=5.0, help="keeper interval in seconds")
     serve.set_defaults(func=cmd_serve)
+
+    # Everything after `probe` goes to holdup.risk.probe (try `holdup probe --help`).
+    probe = sub.add_parser("probe", help="live checks of the Otari gateway (needs OTARI_API_KEY)", add_help=False)
+    probe.set_defaults(func=cmd_probe, probe_args=[])
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extra = parser.parse_known_args(argv)
+    if args.command == "probe":
+        args.probe_args = extra
+    elif extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",

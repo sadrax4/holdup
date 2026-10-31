@@ -10,16 +10,15 @@ import time
 from pathlib import Path
 
 from holdup.cli import Console, main
-from holdup.demo import Transcript, TranscriptNotifier, run_offline_attack, run_offline_demo
+from holdup.demo import Transcript, TranscriptNotifier, offline_demo_runtime, run_offline_attack, run_offline_demo
 from holdup.models import HoldStatus, Reason
-from holdup.workers.runtime import offline_runtime
 
 REPO = Path(__file__).resolve().parents[1]
 
 
 async def test_the_offline_story_runs_end_to_end() -> None:
     started = time.monotonic()
-    result = await run_offline_demo(out=None, builtin_risk=True)
+    result = await run_offline_demo(out=None, rules_only=True)
     assert time.monotonic() - started < 60
     vault = result.runtime.vault
     status = {name: (await vault.get_hold(hold_id)) for name, hold_id in result.holds.items()}
@@ -39,14 +38,47 @@ async def test_the_offline_story_runs_end_to_end() -> None:
     assert tx_mentions and all(mark for mark in tx_mentions)  # every transaction id is marked simulated
 
 
-async def test_the_demo_runs_with_whatever_risk_package_is_installed() -> None:
+async def test_the_demo_with_replayed_ai_tells_the_whole_story_in_order() -> None:
     result = await run_offline_demo(out=None)
-    assert "Summary" in result.transcript.text
-    assert result.holds["benign"] is not None
+    text = result.transcript.text
+    order = [
+        "== 1. Priya, her guardian Sam, and a scary DM ==",
+        "Payment held: 50 HUSD to safe-wallet-77.testnet.",
+        "Quick checks found:",
+        "before any model was asked (0 model requests",
+        "Brakes on - held until 5 Nov",
+        'Priya taps "Why?".',
+        'Priya taps "Cancel & refund".',
+        "Cancelled. 50 HUSD is back in your HoldUp balance",
+        "== 2. A changed invoice at a small business ==",
+        "Your guardian Omar cancelled your payment",
+        "== 3. Everyday payments still work ==",
+        "Paid instantly: 20 HUSD to mum.testnet",
+        "Released: 12.5 HUSD paid to ravi.testnet.",
+        "== 4. The next senders to the reported wallet are braked by the rules first ==",
+        "Other senders cancelled payments to this payee",
+        "no model was asked",
+        "== Summary ==",
+    ]
+    positions = [text.find(phrase) for phrase in order]
+    assert -1 not in positions, [p for p, i in zip(order, positions, strict=True) if i == -1]
+    assert positions == sorted(positions)
+    hero = text[: text.find("== 2.")]
+    for tag in ("[triage gpt-oss-20b]", "[MCP near-intel]", "[web fetch]", "[web search, 2 sources]",
+                "[code execution]", "[guardrail]", "[web search, 2 sources] cites: https://"):
+        assert tag in hero, tag
+    invoice = text[text.find("== 2."): text.find("== 3.")]
+    assert "[reviewer deepseek-v4.1-flash-1017]" in invoice and "Independent reviewer model also flagged it" in invoice
+    assert "line items add up to 1,150.00 but the stated total is 1,250.00" in invoice
+    vault = result.runtime.vault
+    reported = await vault.get_hold(result.holds["reported"])
+    assert reported.reason_bits & Reason.PAYEE_REPORTED
+    assert result.runtime.model_requests(result.holds["reported"]) == []
+    assert "DOES NOT MATCH" not in text
 
 
 async def test_the_attack_walkthrough_shows_three_failures() -> None:
-    result = await run_offline_attack(out=None, builtin_risk=True)
+    result = await run_offline_attack(out=None, rules_only=True)
     text = result.transcript.text
     assert "NOT REFUSED" not in text
     assert "oracle key, call send on the vault: refused with MethodNameMismatch (simulated)" in text
@@ -61,7 +93,7 @@ async def test_the_console_drives_the_same_engine() -> None:
     output: list[str] = []
     transcript = Transcript(None)
     notifier = TranscriptNotifier(transcript)
-    runtime = offline_runtime(notifier, builtin_risk=True)
+    runtime = offline_demo_runtime(notifier, rules_only=True)
     console = Console(runtime, notifier, out=output.append)
     await console.login("Priya")
     script = [
@@ -100,7 +132,7 @@ def test_cli_commands_offline(capsys) -> None:  # type: ignore[no-untyped-def]
 
 def test_python_dash_m_holdup_demo_offline() -> None:
     completed = subprocess.run(
-        [sys.executable, "-m", "holdup", "demo", "--offline", "--builtin-risk"],
+        [sys.executable, "-m", "holdup", "demo", "--offline"],
         cwd=REPO, capture_output=True, text=True, timeout=60, check=False,
     )
     assert completed.returncode == 0, completed.stderr

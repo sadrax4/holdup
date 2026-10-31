@@ -3,6 +3,10 @@
 Secrets never live in the repository. `make deploy` writes `.holdup/credentials.json`
 (git-ignored) with the account ids and keys it created; environment variables win
 over that file.
+
+The ``offline`` network is the in-memory world used by the demo, the console and
+the tests: its accounts and its HUSD demo token have fixed names, and its secret
+is public unless ``HOLDUP_SECRET`` is set, because nothing in it is real.
 """
 
 from __future__ import annotations
@@ -16,10 +20,24 @@ from .models import NEAR, AssetInfo
 
 USDC_TESTNET = "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af"
 
+NETWORKS = ("offline", "sandbox", "testnet")
+OTARI_MODES = ("live", "replay", "off")
+
 RPC_URLS = {
     "testnet": "https://rpc.testnet.near.org",
     "sandbox": "http://127.0.0.1:3030",
 }
+DEFAULT_ROOTS = {
+    "testnet": "holdup.testnet",
+    "sandbox": "sandbox",  # the root account of the nearcore sandbox and near-kit's helpers
+}
+
+OFFLINE_ROOT = "holdup.testnet"
+OFFLINE_SECRET = "holdup-offline-demo-secret"
+"""Derives the in-memory world's accounts. Public on purpose; never used on a real network."""
+
+DEMO_NEAR_YOCTO = 2 * 10**24
+DEMO_HUSD_UNITS = 2_000 * 10**6
 EXPLORER_TX = {
     "testnet": "https://testnet.near.rocks/tx/{tx}",
     "sandbox": "",
@@ -93,7 +111,39 @@ def _load_credentials(path: Path) -> dict:
         return {}
 
 
-def load_settings(env: dict[str, str] | None = None, credentials_path: str | None = None) -> Settings:
+def offline_settings(public_base_url: str = "", **overrides: object) -> Settings:
+    """Settings of the in-memory world: fixed accounts, the HUSD demo token, recorded AI answers.
+
+    Nothing here comes from the environment, so tests and the scripted demo always
+    see the same world. ``load_settings(network="offline")`` starts from these.
+    """
+    husd = f"husd.{OFFLINE_ROOT}"
+    values: dict[str, object] = {
+        "network": "offline",
+        "root_account": OFFLINE_ROOT,
+        "vault_account": f"vault.{OFFLINE_ROOT}",
+        "oracle_accounts": [f"oracle.{OFFLINE_ROOT}"],
+        "keeper_account": f"keeper.{OFFLINE_ROOT}",
+        "secret": OFFLINE_SECRET,
+        "husd_token": husd,
+        "otari_mode": "replay",
+        "database_path": ":memory:",
+        "public_base_url": public_base_url.rstrip("/"),
+        "demo_funds": {NEAR: DEMO_NEAR_YOCTO, husd: DEMO_HUSD_UNITS},
+    }
+    values.update(overrides)
+    return Settings(**values)  # type: ignore[arg-type]
+
+
+def load_settings(
+    env: dict[str, str] | None = None, credentials_path: str | None = None, *, network: str | None = None
+) -> Settings:
+    """Settings for ``network``: the argument, else HOLDUP_NETWORK, else the credentials file, else offline.
+
+    For the offline world the credentials file and the NEAR variables are ignored
+    (its accounts are fixed); the web, Telegram, Otari and HOLDUP_SECRET variables
+    still apply.
+    """
     env = dict(os.environ if env is None else env)
     creds_file = Path(credentials_path or env.get("HOLDUP_CREDENTIALS", ".holdup/credentials.json"))
     creds = _load_credentials(creds_file)
@@ -105,11 +155,30 @@ def load_settings(env: dict[str, str] | None = None, credentials_path: str | Non
             return str(creds[key])
         return default
 
-    network = pick("HOLDUP_NETWORK", "network", "offline")
-    root = pick("HOLDUP_ROOT_ACCOUNT", "root_account", "holdup.testnet" if network == "testnet" else "holdup.test.near")
-    oracles = pick("HOLDUP_ORACLE_ACCOUNTS", None, "")
-    oracle_list = [a.strip() for a in oracles.split(",") if a.strip()] or list(creds.get("oracle_accounts", [])) or [f"oracle.{root}"]
+    network = network or pick("HOLDUP_NETWORK", "network", "offline")
+    if network not in NETWORKS:
+        raise ValueError(f"HOLDUP_NETWORK must be one of {', '.join(NETWORKS)} (got {network!r})")
+    otari_mode = pick("OTARI_MODE", None, "live" if env.get("OTARI_API_KEY") else "replay")
+    if otari_mode not in OTARI_MODES:
+        raise ValueError(f"OTARI_MODE must be one of {', '.join(OTARI_MODES)} (got {otari_mode!r})")
+    channels = {
+        "telegram_bot_token": pick("TELEGRAM_BOT_TOKEN"),
+        "telegram_webhook_secret": pick("TELEGRAM_WEBHOOK_SECRET"),
+        "public_base_url": pick("PUBLIC_BASE_URL", None, "http://127.0.0.1:8000").rstrip("/"),
+        "otari_api_key": pick("OTARI_API_KEY"),
+        "otari_base_url": pick("OTARI_BASE_URL"),
+        "otari_mode": otari_mode,
+    }
+    if network == "offline":
+        return offline_settings(secret=env.get("HOLDUP_SECRET") or OFFLINE_SECRET, **channels)
 
+    root = pick("HOLDUP_ROOT_ACCOUNT", "root_account", DEFAULT_ROOTS[network])
+    oracles = pick("HOLDUP_ORACLE_ACCOUNTS", None, "")
+    oracle_list = (
+        [a.strip() for a in oracles.split(",") if a.strip()]
+        or list(creds.get("oracle_accounts", []))
+        or [f"oracle.{root}"]
+    )
     s = Settings(
         network=network,
         rpc_url=pick("NEAR_RPC_URL", "rpc_url", RPC_URLS.get(network, "")),
@@ -123,16 +192,11 @@ def load_settings(env: dict[str, str] | None = None, credentials_path: str | Non
         secret=pick("HOLDUP_SECRET", "secret"),
         usdc_token=pick("HOLDUP_USDC_TOKEN", "usdc_token", USDC_TESTNET if network == "testnet" else "") or None,
         husd_token=pick("HOLDUP_HUSD_TOKEN", "husd_token", "") or None,
-        telegram_bot_token=pick("TELEGRAM_BOT_TOKEN"),
-        telegram_webhook_secret=pick("TELEGRAM_WEBHOOK_SECRET"),
-        public_base_url=pick("PUBLIC_BASE_URL", None, "http://127.0.0.1:8000").rstrip("/"),
-        otari_api_key=pick("OTARI_API_KEY"),
-        otari_base_url=pick("OTARI_BASE_URL"),
-        otari_mode=pick("OTARI_MODE", None, "live" if env.get("OTARI_API_KEY") else "replay"),
         database_path=pick("HOLDUP_DB", None, ".holdup/holdup.sqlite3"),
+        **channels,  # type: ignore[arg-type]
     )
-    funds: dict[str, int] = {NEAR: int(pick("HOLDUP_DEMO_NEAR_YOCTO", None, str(2 * 10**24)))}
+    funds: dict[str, int] = {NEAR: int(pick("HOLDUP_DEMO_NEAR_YOCTO", None, str(DEMO_NEAR_YOCTO)))}
     if s.husd_token:
-        funds[s.husd_token] = int(pick("HOLDUP_DEMO_HUSD", None, str(2_000 * 10**6)))
+        funds[s.husd_token] = int(pick("HOLDUP_DEMO_HUSD", None, str(DEMO_HUSD_UNITS)))
     s.demo_funds = funds
     return s

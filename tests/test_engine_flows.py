@@ -27,7 +27,8 @@ from holdup.models import (
     Verdict,
 )
 from holdup.store import Store
-from holdup.workers.runtime import offline_settings, offline_vault
+from holdup.config import offline_settings
+from holdup.runtime import offline_vault
 
 HOUR = 3_600_000
 HUSD = 10**6

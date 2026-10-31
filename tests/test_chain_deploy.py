@@ -11,16 +11,18 @@ import pytest
 from near import KeyPairSigner, generate_key
 from near.wire import Action
 
+from holdup.chain import deploy as deploy_module
 from holdup.chain.deploy import (
     DeployKeys,
     credentials_for,
+    deploy,
     deploy_settings,
     execute_plan,
     plan_deploy,
     write_credentials,
 )
 from holdup.chain.profiles import PROFILES, config_input, vault_config
-from holdup.config import Settings
+from holdup.config import OFFLINE_SECRET, Settings
 
 ROOT = "sandbox"
 
@@ -138,3 +140,15 @@ def test_credentials_file_is_private(tmp_path: Path) -> None:
     assert saved["vault_account"] == "vault.sandbox" and saved["oracle_accounts"] == ["oracle.sandbox"]
     assert saved["secret"]
     assert "vault_private_key" not in saved  # the vault key is deleted, never saved
+
+
+async def test_a_deployment_never_keeps_the_public_offline_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def no_network(plan: Any, near: Any, root_signer: Any) -> list[tuple[str, str]]:
+        return [(tx.label, "hash") for tx in plan.txs]
+
+    monkeypatch.setattr(deploy_module, "execute_plan", no_network)
+    base = Settings(network="sandbox", root_account=ROOT, secret=OFFLINE_SECRET,
+                    treasury_private_key=generate_key().secret_key)
+    data = await deploy(base, network="sandbox", profile="demo", credentials_path=tmp_path / "credentials.json")
+    assert data["secret"] and data["secret"] != OFFLINE_SECRET
+    assert json.loads((tmp_path / "credentials.json").read_text())["secret"] == data["secret"]

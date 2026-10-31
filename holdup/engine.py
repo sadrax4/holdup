@@ -34,7 +34,7 @@ from .chain import links
 from .chain.errors import VaultError
 from .chain.events import first_item
 from .chain.keys import derive_user
-from .config import Settings
+from .config import OFFLINE_SECRET, Settings
 from .interfaces import Notifier, RiskPort, VaultPort
 from .models import (
     Finding,
@@ -69,9 +69,6 @@ RETRY_MAX_MS = 30 * MINUTE_MS
 CONTEXT_TEXT_MAX = 8_000
 PREVIEW_CHARS = 200
 FAILURE_REASONS = (Reason.AI_UNAVAILABLE, Reason.BUDGET_EXHAUSTED)
-
-# Only the in-memory vault may run without HOLDUP_SECRET; real accounts need a real secret.
-OFFLINE_SECRET = "holdup-offline-demo-secret"
 
 CSV_COLUMNS = [
     "hold_id",
@@ -189,9 +186,12 @@ class Engine:
         self.clock = clock or _wall_clock_ms
         self.oracle = Oracle(vault, store, network=settings.network)
         self.simulated = bool(getattr(vault, "simulated", False))
+        # Only the in-memory vault may run without HOLDUP_SECRET; real accounts need a real secret.
         self._secret = settings.secret or (OFFLINE_SECRET if self.simulated else "")
         if not self._secret:
             raise ValueError("HOLDUP_SECRET is required to derive user accounts on a real network")
+        if self._secret == OFFLINE_SECRET and not self.simulated:
+            raise ValueError("HOLDUP_SECRET is the public offline secret; a real network needs its own")
         self._accounts: dict[str, UserAccount] = {}
         self._contexts: dict[str, _Remembered] = {}
         self._tasks: set[asyncio.Task[Any]] = set()

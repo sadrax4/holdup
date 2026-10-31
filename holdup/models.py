@@ -51,7 +51,7 @@ REASON_LABELS: dict[Reason, str] = {
     Reason.DETAILS_CHANGED: "Payment details were changed by message",
     Reason.PAYEE_REPORTED: "Other senders cancelled payments to this payee",
     Reason.PHISHING_LINK: "Linked page asks for secrets or imitates a login",
-    Reason.PUBLIC_WARNING: "Matches public scam warnings",
+    Reason.PUBLIC_WARNING: "Matches public fraud warnings",
     Reason.LOOKALIKE_PAYEE: "Payee name looks like one of your trusted payees",
     Reason.AMOUNT_MISMATCH: "The numbers in the message do not add up",
     Reason.SECRET_REQUEST: "Asks for a recovery phrase, key or code",
@@ -313,7 +313,7 @@ class Finding:
 @dataclass
 class StepRecord:
     step: str  # "precheck", "triage", "vision", "investigator", "reviewer", "guard"
-    model: str | None = None
+    model: str | None = None  # catalog id that was asked for (after any app-level fallback)
     provider: str | None = None
     fallback: bool | None = None
     attempts: int | None = None
@@ -324,6 +324,7 @@ class StepRecord:
     guardrail: dict[str, Any] | None = None
     error: str | None = None
     prompt_sha256: str | None = None
+    served_model: str | None = None  # the provider's own name for the model (Otari-Model header)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

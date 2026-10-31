@@ -22,7 +22,8 @@ from holdup.chain.verify import (
     verify_fake,
 )
 from holdup.config import Settings
-from holdup.workers.runtime import offline_settings, offline_vault
+from holdup.config import offline_settings
+from holdup.runtime import offline_vault
 
 VAULT = "vault.holdup.testnet"
 ORACLE = "oracle.holdup.testnet"

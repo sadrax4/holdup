@@ -138,6 +138,65 @@ async def _start_bot(bot_app: Application, settings: Settings, stack: AsyncExitS
         log.warning("could not register the Telegram webhook: %s", exc)
 
 
+def install_error_pages(app: FastAPI, templates: Jinja2Templates) -> None:
+    """Friendly HTML error pages for people, JSON errors for API and data routes."""
+
+    def error_response(request: Request, status: int, message: str) -> Response:
+        path = request.url.path
+        if path.startswith(JSON_PREFIXES) or path.endswith((".json", ".csv")):
+            return json_error(status, message)
+        context = {"status": status, "message": message}
+        return templates.TemplateResponse(request, "error.html", context, status_code=status)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        message = str(exc.detail) if exc.status_code < 500 else "Something went wrong on our side."
+        if exc.status_code == 404 and exc.detail == "Not Found" and not request.url.path.endswith(".json"):
+            message = "There is nothing at this address."
+        return error_response(request, exc.status_code, message)
+
+    @app.exception_handler(Exception)
+    async def server_error(request: Request, exc: Exception) -> Response:
+        log.error("%s %s failed", request.method, request.url.path, exc_info=exc)
+        return error_response(request, 500, "Something went wrong on our side. Please try again in a moment.")
+
+
+def webhook_router(settings: Settings, bot_app: Application, state: Any) -> APIRouter:
+    """``POST /tg/<secret>``: Telegram's webhook, feeding the bot's update queue.
+
+    The secret in the path is compared in constant time; Telegram's secret
+    token header, when present, must match it too.
+    """
+    router = APIRouter(include_in_schema=False)
+    expected = settings.telegram_webhook_secret.encode()
+
+    @router.post("/tg/{secret_path}")
+    async def telegram_webhook(secret_path: str, request: Request) -> Response:
+        if not expected or not hmac.compare_digest(secret_path.encode(), expected):
+            raise HTTPException(404, "not found")
+        header = request.headers.get("x-telegram-bot-api-secret-token")
+        if header is not None and not hmac.compare_digest(header.encode(), expected):
+            raise HTTPException(403, "wrong secret token")
+        if not state.telegram_ready:
+            raise HTTPException(503, "the bot is not running")
+        try:
+            update = Update.de_json(await request.json(), bot_app.bot)
+        except Exception as exc:
+            raise HTTPException(400, "not a Telegram update") from exc
+        if update is None:
+            raise HTTPException(400, "not a Telegram update")
+        await bot_app.update_queue.put(update)
+        return Response(status_code=200)
+
+    return router
+
+
+def mount_mcp(app: FastAPI, endpoint: ASGIApp) -> None:
+    """Serve the MCP endpoint at ``/mcp`` and below it: MCP clients do not follow redirects."""
+    app.router.routes.append(Route("/mcp", endpoint, methods=["GET", "POST", "DELETE"]))
+    app.mount("/mcp", endpoint)
+
+
 def create_app(
     settings: Settings,
     engine: Any,
@@ -176,55 +235,11 @@ def create_app(
             yield
 
     app = FastAPI(
-        title="HoldUp",
-        version=__version__,
-        lifespan=lifespan,
-        docs_url=None,
-        redoc_url=None,
-        openapi_url=None,
+        title="HoldUp", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None
     )
     app.state.telegram_ready = False
-    app.state.site = site
-    app.state.console = console
     app.add_middleware(SecurityHeaders)
-
-    def error_response(request: Request, status: int, message: str) -> Response:
-        path = request.url.path
-        if path.startswith(JSON_PREFIXES) or path.endswith((".json", ".csv")):
-            return json_error(status, message)
-        return templates.TemplateResponse(
-            request, "error.html", {"status": status, "message": message}, status_code=status
-        )
-
-    @app.exception_handler(StarletteHTTPException)
-    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
-        message = str(exc.detail) if exc.status_code < 500 else "Something went wrong on our side."
-        if exc.status_code == 404 and exc.detail == "Not Found" and not request.url.path.endswith(".json"):
-            message = "There is nothing at this address."
-        return error_response(request, exc.status_code, message)
-
-    @app.exception_handler(Exception)
-    async def server_error(request: Request, exc: Exception) -> Response:
-        log.error("%s %s failed", request.method, request.url.path, exc_info=exc)
-        return error_response(request, 500, "Something went wrong on our side. Please try again in a moment.")
-
-    async def telegram_webhook(secret_path: str, request: Request) -> Response:
-        expected = settings.telegram_webhook_secret
-        if bot_app is None or not expected or not hmac.compare_digest(secret_path.encode(), expected.encode()):
-            raise HTTPException(404, "not found")
-        header = request.headers.get("x-telegram-bot-api-secret-token")
-        if header is not None and not hmac.compare_digest(header.encode(), expected.encode()):
-            raise HTTPException(403, "wrong secret token")
-        if not app.state.telegram_ready:
-            raise HTTPException(503, "the bot is not running")
-        try:
-            update = Update.de_json(await request.json(), bot_app.bot)
-        except Exception as exc:
-            raise HTTPException(400, "not a Telegram update") from exc
-        if update is None:
-            raise HTTPException(400, "not a Telegram update")
-        await bot_app.update_queue.put(update)
-        return Response(status_code=200)
+    install_error_pages(app, templates)
 
     async def health() -> dict[str, Any]:
         return {
@@ -242,16 +257,14 @@ def create_app(
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     app.add_api_route("/favicon.ico", favicon, methods=["GET"], include_in_schema=False)
+    app.add_api_route("/health", health, methods=["GET"])
     app.include_router(site.router())
     app.include_router(console.router())
     app.include_router(fixtures_router(templates, settings))
-    app.add_api_route("/tg/{secret_path}", telegram_webhook, methods=["POST"], include_in_schema=False)
-    app.add_api_route("/health", health, methods=["GET"])
+    if bot_app is not None:
+        app.include_router(webhook_router(settings, bot_app, app.state))
     if guard_router is not None:
         app.include_router(guard_router)
     if mcp is not None:
-        endpoint = mcp[0]
-        # an exact route for "/mcp" and a mount for "/mcp/...": MCP clients do not follow redirects
-        app.router.routes.append(Route("/mcp", endpoint, methods=["GET", "POST", "DELETE"]))
-        app.mount("/mcp", endpoint)
+        mount_mcp(app, mcp[0])
     return app

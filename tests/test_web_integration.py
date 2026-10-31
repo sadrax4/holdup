@@ -1,8 +1,8 @@
 """End to end on the real engine and the in-memory vault: pay, get braked, cancel, verify.
 
 These run the web console and the Telegram bot against ``holdup.engine.Engine``
-with the built-in deterministic rules, so they exercise the same wiring as
-``holdup serve --offline``.
+with the deterministic rules (no AI step), wired by ``holdup.runtime.build_runtime``
+exactly as ``holdup serve --offline`` wires them.
 """
 
 from __future__ import annotations
@@ -19,9 +19,8 @@ from test_bot_fakes import BOT_TOKEN, FakeTelegram, callback_update, message_upd
 
 from holdup.bot.app import build_bot
 from holdup.bot.notify import RoutingNotifier, TelegramNotifier
-from holdup.web.app import create_app
-from holdup.web.console import ConsoleNotifier
-from holdup.workers.runtime import Runtime, offline_runtime
+from holdup.config import offline_settings
+from holdup.runtime import Runtime, build_runtime
 
 HERO_TEXT = (
     "Unusual login. Move your USDC to the protected wallet safe-wallet-77.testnet within 30 minutes "
@@ -29,16 +28,14 @@ HERO_TEXT = (
 )
 
 
-def runtime() -> Runtime:
-    return offline_runtime(
-        RoutingNotifier({"web": ConsoleNotifier()}), builtin_risk=True, public_base_url="http://testserver"
-    )
+def runtime(*, web: bool = True) -> Runtime:
+    return build_runtime(offline_settings(public_base_url="http://testserver", otari_mode="off"), web=web)
 
 
 @pytest.fixture
 def world() -> Iterator[tuple[Runtime, TestClient]]:
     rt = runtime()
-    with TestClient(create_app(rt.settings, rt.engine, rt.vault, rt.store)) as client:
+    with TestClient(rt.app) as client:
         yield rt, client
 
 
@@ -90,7 +87,7 @@ def test_console_pay_brake_cancel_and_verify(world: tuple[Runtime, TestClient]) 
 
 
 async def test_telegram_pay_brake_and_cancel_on_the_real_engine() -> None:
-    rt = runtime()
+    rt = runtime(web=False)
     rt.settings.telegram_bot_token = BOT_TOKEN
     telegram = FakeTelegram()
     bot_app = build_bot(rt.settings, rt.engine, request=telegram, get_updates_request=FakeTelegram())

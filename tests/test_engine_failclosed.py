@@ -14,7 +14,8 @@ from holdup.chain.fake import FakeVault, SimClock
 from holdup.engine import Engine
 from holdup.models import Finding, Hold, PaymentContext, Reason, Verdict
 from holdup.store import Store
-from holdup.workers.runtime import offline_settings, offline_vault
+from holdup.config import offline_settings
+from holdup.runtime import offline_vault
 
 HOUR = 3_600_000
 MINUTE = 60_000

@@ -41,7 +41,7 @@ from near.keys import load_credentials
 from near.testing import sandbox_signer
 from near.units import Amount, Gas
 
-from ..config import RPC_URLS, Settings
+from ..config import OFFLINE_SECRET, RPC_URLS, Settings
 from ..models import VaultConfig
 from .keys import KEEPER_METHODS, ORACLE_METHODS
 from .profiles import DEMO_PAYEES, PROFILES, config_input, vault_config
@@ -227,6 +227,8 @@ async def deploy(
     credentials_path: Path = DEFAULT_CREDENTIALS,
 ) -> dict[str, Any]:
     """Deploy everything, write the credentials file and return its contents."""
+    if base.secret == OFFLINE_SECRET:  # public; a real deployment gets a fresh secret instead
+        base = replace(base, secret="")
     probe = replace(base, network=network, root_account=root or base.root_account)
     root_signer = root_signer_for(probe)
     settings = deploy_settings(base, network, root or root_signer.account_id)

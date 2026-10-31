@@ -5,7 +5,7 @@ from __future__ import annotations
 from holdup import messages
 from holdup.chain import errors as E
 from holdup.models import NEAR, Finding, Hold, HoldStatus, Reason
-from holdup.workers.runtime import offline_settings
+from holdup.config import offline_settings
 
 NOW = 1_793_610_000_000
 HOUR = 3_600_000

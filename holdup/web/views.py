@@ -280,40 +280,28 @@ def build_timeline(
     simulated: bool,
 ) -> list[TimelineEntry]:
     """Created, each on-chain extension with its reasons, then the outcome (or what happens next)."""
-    by_label: dict[str, list[str]] = {}
+    by_label: dict[str, list[TxLink]] = {}
     for label, tx_hash in txs:
-        by_label.setdefault(label, []).append(tx_hash)
-
-    def first(*labels: str) -> TxLink | None:
-        for label in labels:
-            if by_label.get(label):
-                return tx_link(settings, label, by_label[label][0], simulated=simulated)
-        return None
-
+        by_label.setdefault(label, []).append(tx_link(settings, label, tx_hash, simulated=simulated))
+    send = by_label.get("send", [None])[0]
     amount = fmt_amount(settings, hold.asset, hold.amount)
     if hold.instant:
-        return [
-            TimelineEntry(
-                "Paid instantly",
-                f"{amount} from {hold.sender} to {hold.payee}, a trusted payee within the daily cap.",
-                "ok",
-                hold.created_ms,
-                tx=first("send"),
-            )
-        ]
+        detail = f"{amount} from {hold.sender} to {hold.payee}, a trusted payee within the daily cap."
+        return [TimelineEntry("Paid instantly", detail, "ok", hold.created_ms, tx=send)]
 
-    base_release = hold.created_ms + config.new_payee_hold_ms
-    entries = [
-        TimelineEntry(
-            "Payment held",
-            f"{amount} from {hold.sender} to {hold.payee}. New payees wait {fmt_duration(config.new_payee_hold_ms)}: "
-            f"release at {fmt_utc(base_release, now_ms)}.",
-            "neutral",
-            hold.created_ms,
-            tx=first("send"),
-        )
+    wait = fmt_duration(config.new_payee_hold_ms)
+    release = fmt_utc(hold.created_ms + config.new_payee_hold_ms, now_ms)
+    detail = f"{amount} from {hold.sender} to {hold.payee}. New payees wait {wait}: release at {release}."
+    return [
+        TimelineEntry("Payment held", detail, "neutral", hold.created_ms, tx=send),
+        *_extension_entries(by_label.get("extend", []), evidence_docs),
+        _outcome_entry(settings, hold, config=config, now_ms=now_ms, txs=by_label),
     ]
-    extend_txs = by_label.get("extend", [])
+
+
+def _extension_entries(extend_txs: Sequence[TxLink], evidence_docs: Sequence[tuple[str, str]]) -> list[TimelineEntry]:
+    """One entry per extension, listing only the reasons it added to the earlier ones."""
+    entries = []
     seen: set[Reason] = set()
     for index in range(max(len(extend_txs), len(evidence_docs))):
         document_text, digest = evidence_docs[index] if index < len(evidence_docs) else ("", None)
@@ -326,57 +314,45 @@ def build_timeline(
                 _extension_title(findings, document),
                 "The oracle extended the hold and recorded the reasons and the evidence hash on-chain.",
                 "brake",
-                int(decided) if isinstance(decided, int) else None,
+                decided if isinstance(decided, int) else None,
                 reasons=reason_rows(f for f in findings if f.reason not in seen),
                 confirmed=len(found & seen),
-                tx=tx_link(settings, "extend", extend_txs[index], simulated=simulated)
-                if index < len(extend_txs)
-                else None,
+                tx=extend_txs[index] if index < len(extend_txs) else None,
                 evidence_hash=digest,
             )
         )
         seen |= found
+    return entries
 
+
+def _outcome_entry(
+    settings: Settings, hold: Hold, *, config: VaultConfig, now_ms: int, txs: Mapping[str, list[TxLink]]
+) -> TimelineEntry:
+    """How the hold ended, or what happens next while it is still held."""
+
+    def tx(*labels: str) -> TxLink | None:
+        return next((txs[label][0] for label in labels if txs.get(label)), None)
+
+    amount = fmt_amount(settings, hold.asset, hold.amount)
     if hold.status == HoldStatus.CANCELLED:
         by_guardian = bool(hold.cancelled_by and hold.cancelled_by != hold.sender)
         who = f"the guardian {hold.cancelled_by}" if by_guardian else "the sender"
-        entries.append(
-            TimelineEntry(
-                "Cancelled",
-                f"Cancelled by {who}. {amount} went back to the sender's vault balance.",
-                "muted",
-                hold.settled_ms,
-                tx=first("guardian_cancel" if by_guardian else "cancel", "cancel", "guardian_cancel"),
-            )
-        )
-    elif hold.status == HoldStatus.RELEASED:
-        entries.append(
-            TimelineEntry("Released", f"{amount} paid to {hold.payee}.", "ok", hold.settled_ms, tx=first("release"))
-        )
-    elif hold.status == HoldStatus.FAILED:
-        entries.append(
-            TimelineEntry(
-                "Payout failed",
-                f"The transfer to {hold.payee} failed, so {amount} went back to the sender.",
-                "bad",
-                hold.settled_ms,
-                tx=first("release"),
-            )
-        )
-    elif hold.status == HoldStatus.RELEASING:
-        entries.append(TimelineEntry("Releasing", "The payout is in progress.", "pending", None, tx=first("release")))
-    else:
-        entries.append(
-            TimelineEntry(
-                "Waiting",
-                f"Releases at {fmt_utc(hold.release_at_ms, now_ms)} unless the sender or their guardian cancels. "
-                "Nobody can release it early, and checks can only add time "
-                f"(at most {fmt_duration(config.max_hold_ms)} after the payment).",
-                "pending",
-                hold.release_at_ms,
-            )
-        )
-    return entries
+        detail = f"Cancelled by {who}. {amount} went back to the sender's vault balance."
+        labels = ("guardian_cancel", "cancel") if by_guardian else ("cancel", "guardian_cancel")
+        return TimelineEntry("Cancelled", detail, "muted", hold.settled_ms, tx=tx(*labels))
+    if hold.status == HoldStatus.RELEASED:
+        return TimelineEntry("Released", f"{amount} paid to {hold.payee}.", "ok", hold.settled_ms, tx=tx("release"))
+    if hold.status == HoldStatus.FAILED:
+        detail = f"The transfer to {hold.payee} failed, so {amount} went back to the sender."
+        return TimelineEntry("Payout failed", detail, "bad", hold.settled_ms, tx=tx("release"))
+    if hold.status == HoldStatus.RELEASING:
+        return TimelineEntry("Releasing", "The payout is in progress.", "pending", None, tx=tx("release"))
+    detail = (
+        f"Releases at {fmt_utc(hold.release_at_ms, now_ms)} unless the sender or their guardian cancels. "
+        "Nobody can release it early, and checks can only add time "
+        f"(at most {fmt_duration(config.max_hold_ms)} after the payment)."
+    )
+    return TimelineEntry("Waiting", detail, "pending", hold.release_at_ms)
 
 
 # ----------------------------------------------------------------------
