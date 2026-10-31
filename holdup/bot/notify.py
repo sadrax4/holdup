@@ -3,12 +3,17 @@
 User keys name their channel before the colon: ``tg:<telegram user id>`` for
 the bot (a private chat has the user's id as its chat id) and
 ``web:<id>`` for the web console.
+
+When the web pages are not public (``PUBLIC_BASE_URL`` is a loopback or LAN
+address), links to them would be dead on the person's phone, so Telegram
+messages leave them out and say so instead.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import warnings
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
@@ -17,6 +22,7 @@ from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPrevie
 from telegram.error import BadRequest, Forbidden, RetryAfter
 from telegram.warnings import PTBDeprecationWarning
 
+from ..config import Settings, is_public_url
 from ..interfaces import Notifier
 
 log = logging.getLogger(__name__)
@@ -27,6 +33,8 @@ TELEGRAM_PREFIX = "tg"
 MESSAGE_LIMIT = 4096
 MAX_RETRY_WAIT_S = 30.0
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
+NOT_PUBLIC_NOTE = "Links to this server's web pages are left out: they are not public."
+PRACTICE_PAGE_OFFLINE = "(the practice page is offline for a moment)"
 
 
 def channel_of(user_key: str) -> str:
@@ -73,6 +81,42 @@ def split_text(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     return [part.rstrip("\n") for part in parts if part.strip()]
 
 
+def private_base_url(settings: Settings) -> str:
+    """``public_base_url`` when nobody else can open it (loopback or LAN), else ""."""
+    return "" if settings.web_is_public() else settings.public_base_url
+
+
+def private_fixture_base(settings: Settings) -> str:
+    """The training pages' base URL when nobody else can open it (no public address yet), else ""."""
+    base = settings.fixture_base()
+    return "" if is_public_url(base) else base
+
+
+def replace_links_to(text: str, base_url: str, replacement: str) -> str:
+    """Put ``replacement`` where ``text`` links to ``base_url``, keeping the rest of the sentence."""
+    if not base_url:
+        return text
+    link = re.compile(re.escape(base_url) + r"(?:[/?#]\S*?)?(?=[.,;:!?)]*(?:\s|$))")
+    return link.sub(replacement, text)
+
+
+def drop_links_to(text: str, base_url: str) -> str:
+    """Leave out the lines that link to ``base_url`` and add one line saying why.
+
+    HoldUp's texts put each link to its own pages on a line of its own
+    (``Details: <url>``), so nothing else is lost. An empty ``base_url`` keeps
+    the text as it is.
+    """
+    if not base_url:
+        return text
+    link = re.compile(re.escape(base_url) + r"(?=[/?#\s]|$)")
+    lines = text.split("\n")
+    kept = [line for line in lines if not link.search(line)]
+    if len(kept) == len(lines):
+        return text
+    return "\n".join([*kept, NOT_PUBLIC_NOTE])
+
+
 def retry_seconds(exc: RetryAfter) -> float:
     """How long Telegram asked us to wait (an int today, a timedelta in a future PTB release)."""
     with warnings.catch_warnings():
@@ -107,17 +151,21 @@ async def send_text(bot: Bot, chat_id: int, text: str, buttons: Buttons | None =
 
 
 class TelegramNotifier:
-    """``Notifier`` for ``tg:`` users: sends the text with inline buttons."""
+    """``Notifier`` for ``tg:`` users: sends the text with inline buttons.
 
-    def __init__(self, bot: Bot) -> None:
+    Links under ``private_base_url`` (see :func:`private_base_url`) are left out.
+    """
+
+    def __init__(self, bot: Bot, *, private_base_url: str = "") -> None:
         self.bot = bot
+        self.private_base_url = private_base_url
 
     async def notify(self, user_key: str, text: str, buttons: list[list[tuple[str, str]]] | None = None) -> None:
         chat_id = telegram_chat_id(user_key)
         if chat_id is None:
             log.warning("TelegramNotifier got a non-Telegram user key %r", user_key)
             return
-        await send_text(self.bot, chat_id, text, buttons)
+        await send_text(self.bot, chat_id, drop_links_to(text, self.private_base_url), buttons)
 
 
 class RoutingNotifier:

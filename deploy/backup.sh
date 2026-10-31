@@ -1,74 +1,68 @@
 #!/usr/bin/env bash
-# Back up what this server cannot rebuild on its own:
-#   - the SQLite database (history, evidence documents, invites), copied with SQLite's online
-#     backup API while the app keeps running;
-#   - ~/work/secrets/holdup.env (HOLDUP_SECRET, from which every user account is derived, and
-#     the NEAR keys), plus /data/credentials.json if the contracts were deployed from the server.
-# Writes <backup-directory>/holdup-<UTC time>.tar.gz with mode 600; the default directory is
-# ~/work/backups. The archive holds secrets: copy it to encrypted storage off this server.
+# Back up what this server cannot rebuild by itself:
+#   - HoldUp's files in the secrets directory: holdup.env (HOLDUP_SECRET, from which every user's
+#     NEAR account and key are derived, the bot token and the Otari key) and
+#     holdup-credentials.json (the treasury, oracle and keeper keys), plus any older credentials
+#     files that `server.sh testnet --force-new` moved aside;
+#   - the SQLite database (history and evidence documents), copied with SQLite's online backup
+#     API while HoldUp keeps running.
 #
-#   deploy/backup.sh [backup-directory]
+#   bash deploy/backup.sh [DIR]        (or: bash scripts/server.sh backup [DIR])
 #
+# Writes DIR/holdup-<UTC time>.tar.gz with mode 600; DIR defaults to $HOLDUP_HOME/backups
+# (~/work/backups). The archive holds secrets: keep it private. Nothing is uploaded anywhere.
 # Restoring is described under "Backups" in deploy/README.md.
 set -euo pipefail
+set +x # the files handled here hold secrets
+umask 077
 
-DEPLOY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST="${1:-$HOME/work/backups}"
-ENV_FILE="$DEPLOY_DIR/../../secrets/holdup.env"
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 1
+}
+
+[[ $(id -u) -ne 0 ]] || die "do not run this as root"
+HOLDUP_HOME="${HOLDUP_HOME:-$HOME/work}"
+SECRETS_DIR="${HOLDUP_SECRETS_DIR:-$HOLDUP_HOME/secrets}"
+DATA_DIR="${HOLDUP_DATA_DIR:-$HOLDUP_HOME/holdup-data}"
+DEST="${1:-$HOLDUP_HOME/backups}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
-umask 077
-mkdir -p "$DEST"
+[[ -d $SECRETS_DIR ]] || die "no secrets directory at $SECRETS_DIR"
+[[ $(stat -c %u -- "$SECRETS_DIR") == "$(id -u)" ]] || die "$SECRETS_DIR belongs to another user"
+mkdir -p -m 700 -- "$DEST"
 staging="$(mktemp -d "$DEST/.staging.XXXXXX")"
-trap 'rm -rf "$staging"' EXIT
-cd "$DEPLOY_DIR"
+trap 'rm -rf -- "$staging"' EXIT
+mkdir -m 700 -- "$staging/secrets"
 
-# Exit status 3 from the snippet means there is no database file (offline mode keeps it in memory).
-if docker compose exec -T holdup python - <<'EOF'; then
-import os
+shopt -s nullglob
+copied=0
+for file in "$SECRETS_DIR/holdup.env" "$SECRETS_DIR"/holdup-credentials.json*; do
+  if [[ -f $file ]]; then
+    cp -p -- "$file" "$staging/secrets/"
+    copied=$((copied + 1))
+  fi
+done
+((copied > 0)) || echo "warning: no HoldUp files in $SECRETS_DIR" >&2
+
+db="$DATA_DIR/holdup.sqlite3"
+if [[ -f $db ]]; then
+  python3 - "$db" "$staging/holdup.sqlite3" <<'PY'
 import sqlite3
 import sys
 
-source = os.environ.get("HOLDUP_DB") or "/data/holdup.sqlite3"
-if source == ":memory:" or not os.path.exists(source):
-    print(f"no database file at {source}; skipping the database", file=sys.stderr)
-    sys.exit(3)
-target = "/data/.backup.sqlite3"
-if os.path.exists(target):
-    os.remove(target)
-src = sqlite3.connect(source, timeout=30)
-dst = sqlite3.connect(target)
-src.backup(dst)
-dst.close()
-src.close()
-EOF
-  docker compose cp holdup:/data/.backup.sqlite3 "$staging/holdup.sqlite3"
-  docker compose exec -T holdup rm -f /data/.backup.sqlite3
+source = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=30)
+target = sqlite3.connect(sys.argv[2])
+source.backup(target)
+target.close()
+source.close()
+PY
 else
-  status=$?
-  if [[ $status -ne 3 ]]; then
-    echo "error: the database backup failed; is the holdup service running? (docker compose ps)" >&2
-    exit 1
-  fi
-fi
-
-# Present only when `holdup deploy` was run inside the container (see deploy/README.md).
-if docker compose exec -T holdup test -f /data/credentials.json; then
-  docker compose cp holdup:/data/credentials.json "$staging/credentials.json"
-fi
-
-if [[ -r $ENV_FILE ]]; then
-  cp "$ENV_FILE" "$staging/holdup.env"
-else
-  echo "warning: $ENV_FILE not readable; the archive has no secrets file" >&2
-fi
-
-if [[ -z "$(ls -A "$staging")" ]]; then
-  echo "error: nothing to back up" >&2
-  exit 1
+  echo "note: no database at $db (the offline rehearsal keeps it in memory)" >&2
 fi
 
 archive="$DEST/holdup-$STAMP.tar.gz"
-tar -C "$staging" -czf "$archive" .
-chmod 600 "$archive"
-echo "$archive ($(du -h "$archive" | cut -f1)): $(ls "$staging" | tr '\n' ' ')"
+tar -C "$staging" -czf "$archive.partial" .
+chmod 600 -- "$archive.partial"
+mv -- "$archive.partial" "$archive"
+echo "$archive ($(du -h -- "$archive" | cut -f1)): $(cd "$staging" && find . -type f | sort | tr '\n' ' ')"

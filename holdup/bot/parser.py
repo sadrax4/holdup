@@ -20,8 +20,8 @@ from decimal import Decimal, InvalidOperation
 
 from near import is_valid_account_id
 
-EXAMPLE = "send 5 NEAR to friend.testnet"
-USAGE = f"Write a payment like this: {EXAMPLE} (or: pay friend.testnet 5 NEAR)."
+EXAMPLE = "send 5 HUSD to friend.testnet"
+USAGE = f"Write a payment like this: {EXAMPLE} (or: pay friend.testnet 5 HUSD)."
 
 _COMMAND = re.compile(r"^/(?:pay|send)(?:@\w+)?(?=\s|$)", re.IGNORECASE)
 _VERB = re.compile(r"^(?:send|pay|transfer)(?=\s|$)", re.IGNORECASE)

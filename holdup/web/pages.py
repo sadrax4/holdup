@@ -15,11 +15,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from ..bot.samples import stable_symbol
+from ..bot.samples import friend_account, stable_symbol
 from ..chain.fake import FakeVault
 from ..chain.prove import ProveReport, plan_attempts, prove_fake
 from ..chain.verify import VerifyReport, verify_deploy, verify_fake
-from ..config import Settings
+from ..config import Settings, without_credentials
 from ..interfaces import VaultPort
 from ..models import VaultConfig
 from . import views
@@ -203,6 +203,7 @@ class Site:
             {
                 "stats": stats,
                 "symbol": symbol,
+                "friend": friend_account(self.settings),
                 "stable_note": note + (" It is not Circle USDC." if note else ""),
                 "telegram": self.telegram_username(),
             },
@@ -239,6 +240,7 @@ class Site:
                 "steps": len(why.steps),
                 "evidence_url": f"{self._base()}/v/{hold_id}.json",
                 "poll_signature": _poll_signature(why.hold.to_view()),
+                "poll_ms": HOLD_POLL_MS.get(self.settings.network, HOLD_POLL_MS_REAL),
             },
         )
 
@@ -350,27 +352,37 @@ def rpc_query(rpc_url: str, request_type: str, account_id: str) -> str:
 
 
 def rpc_commands(settings: Settings) -> list[tuple[str, str]]:
-    """Commands anyone can run against the public RPC to repeat the main checks."""
+    """Commands anyone can run against the public RPC to repeat the main checks.
+
+    The RPC URL is shown without its query: an API key may travel there (``?apiKey=...``).
+    """
     if not settings.rpc_url or not settings.vault_account:
         return []
+    rpc_url = without_credentials(settings.rpc_url)
     commands = [
         (
             "The vault's access keys (expect an empty list):",
-            rpc_query(settings.rpc_url, "view_access_key_list", settings.vault_account),
+            rpc_query(rpc_url, "view_access_key_list", settings.vault_account),
         ),
         (
             "The vault's code hash (compare with base58 of sha256 of res/holdvault.wasm):",
-            rpc_query(settings.rpc_url, "view_account", settings.vault_account),
+            rpc_query(rpc_url, "view_account", settings.vault_account),
         ),
     ]
     for oracle in settings.oracle_accounts:
         commands.append(
             (
                 f"The oracle {oracle}'s keys (expect one function-call key for extend_hold):",
-                rpc_query(settings.rpc_url, "view_access_key_list", oracle),
+                rpc_query(rpc_url, "view_access_key_list", oracle),
             )
         )
     return commands
+
+
+# How often an open hold page asks whether its hold changed. Each poll is an RPC call on a real
+# network, so there it is less often; nothing changes within seconds there anyway.
+HOLD_POLL_MS = {"offline": 4000}
+HOLD_POLL_MS_REAL = 10000
 
 
 def _poll_signature(view: dict[str, Any]) -> str:

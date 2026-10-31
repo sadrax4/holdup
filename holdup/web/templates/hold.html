@@ -5,7 +5,7 @@
 {% block description %}{{ view.headline }}: {{ view.status }}.{% endblock %}
 {% block head %}<meta name="robots" content="noindex">{% endblock %}
 {% block main %}
-<article class="hold" data-hold-poll="{{ h.id }}" data-signature="{{ poll_signature }}"{% if h.status.value in ("held", "releasing") %} data-active{% endif %}>
+<article class="hold" data-hold-poll="{{ h.id }}" data-signature="{{ poll_signature }}" data-poll-ms="{{ poll_ms }}"{% if h.status.value in ("held", "releasing") %} data-active{% endif %}>
   <header class="hold-head">
     <p class="eyebrow">Payment #{{ h.id }}</p>
     <div class="hold-title">

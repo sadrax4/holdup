@@ -34,9 +34,11 @@ from near import is_valid_account_id
 from . import messages
 from .chain import errors as E
 from .chain import links
+from .chain.budget import OnboardingCost, near_to_yocto, onboarding_cost
 from .chain.errors import VaultError
 from .chain.events import first_item
 from .chain.keys import derive_user
+from .chain.treasury import TREASURY_EMPTY, Treasury
 from .config import OFFLINE_SECRET, Settings
 from .interfaces import Notifier, RiskPort, VaultPort
 from .models import (
@@ -227,6 +229,8 @@ class Engine:
         self._pending_brakes: dict[int, _Brake] = {}
         self._alerted: dict[int, int] = {}  # hold id -> reason bits the guardian heard about
         self._start_locks: dict[str, asyncio.Lock] = {}
+        # The root account pays for every new user; on testnet it refills itself from the faucet.
+        self.treasury = Treasury(settings, vault, store, clock=self.clock)
 
     # ------------------------------------------------------------------
     # identity
@@ -247,21 +251,63 @@ class Engine:
     async def start(
         self, user_key: str, display_name: str = "", chat_ref: str | None = None
     ) -> tuple[UserAccount, bool]:
-        """Create, register and fund the user's account if needed. Returns (account, created)."""
+        """Create, register and fund the user's account until all of it is done. Returns (account, created).
+
+        ``created`` is True for the call that finished the setup. A setup that stopped half-way
+        (the network did not answer, the treasury ran dry, the app restarted) is finished by a
+        later call, which skips the steps already done; the store remembers a finished one.
+        The treasury pays for it. When it cannot pay for a new user, this raises
+        ``VaultError(TREASURY_EMPTY)`` before sending anything (the channels turn that into a
+        "try again later"), and on testnet a faucet top-up is already on its way. A step that
+        fails after others went through raises ``ONBOARDING_UNFINISHED`` with its own code.
+        """
         lock = self._start_locks.setdefault(user_key, asyncio.Lock())
         async with lock:
             account = self.account_for(user_key)
             self.store.upsert_user(user_key, account.account_id, chat_ref, display_name)
-            created = False
-            if await self.vault.get_user(account.account_id) is None:
-                txs = await self.vault.onboard_user(account, dict(self.settings.demo_funds))
-                for tx in txs:
-                    self.store.record_tx(None, "onboard", tx.tx_hash)
-                self.store.log_event(
-                    "onboard", {"account_id": account.account_id, "txs": [t.tx_hash for t in txs]}
-                )
-                created = True
-            return self.account_for(user_key), created
+            registered = await self.vault.get_user(account.account_id) is not None
+            if registered and self.store.onboarded(account.account_id):
+                return account, False
+            funds = dict(self.settings.demo_funds)
+            if registered:
+                # Registering paid the NEAR; only a token transfer after it can be missing.
+                held = await self.vault.get_balance(account.account_id)
+                funds = {asset: amount for asset, amount in funds.items() if asset != NEAR and not held.get(asset)}
+            else:
+                await self.treasury.check_onboarding(await self.onboarding_cost())
+            try:
+                txs = await self.vault.onboard_user(account, funds)
+            except VaultError as exc:
+                if exc.code == TREASURY_EMPTY:
+                    log.warning("onboarding %s stopped: %s", account.account_id, exc.message)
+                    self.treasury.request_top_up()
+                if registered or await self._exists(account.account_id):
+                    raise VaultError(E.ONBOARDING_UNFINISHED, exc.code) from exc
+                raise
+            for tx in txs:
+                self.store.record_tx(None, "onboard", tx.tx_hash)
+            self.store.log_event("onboard", {"account_id": account.account_id, "txs": [t.tx_hash for t in txs]})
+            return self.account_for(user_key), True
+
+    async def _exists(self, account_id: str) -> bool:
+        """Whether the account exists now; False when the network cannot tell."""
+        try:
+            return bool(await self.vault.account_exists(account_id))
+        except Exception:  # noqa: BLE001 - only used to word an error that is raised anyway
+            return False
+
+    async def onboarding_cost(self) -> OnboardingCost:
+        """What one new user costs the treasury: account gas, registration fee, demo NEAR and gas."""
+        config = await self.vault.get_config()
+        funds = self.settings.demo_funds
+        tokens = sum(1 for asset, amount in funds.items() if asset != NEAR and amount > 0 and asset in config.tokens)
+        return onboarding_cost(
+            vault_id=self.vault.vault_id,
+            user_gas=near_to_yocto(self.settings.user_gas_near),
+            registration_fee=config.registration_fee,
+            demo_near=funds.get(NEAR, 0),
+            tokens=tokens,
+        )
 
     async def balance(self, user_key: str) -> dict[str, int]:
         return await self.vault.get_balance(self.account_for(user_key).account_id)
@@ -364,13 +410,20 @@ class Engine:
             return self._refused(E.UNKNOWN_PAYEE, payee=payee)
         balances = await self.vault.get_balance(user.account_id)
         # Every hold also pays the vault's storage fee from the sender's NEAR balance.
-        near_needed = (await self.vault.get_config()).hold_storage_fee + (amount if asset_id == NEAR else 0)
-        if balances.get(asset_id, 0) < amount or balances.get(NEAR, 0) < near_needed:
-            return self._refused(E.E_INSUFFICIENT_BALANCE)
+        fee = (await self.vault.get_config()).hold_storage_fee
+        if asset_id != NEAR and balances.get(asset_id, 0) < amount:
+            return self._short(asset_id, have=balances.get(asset_id, 0), need=amount)
+        near_needed = fee + (amount if asset_id == NEAR else 0)
+        if balances.get(NEAR, 0) < near_needed:
+            return self._short(NEAR, have=balances.get(NEAR, 0), need=near_needed, fee=fee)
         now = await self.vault.now_ms()
         trusted = [t.payee for t in view.trusted if t.effective_ms <= now]
         ctx.trusted_payees = sorted(set(ctx.trusted_payees) | set(trusted))
         return None
+
+    def _short(self, asset_id: str, *, have: int, need: int, fee: int = 0) -> PaymentOutcome:
+        text = messages.not_enough(self.settings, asset_id, have=have, need=need, fee=fee)
+        return PaymentOutcome(hold=None, tx=None, refused=E.E_INSUFFICIENT_BALANCE, message=text)
 
     def _refused(self, code: str, *, payee: str = "", detail: str = "") -> PaymentOutcome:
         return PaymentOutcome(
@@ -657,7 +710,12 @@ class Engine:
             await self._keep_brake(brake, exc)
 
     async def tick(self) -> int:
-        """Retry failed brakes, and failed checks whose retry time has come. Called by the keeper loop."""
+        """Retry failed brakes, and failed checks whose retry time has come. Called by the keeper loop.
+
+        On testnet it also lets the treasury check its balance (at most every ten minutes) and ask
+        the faucet for more when it runs low.
+        """
+        self.treasury.watch()
         now = self.clock()
         brakes = [b for b in self._pending_brakes.values() if not b.running]
         for brake in brakes:

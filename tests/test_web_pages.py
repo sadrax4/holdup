@@ -170,7 +170,15 @@ def test_health_robots_and_favicon(world: World) -> None:
         "version": health["version"],
         "network": "offline",
         "vault": "vault.holdup.testnet",
-        "telegram": False,
+        "public_base_url": "http://testserver",
+        "telegram": {
+            "mode": "off",
+            "running": False,
+            "username": "",
+            "last_error": None,
+            "conflict": False,
+            "last_poll_s": None,
+        },
         "mcp": False,
         "guardrail": False,
     }
@@ -249,6 +257,7 @@ def test_hold_page_after_a_cancel(world: World) -> None:
 def test_hold_json_signature_changes_with_the_hold(world: World) -> None:
     hold = world.braked_hold()
     page = world.client.get(f"/h/{hold.id}").text
+    assert 'data-poll-ms="4000"' in page  # in memory; a real network is asked every 10 s (an RPC call each)
     first = world.client.get(f"/h/{hold.id}.json").json()
     assert f'data-signature="{first["signature"]}"' in page
     assert first["hold"]["status"] == "held" and first["now_ms"] == NOW_MS
@@ -349,6 +358,13 @@ def test_prove_page_live_checks_are_cached(monkeypatch: pytest.MonkeyPatch) -> N
     assert "Some checks fail" in text
     assert "holdup prove signs each of these" in text
     assert "view_access_key_list" in text and "https://rpc.testnet.near.org" in text
+
+
+def test_prove_page_never_shows_an_rpc_api_key() -> None:
+    settings = make_settings(network="testnet", rpc_url="https://test.rpc.fastnear.com/?apiKey=k3y-0f-the-operator")
+    commands = pages.rpc_commands(settings)
+    assert commands and all("k3y-0f-the-operator" not in command for _, command in commands)
+    assert "curl -s https://test.rpc.fastnear.com/ " in commands[0][1]
 
 
 def test_prove_page_reports_an_unreachable_node(monkeypatch: pytest.MonkeyPatch) -> None:

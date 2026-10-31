@@ -304,6 +304,14 @@ class Store:
             for r in rows
         ]
 
+    def onboarded(self, account_id: str) -> bool:
+        """Whether every step of this account's setup is done (the engine logs ``onboard`` last)."""
+        row = self._one(
+            "SELECT 1 FROM events WHERE kind = 'onboard' AND json_extract(data, '$.account_id') = ? LIMIT 1",
+            (account_id,),
+        )
+        return row is not None
+
     def count_events(self, kind: str) -> int:
         row = self._one("SELECT COUNT(*) AS n FROM events WHERE kind = ?", (kind,))
         return int(row["n"]) if row else 0

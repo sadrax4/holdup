@@ -16,7 +16,8 @@ from ..models import Hold, HoldStatus, StepRecord, WhyView, reasons_from_bits
 from ..risk.reasons import SHORT_LABELS
 from .samples import Sample
 
-CURRENCY_HINT = "send 10 {symbol} to friend.testnet"
+# A payment people can copy: {payee} is a practice account that exists here (samples.friend_account).
+CURRENCY_HINT = "send 10 {symbol} to {payee}"
 
 
 def money(settings: Settings, amounts: Mapping[str, int]) -> str:
@@ -88,6 +89,7 @@ def welcome(
     created: bool,
     balances: Mapping[str, int],
     symbol: str,
+    payee: str,
 ) -> str:
     hello = f"Welcome to HoldUp, {name}." if name else "Welcome to HoldUp."
     if created:
@@ -103,7 +105,7 @@ def welcome(
             *asset_notes(settings),
             "",
             "How it works:",
-            f"- Pay with a message: {CURRENCY_HINT.format(symbol=symbol)}",
+            f"- Pay with a message: {CURRENCY_HINT.format(symbol=symbol, payee=payee)}",
             (
                 "- Payments to someone you have not trusted yet wait before they release. "
                 "Checks run during the wait and can only add time."
@@ -116,11 +118,11 @@ def welcome(
     )
 
 
-def help_text(symbol: str) -> str:
+def help_text(symbol: str, payee: str) -> str:
     return "\n".join(
         [
             "HoldUp commands",
-            f"{CURRENCY_HINT.format(symbol=symbol)} - pay someone (or: pay friend.testnet 2.5 NEAR)",
+            f"{CURRENCY_HINT.format(symbol=symbol, payee=payee)} - pay someone (or: pay {payee} 0.05 NEAR)",
             "Forward or paste a message first to have it checked with your next payment.",
             "/balance - your balances",
             "/holds - recent payments, with Cancel and Why? buttons",
@@ -145,9 +147,9 @@ def balance_text(settings: Settings, account_id: str, balances: Mapping[str, int
     return "\n".join(lines)
 
 
-def holds_text(settings: Settings, holds: Sequence[Hold], now_ms: int, symbol: str) -> str:
+def holds_text(settings: Settings, holds: Sequence[Hold], now_ms: int, symbol: str, payee: str) -> str:
     if not holds:
-        return "No payments yet. Try: " + CURRENCY_HINT.format(symbol=symbol)
+        return "No payments yet. Try: " + CURRENCY_HINT.format(symbol=symbol, payee=payee)
     lines = ["Your recent payments:"]
     for hold in holds:
         status, _ = hold_status(hold, now_ms)
@@ -207,7 +209,9 @@ def confirm_text(
     return "\n".join(lines)
 
 
-def context_saved_text(*, chars: int, has_image: bool, forwarded: bool, symbol: str, next_command: str = "") -> str:
+def context_saved_text(
+    *, chars: int, has_image: bool, forwarded: bool, symbol: str, payee: str, next_command: str = ""
+) -> str:
     if has_image and chars:
         what = "this image and its caption"
     elif has_image:
@@ -220,16 +224,16 @@ def context_saved_text(*, chars: int, has_image: bool, forwarded: bool, symbol: 
     else:
         lines += [
             "Nothing is sent until you type a payment and confirm it, for example:",
-            CURRENCY_HINT.format(symbol=symbol),
+            CURRENCY_HINT.format(symbol=symbol, payee=payee),
         ]
     return "\n".join(lines)
 
 
-def chatter_text(symbol: str) -> str:
+def chatter_text(symbol: str, payee: str) -> str:
     return "\n".join(
         [
             "I send payments with brakes. Try:",
-            CURRENCY_HINT.format(symbol=symbol),
+            CURRENCY_HINT.format(symbol=symbol, payee=payee),
             "Forward or paste the message that asked you to pay, and it gets checked too. /help lists everything.",
         ]
     )

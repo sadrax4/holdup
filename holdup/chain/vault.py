@@ -11,6 +11,13 @@ Who signs what:
 - onboarding: the treasury (the root account), which creates the user's
   sub-account, registers it in the vault and funds it with demo money.
 
+Every account pays its own gas, bought up front at 0.001 NEAR per Tgas (see
+``budget``). A user starts with 0.03 NEAR, so user calls attach 15 to 20 Tgas,
+and more only for a send that may pay a trusted outside payee at once. When the
+node refuses a user's, the oracle's or the keeper's transaction for lack of
+balance, the treasury tops that account up and the transaction goes out once
+more; when the treasury itself is short, the call fails with ``TREASURY_EMPTY``.
+
 Contract panics come back as :class:`VaultError` with the contract's ``E_``
 code; NEP-297 events from every receipt are parsed into ``TxResult.events``.
 """
@@ -18,6 +25,8 @@ code; NEP-297 events from every receipt are parsed into ``TxResult.events``.
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -26,6 +35,7 @@ from near.actions import add_function_call_key, create_account, function_call, t
 from near.errors import (
     AccountNotFoundError,
     ContractPanicError,
+    InsufficientBalanceError,
     InvalidAccountIdError,
     NearError,
     RpcError,
@@ -46,24 +56,32 @@ from ..models import (
     VaultConfig,
 )
 from . import errors as E
+from .budget import (
+    GAS,
+    PAYOUT_SEND_GAS,
+    ROLE_TOP_UP,
+    ROLE_TOP_UP_LIMIT,
+    USER_TOP_UP_LIMIT,
+    available_balance,
+    near_text,
+    near_to_yocto,
+)
 from .errors import VaultError, panic_in, parse_panic, rejection_name
 from .events import events_from_logs, first_item
-from .fake import flatten_balance, near_to_yocto
+from .fake import flatten_balance
 from .keys import USER_METHODS
+from .rpc import make_client
+from .treasury import TREASURY_EMPTY
 
-GAS = {
-    "send": Gas.tgas(100),  # an instant send to a trusted payee pays out in the same call
-    "cancel": Gas.tgas(30),
-    "guardian_cancel": Gas.tgas(30),
-    "add_trusted": Gas.tgas(30),
-    "remove_trusted": Gas.tgas(30),
-    "set_guardian": Gas.tgas(30),
-    "veto_guardian_change": Gas.tgas(30),
-    "extend_hold": Gas.tgas(30),
-    "release": Gas.tgas(100),  # payout promise plus the on_payout callback
-    "deposit_near_for": Gas.tgas(30),
-    "ft_transfer_call": Gas.tgas(100),
-}
+log = logging.getLogger(__name__)
+
+__all__ = ["GAS", "NearVault", "error_from_near"]
+
+# A payee whose trust takes effect within this long may already be trusted when the send runs.
+TRUST_CLOCK_SLACK_MS = 120_000
+
+# Who pays when a transaction is refused for lack of balance (see ``NearVault._execute``).
+USER, ROLE, TREASURY = "user", "role", "treasury"
 
 
 def error_from_near(exc: NearError) -> VaultError:
@@ -118,7 +136,7 @@ class NearVault:
             raise ValueError("HOLDUP_VAULT_ACCOUNT is not configured")
         self.settings = settings
         self.vault_id = settings.vault_account
-        self._near = near or AsyncNear(_network_name(settings), rpc_url=settings.rpc_url or None)
+        self._near = near or make_client(_network_name(settings), settings.rpc_url or None)
         self._config: VaultConfig | None = None
 
     async def aclose(self) -> None:
@@ -157,11 +175,12 @@ class NearVault:
         except NearError as exc:
             raise error_from_near(exc) from exc
 
-    async def _execute(
-        self, receiver: str, actions: Sequence[Any], signer: KeyPairSigner
-    ) -> TxResult:
+    async def _send(self, receiver: str, actions: Sequence[Any], signer: KeyPairSigner) -> TxResult:
+        """Send one transaction; a refusal for lack of balance is left to the caller."""
         try:
             result = await self._near.send_transaction(receiver, list(actions), signer=signer)
+        except InsufficientBalanceError:
+            raise
         except ContractPanicError as exc:
             # near-kit raises when any receipt failed. A failed payout transfer is
             # handled by the vault's callback, so the transaction itself succeeded.
@@ -172,6 +191,50 @@ class NearVault:
             raise error_from_near(exc) from exc
         return self._tx_result(result)
 
+    async def _execute(
+        self, receiver: str, actions: Sequence[Any], signer: KeyPairSigner, *, payer: str | None = None
+    ) -> TxResult:
+        """Send a transaction, handling a refusal for lack of balance by who pays for it.
+
+        A user, the oracle or the keeper short of NEAR for gas gets a top-up from the
+        treasury and the transaction is sent once more (``payer`` ``USER`` or ``ROLE``);
+        the treasury short of NEAR becomes ``TREASURY_EMPTY``.
+        """
+        try:
+            return await self._send(receiver, actions, signer)
+        except InsufficientBalanceError as exc:
+            if payer == TREASURY:
+                raise VaultError(TREASURY_EMPTY, "the treasury cannot pay for this right now") from exc
+            if payer not in (USER, ROLE) or not self.settings.treasury_private_key:
+                raise error_from_near(exc) from exc
+            await self._top_up(signer.account_id, exc, payer)
+        try:
+            return await self._send(receiver, actions, signer)
+        except InsufficientBalanceError as exc:
+            raise error_from_near(exc) from exc
+
+    async def _top_up(self, account_id: str, refused: InsufficientBalanceError, payer: str) -> None:
+        """Send ``account_id`` what its refused transaction lacked, plus a refill, from the treasury."""
+        if refused.required is not None and refused.available is not None:
+            shortfall = max(0, refused.required - refused.available)
+        else:
+            shortfall = 0
+        if payer == USER:
+            refill, limit = near_to_yocto(self.settings.user_gas_near), USER_TOP_UP_LIMIT
+        else:
+            refill, limit = ROLE_TOP_UP, ROLE_TOP_UP_LIMIT
+        if shortfall > limit:
+            raise VaultError(
+                E.E_TX_REJECTED,
+                f"{account_id} lacks {near_text(shortfall)} NEAR for this transaction, more than a gas top-up covers",
+            ) from refused
+        amount = shortfall + refill
+        try:
+            await self._send(account_id, [transfer(Amount.yocto(amount))], self._treasury_signer())
+        except InsufficientBalanceError as exc:
+            raise VaultError(TREASURY_EMPTY, "the treasury cannot pay for network fees right now") from exc
+        log.info("treasury topped up %s with %s NEAR for gas", account_id, near_text(amount))
+
     async def _call(
         self,
         signer: KeyPairSigner,
@@ -180,9 +243,16 @@ class NearVault:
         *,
         deposit: Amount | None = None,
         receiver: str | None = None,
+        gas: Gas | None = None,
+        payer: str | None = None,
     ) -> TxResult:
-        action = function_call(method, args, gas=GAS[method], deposit=deposit or ZERO)
-        return await self._execute(receiver or self.vault_id, [action], signer)
+        action = function_call(method, args, gas=gas or GAS[method], deposit=deposit or ZERO)
+        return await self._execute(receiver or self.vault_id, [action], signer, payer=payer)
+
+    async def _user_call(
+        self, user: UserAccount, method: str, args: dict[str, Any], *, gas: Gas | None = None
+    ) -> TxResult:
+        return await self._call(self._user_signer(user), method, args, gas=gas, payer=USER)
 
     def _tx_result(self, result: TransactionResult) -> TxResult:
         tx_hash = result.transaction_hash or (
@@ -252,6 +322,14 @@ class NearVault:
             raise error_from_near(exc) from exc
         return True
 
+    async def treasury_balance(self) -> int:
+        """What the treasury (the root account) can spend, in yoctoNEAR."""
+        try:
+            view = await self._near.account(self.settings.root_account)
+        except NearError as exc:
+            raise error_from_near(exc) from exc
+        return available_balance(int(view.amount), int(view.locked), view.storage_usage)
+
     async def now_ms(self) -> int:
         """Timestamp of the latest block, the clock the contract uses."""
         try:
@@ -270,7 +348,7 @@ class NearVault:
         self, user: UserAccount, payee: str, asset: str, amount: int, memo_hash: str | None = None
     ) -> SendResult:
         args = {"payee": payee, "asset": asset, "amount": str(amount), "memo_hash": memo_hash}
-        tx = await self._call(self._user_signer(user), "send", args)
+        tx = await self._user_call(user, "send", args, gas=await self._send_gas(user, payee, asset))
         value = tx.return_value
         if isinstance(value, dict) and isinstance(value.get("hold"), dict):
             hold = Hold.from_view(value["hold"])
@@ -282,25 +360,39 @@ class NearVault:
             hold = found
         return SendResult(hold=hold, tx=tx)
 
+    async def _send_gas(self, user: UserAccount, payee: str, asset: str) -> Gas:
+        """Gas for a send: more when it may pay a trusted payee outside the vault in the same call.
+
+        Whether today's instant cap still allows it is not visible from outside, so a trusted
+        payee always gets the larger amount; what the send does not use comes back.
+        """
+        try:
+            view = await self.get_user(user.account_id)
+            soon = int(time.time() * 1000) + TRUST_CLOCK_SLACK_MS
+            trusted = view is not None and any(t.payee == payee and t.effective_ms <= soon for t in view.trusted)
+            if not trusted or await self.is_registered(payee):
+                return GAS["send"]
+        except VaultError as exc:
+            log.info("could not tell whether %s is trusted (%s); attaching gas for a payout", payee, exc)
+        return PAYOUT_SEND_GAS[NEAR if asset == NEAR else "token"]
+
     async def cancel(self, user: UserAccount, hold_id: int) -> TxResult:
-        return await self._call(self._user_signer(user), "cancel", {"hold_id": str(hold_id)})
+        return await self._user_call(user, "cancel", {"hold_id": str(hold_id)})
 
     async def guardian_cancel(self, guardian: UserAccount, hold_id: int) -> TxResult:
-        return await self._call(
-            self._user_signer(guardian), "guardian_cancel", {"hold_id": str(hold_id)}
-        )
+        return await self._user_call(guardian, "guardian_cancel", {"hold_id": str(hold_id)})
 
     async def add_trusted(self, user: UserAccount, payee: str) -> TxResult:
-        return await self._call(self._user_signer(user), "add_trusted", {"payee": payee})
+        return await self._user_call(user, "add_trusted", {"payee": payee})
 
     async def remove_trusted(self, user: UserAccount, payee: str) -> TxResult:
-        return await self._call(self._user_signer(user), "remove_trusted", {"payee": payee})
+        return await self._user_call(user, "remove_trusted", {"payee": payee})
 
     async def set_guardian(self, user: UserAccount, guardian: str | None) -> TxResult:
-        return await self._call(self._user_signer(user), "set_guardian", {"guardian": guardian})
+        return await self._user_call(user, "set_guardian", {"guardian": guardian})
 
     async def veto_guardian_change(self, guardian: UserAccount, owner: str) -> TxResult:
-        return await self._call(self._user_signer(guardian), "veto_guardian_change", {"owner": owner})
+        return await self._user_call(guardian, "veto_guardian_change", {"owner": owner})
 
     # ------------------------------------------------------------------
     # oracle, keeper and treasury calls
@@ -315,16 +407,18 @@ class NearVault:
             "reason_bits": reason_bits,
             "evidence": evidence,
         }
-        return await self._call(self._oracle_signer(), "extend_hold", args)
+        return await self._call(self._oracle_signer(), "extend_hold", args, payer=ROLE)
 
     async def release(self, hold_id: int) -> TxResult:
-        return await self._call(self._keeper_signer(), "release", {"hold_id": str(hold_id)})
+        return await self._call(self._keeper_signer(), "release", {"hold_id": str(hold_id)}, payer=ROLE)
 
     async def onboard_user(self, user: UserAccount, demo_funds: dict[str, int]) -> list[TxResult]:
         """Create the sub-account with one restricted key, register it and fund it.
 
         Each step is skipped when already done, so a half-finished onboarding
-        can simply be run again.
+        can simply be run again. The user account holds one function-call key
+        (about 320 bytes), so it needs no balance for storage: its NEAR pays gas.
+        A treasury too poor for a step raises ``TREASURY_EMPTY``.
         """
         treasury = self._treasury_signer()
         results: list[TxResult] = []
@@ -334,13 +428,13 @@ class NearVault:
                 transfer(Amount.yocto(near_to_yocto(self.settings.user_gas_near))),
                 add_function_call_key(user.public_key, self.vault_id, USER_METHODS, allowance=None),
             ]
-            results.append(await self._execute(user.account_id, actions, treasury))
+            results.append(await self._execute(user.account_id, actions, treasury, payer=TREASURY))
         if not await self.is_registered(user.account_id):
             config = await self.get_config()
             deposit = Amount.yocto(config.registration_fee + demo_funds.get(NEAR, 0))
             results.append(
                 await self._call(
-                    treasury, "deposit_near_for", {"account_id": user.account_id}, deposit=deposit
+                    treasury, "deposit_near_for", {"account_id": user.account_id}, deposit=deposit, payer=TREASURY
                 )
             )
         for token, amount in demo_funds.items():
@@ -349,6 +443,8 @@ class NearVault:
             msg = json.dumps({"credit_to": user.account_id}, separators=(",", ":"))
             args = {"receiver_id": self.vault_id, "amount": str(amount), "msg": msg}
             results.append(
-                await self._call(treasury, "ft_transfer_call", args, deposit=ONE_YOCTO, receiver=token)
+                await self._call(
+                    treasury, "ft_transfer_call", args, deposit=ONE_YOCTO, receiver=token, payer=TREASURY
+                )
             )
         return results

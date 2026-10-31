@@ -3,6 +3,10 @@
 Commands run offline (in memory, nothing sent anywhere) unless a network is
 chosen with ``--network`` or ``HOLDUP_NETWORK``. Every command gets its vault,
 checks, store and engine from :func:`holdup.runtime.build_runtime`.
+
+``serve`` listens on a loopback address unless ``--allow-public`` is given:
+on a shared server it is reached through a tunnel or a reverse proxy, never
+directly.
 """
 
 from __future__ import annotations
@@ -10,22 +14,32 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import copy
+import ipaddress
 import json
 import logging
 import os
 import re
 import secrets
+import signal
+import socket
 import sys
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
-from .config import OFFLINE_SECRET, Settings, load_settings
+from .config import OFFLINE_SECRET, Settings, load_settings, port_from_env
 from .messages import error_text, fmt_amount, fmt_utc
 from .models import PaymentContext, parse_amount, reasons_from_bits
 
 log = logging.getLogger("holdup")
 
 NETWORKS = ("sandbox", "testnet")
+KEEPER_STOP_S = 20.0  # how long `serve` waits for a keeper round in progress when it stops
+# Seconds between keeper rounds unless --interval says otherwise. Testnet holds last minutes, so
+# a 15 s round is soon enough and keeps the idle load on the shared public RPC low.
+KEEPER_INTERVAL_S = {"testnet": 15.0}
+DEFAULT_KEEPER_INTERVAL_S = 5.0
 
 # What a command on a real network needs, and why; `holdup deploy` writes all of it to
 # .holdup/credentials.json, and the matching environment variables override that file.
@@ -39,9 +53,14 @@ LIVE_NEEDS = (
 
 
 def _settings_for(args: argparse.Namespace) -> Settings:
-    if getattr(args, "offline", False):
-        return load_settings(network="offline")
-    return load_settings(network=getattr(args, "network", None))
+    """The settings for a command, with a configuration problem reported in one line."""
+    try:
+        if getattr(args, "offline", False):
+            return load_settings(network="offline")
+        return load_settings(network=getattr(args, "network", None))
+    except ValueError as exc:
+        print(f"holdup: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
 
 def _offline(settings: Settings) -> bool:
@@ -171,6 +190,8 @@ def cmd_prove(args: argparse.Namespace) -> int:
             ],
             simulated=report.simulated,
         )
+        for note in report.notes:
+            print(f"[skip] {note}")
     return 0 if report.ok else 1
 
 
@@ -196,21 +217,28 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_deploy(args: argparse.Namespace) -> int:
     from pathlib import Path
 
-    from .chain.deploy import deploy
+    from .chain.deploy import DeployRefused, deploy
 
     # Settings of the target network: never the offline world's (its secret is public).
     base = load_settings(network=args.network)
     credentials = Path(os.environ.get("HOLDUP_CREDENTIALS") or ".holdup/credentials.json")
-    data = asyncio.run(
-        deploy(
-            base,
-            network=args.network,
-            profile=args.profile,
-            root=args.root,
-            reserve_near=args.reserve,
-            credentials_path=credentials,
+    # The balance check logs the budget line by line before anything is sent, and the RPC client
+    # logs its retries: both are worth seeing during a deployment.
+    logging.getLogger("holdup.chain").setLevel(min(logging.INFO, logging.getLogger().getEffectiveLevel()))
+    try:
+        data = asyncio.run(
+            deploy(
+                base,
+                network=args.network,
+                profile=args.profile,
+                root=args.root,
+                reserve_near=args.reserve,
+                credentials_path=credentials,
+            )
         )
-    )
+    except DeployRefused as exc:  # the root cannot pay for everything; the message says how short it is
+        print(f"holdup deploy: {exc}", file=sys.stderr)
+        return 2
     print(f"Deployed to {data['network']}: vault {data['vault_account']}, oracle {data['oracle_accounts'][0]}, "
           f"keeper {data['keeper_account']}, token {data['husd_token']}.")
     for label, tx_hash in data["deployment"]["transactions"]:
@@ -396,6 +424,13 @@ def cmd_chat(args: argparse.Namespace) -> int:
 # ----------------------------------------------------------------------
 
 
+def keeper_interval(args: argparse.Namespace, settings: Settings) -> float:
+    """``--interval``, else the network's default (15 s on testnet, 5 s elsewhere)."""
+    if args.interval is not None:
+        return float(args.interval)
+    return KEEPER_INTERVAL_S.get(settings.network, DEFAULT_KEEPER_INTERVAL_S)
+
+
 def cmd_keeper(args: argparse.Namespace) -> int:
     settings = _settings_for(args)
     if _offline(settings):
@@ -405,11 +440,12 @@ def cmd_keeper(args: argparse.Namespace) -> int:
     if code := _explain_missing(settings, "keeper"):
         return code
     runtime = _runtime(settings, web=False)
-    print(f"Keeper running on {settings.network} every {args.interval} s (Ctrl-C to stop).")
+    interval = keeper_interval(args, settings)
+    print(f"Keeper running on {settings.network} every {interval:g} s (Ctrl-C to stop).")
 
     async def run() -> None:
         try:
-            await runtime.engine.make_keeper(args.interval).run()
+            await runtime.run_keeper(asyncio.Event(), interval)  # until Ctrl-C
         finally:
             await runtime.aclose()
 
@@ -418,31 +454,194 @@ def cmd_keeper(args: argparse.Namespace) -> int:
     return 0
 
 
+class SecretFilter(logging.Filter):
+    """Replaces configured secret values in log records, tracebacks included, with ``[redacted]``.
+
+    Attached to the log handlers of ``holdup serve`` as a last line of defence:
+    the code already avoids logging secrets, but a library message or an
+    exception text could still carry one (Telegram's InvalidToken does).
+    """
+
+    def __init__(self, values: Iterable[str]) -> None:
+        super().__init__()
+        # Short values would redact ordinary words; real secrets are long.
+        self.values = sorted({v for v in values if len(v) >= 8}, key=len, reverse=True)
+
+    def clean(self, text: str) -> str:
+        for value in self.values:
+            text = text.replace(value, "[redacted]")
+        return text
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self.values:
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - a filter that raises breaks the logging call; logging reports it
+            return True
+        if self.clean(message) != message:
+            # Keep the arguments separate where possible (uvicorn's access log formats them itself).
+            if isinstance(record.msg, str):
+                record.msg = self.clean(record.msg)
+            if isinstance(record.args, tuple):
+                record.args = tuple(self.clean(a) if isinstance(a, str) else a for a in record.args)
+            if self.clean(record.getMessage()) != record.getMessage():
+                record.msg, record.args = self.clean(record.getMessage()), None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = self.clean(record.exc_text)
+        return True
+
+
+class QuietHealthChecks(logging.Filter):
+    """Leaves successful ``GET /health`` requests out of uvicorn's access log.
+
+    A supervisor asks every few seconds; those lines would bury everything else.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5:
+            _client, method, path, _version, status = args
+            return not (method == "GET" and str(path).split("?", 1)[0] == "/health" and status == 200)
+        return True
+
+
+def keep_secrets_out_of_logs(values: Iterable[str]) -> None:
+    """Add a :class:`SecretFilter` to the handlers that ``holdup serve`` writes its logs through."""
+    secret_filter = SecretFilter(values)
+    for name in ("", "uvicorn", "uvicorn.access"):
+        for handler in logging.getLogger(name).handlers:
+            handler.addFilter(secret_filter)
+
+
+def is_loopback(host: str) -> bool:
+    """Whether ``host`` only accepts connections from this machine (127.0.0.0/8, ::1, localhost)."""
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
+
+
+def listen(host: str, port: int) -> socket.socket:
+    """A listening TCP socket. Binding before anything starts makes a busy port fail at once."""
+    address = "127.0.0.1" if host.lower() == "localhost" else host.strip("[]")
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    return socket.create_server((address, port), family=family, backlog=2048)
+
+
+def _url_host(host: str) -> str:
+    return f"[{host}]" if ":" in host else host
+
+
+def _uvicorn_log_config() -> dict[str, Any]:
+    """uvicorn's own logging setup with a timestamp on every line: `serve` runs for weeks."""
+    from uvicorn.config import LOGGING_CONFIG
+
+    config = copy.deepcopy(LOGGING_CONFIG)
+    for formatter in config["formatters"].values():
+        formatter["fmt"] = "%(asctime)s " + formatter["fmt"]
+    return config
+
+
+def _let_shutdown_finish() -> None:
+    """uvicorn stops gracefully on SIGINT or SIGTERM and then raises the signal again.
+
+    With these no-op handlers in place, that second signal does not end the
+    process before the keeper and the runtime are closed.
+    """
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            signal.signal(sig, lambda signum, frame: None)
+
+
+def _telegram_summary(settings: Settings) -> str:
+    if not settings.telegram_bot_token:
+        return "off (TELEGRAM_BOT_TOKEN is not set)"
+    if settings.bot_mode() == "off":
+        return "off (TELEGRAM_MODE=off)"
+    return settings.bot_mode()
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     settings = _settings_for(args)
     if not _offline(settings) and (code := _explain_missing(settings, "serve")):
         return code
+    if not args.allow_public and not is_loopback(args.host):
+        print(
+            f"holdup serve: --host {args.host} is not a loopback address, so other machines could connect. "
+            "Serve on 127.0.0.1 behind a tunnel or reverse proxy, or add --allow-public if that is what you want.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        port = args.port if args.port is not None else port_from_env(os.environ)
+        sock = listen(args.host, port)
+    except ValueError as exc:
+        print(f"holdup serve: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"holdup serve: cannot listen on {args.host}:{port}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
+    bound_host, bound_port = sock.getsockname()[:2]
+    url = f"http://{_url_host(bound_host)}:{bound_port}"
+    if not os.environ.get("PUBLIC_BASE_URL") and is_loopback(bound_host):
+        settings.public_base_url = url  # links then point where this server really listens
     if settings.secret == OFFLINE_SECRET:
         # The offline world starts from scratch on every restart anyway, so a server that may be
         # reachable by others signs its cookies, export links and hold tokens with a fresh secret.
         settings.secret = secrets.token_urlsafe(32)
-    runtime = _runtime(settings)
+    logging.getLogger("holdup").setLevel(min(logging.INFO, logging.getLogger().getEffectiveLevel()))
+    try:
+        runtime = _runtime(settings)
+    except BaseException:
+        sock.close()
+        raise
     where = "offline, in-memory vault" if _offline(settings) else settings.network
-    bot = "on" if runtime.bot is not None else "off (TELEGRAM_BOT_TOKEN is not set)"
-    print(f"HoldUp on http://{args.host}:{args.port} ({where}; checks: {runtime.checks}; Telegram {bot}).")
+    print(
+        f"HoldUp listening on {url} ({where}; checks: {runtime.checks}; "
+        f"Telegram: {_telegram_summary(settings)}).",
+        flush=True,
+    )
+    if not settings.web_is_public():
+        left_out = "; the bot leaves them out" if runtime.bot is not None else ""
+        print(
+            f"Web links point to {settings.public_base_url}, which only this machine can open{left_out}. "
+            "Set PUBLIC_BASE_URL to the public https address to change that.",
+            flush=True,
+        )
+    if settings.bot_mode() == "webhook" and (
+        not settings.public_base_url.startswith("https://") or not settings.telegram_webhook_secret
+    ):
+        print(
+            "TELEGRAM_MODE=webhook needs an https PUBLIC_BASE_URL and TELEGRAM_WEBHOOK_SECRET; until then "
+            "Telegram delivers nothing. TELEGRAM_MODE=polling needs neither.",
+            flush=True,
+        )
 
     async def run() -> None:
-        server = uvicorn.Server(uvicorn.Config(runtime.app, host=args.host, port=args.port, log_level="info"))
+        config = uvicorn.Config(
+            runtime.app, log_level="info", log_config=_uvicorn_log_config(), timeout_graceful_shutdown=10
+        )
+        server = uvicorn.Server(config)
+        keep_secrets_out_of_logs(settings.secret_values())  # after uvicorn has set up its handlers
+        logging.getLogger("uvicorn.access").addFilter(QuietHealthChecks())
+        _let_shutdown_finish()
         stop = asyncio.Event()
-        keeper = asyncio.create_task(runtime.engine.make_keeper(args.interval).run(stop))
+        keeper = asyncio.create_task(runtime.run_keeper(stop, keeper_interval(args, settings)))
         try:
-            await server.serve()
+            await server.serve(sockets=[sock])
         finally:
             stop.set()
-            await keeper
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(keeper, timeout=KEEPER_STOP_S)
             await runtime.aclose()
+            sock.close()
 
     asyncio.run(run())
     return 0
@@ -457,6 +656,12 @@ def cmd_probe(args: argparse.Namespace) -> int:
 # ----------------------------------------------------------------------
 # entry point
 # ----------------------------------------------------------------------
+
+
+def _port(text: str) -> int:
+    if not text.isdigit() or not 0 <= int(text) <= 65535:
+        raise argparse.ArgumentTypeError(f"not a port number: {text!r}")
+    return int(text)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -490,7 +695,9 @@ def build_parser() -> argparse.ArgumentParser:
     deploy.add_argument("--network", choices=NETWORKS, required=True)
     deploy.add_argument("--profile", choices=("demo", "hosted"), default="demo")
     deploy.add_argument("--root", help="root account (default: from settings or the sandbox root)")
-    deploy.add_argument("--reserve", default="5", help="NEAR pre-funded into the vault reserve")
+    deploy.add_argument(
+        "--reserve", default=None, help="NEAR the vault keeps above its storage and deploy gas (default 0.25)"
+    )
     deploy.set_defaults(func=cmd_deploy)
 
     chat = with_network(sub.add_parser("chat", help="interactive console on the same engine"))
@@ -498,13 +705,20 @@ def build_parser() -> argparse.ArgumentParser:
     chat.set_defaults(func=cmd_chat)
 
     keeper = with_network(sub.add_parser("keeper", help="release due holds in a loop"))
-    keeper.add_argument("--interval", type=float, default=5.0)
+    keeper.add_argument(
+        "--interval", type=float, default=None, help="seconds between rounds (default 15 on testnet, else 5)"
+    )
     keeper.set_defaults(func=cmd_keeper)
 
-    serve = with_network(sub.add_parser("serve", help="web app, Telegram webhook and keeper"))
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8000)
-    serve.add_argument("--interval", type=float, default=5.0, help="keeper interval in seconds")
+    serve = with_network(sub.add_parser("serve", help="web app, Telegram bot (polling or webhook) and keeper"))
+    serve.add_argument("--host", default="127.0.0.1", help="address to listen on (default 127.0.0.1, loopback only)")
+    serve.add_argument("--port", type=_port, default=None, help="port (default: HOLDUP_PORT, else 8000; 0 picks one)")
+    serve.add_argument(
+        "--allow-public", action="store_true", help="allow a --host that other machines can reach, such as 0.0.0.0"
+    )
+    serve.add_argument(
+        "--interval", type=float, default=None, help="keeper interval in seconds (default 15 on testnet, else 5)"
+    )
     serve.set_defaults(func=cmd_serve)
 
     # Everything after `probe` goes to holdup.risk.probe (try `holdup probe --help`).
@@ -522,8 +736,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(f"unrecognized arguments: {' '.join(extra)}")
     logging.basicConfig(
         level=logging.INFO if args.verbose else logging.WARNING,
-        format="%(levelname)s %(name)s: %(message)s",
+        format=("%(asctime)s " if args.command == "serve" else "") + "%(levelname)s %(name)s: %(message)s",
     )
+    # httpx (python-telegram-bot) and httpx2 (openai, mcp) log every request URL at INFO, and
+    # Bot API URLs contain the bot token.
+    for name in ("httpx", "httpx2"):
+        logging.getLogger(name).setLevel(logging.WARNING)
     try:
         return int(args.func(args) or 0)
     except BrokenPipeError:  # output piped into a command that stopped reading, e.g. head

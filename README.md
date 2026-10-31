@@ -4,7 +4,7 @@
 
 HoldUp is a Telegram payments bot on NEAR (with a web console that drives the same engine). Money
 sits in HoldVault, a contract with no access keys, no owner and no upgrade path. A payment to
-someone you have not trusted yet becomes a *hold*: it waits (10 minutes on a hosted bot, 20 seconds
+someone you have not trusted yet becomes a *hold*: it waits (5 minutes on a hosted bot, 20 seconds
 in the demo) while HoldUp checks it. If anything looks wrong, an oracle makes the wait longer and
 records why on-chain. The oracle's only key can call `extend_hold`, which can only add time, up to
 72 hours after the payment. It cannot release, cancel, redirect or move money. Only the sender, or a
@@ -116,6 +116,26 @@ call the gateway live. Without a key the scripted demo replays its recorded answ
 are never put on-chain as evidence about real payments. Hosting the Telegram bot is described in
 [deploy/README.md](deploy/README.md).
 
+## Run it on your own server
+
+On an Ubuntu server, as an ordinary user (no root, Docker or open ports), one command does
+everything:
+
+```bash
+bash scripts/server.sh install          # or: install --offline, a rehearsal without NEAR
+```
+
+It checks the tools, asks for the Otari key and the Telegram bot token (input hidden, stored at
+mode 600 in `~/work/secrets`), sets up NEAR testnet with free test money and deploys the
+contracts after you type `yes`, then keeps HoldUp running in a tmux session named `holdup`, on a
+tmux server of its own (`tmux -L holdup attach -t holdup`). The
+app listens on `127.0.0.1` only; two outbound Cloudflare quick tunnels give it a public
+`https://*.trycloudflare.com` address (and a separate one for the training pages), and the bot
+long-polls Telegram. A supervisor restarts whatever fails. `status`, `logs`, `url`, `update`,
+`restart` and `stop` look after it; [deploy/README.md](deploy/README.md) is the guide and
+[docs/SERVER.md](docs/SERVER.md) explains how it works. A quick tunnel's address changes whenever
+it restarts and has no uptime guarantee.
+
 ## Status
 
 - Verified offline: the Python and Rust test suites, the offline demo and the attack walkthrough.
@@ -126,8 +146,12 @@ are never put on-chain as evidence about real payments. Hosting the Telegram bot
 - Otari: individual gateway features were probed live and those responses are recorded in
   `fixtures/otari/recorded/`. The full pipeline has run here only on recorded answers
   (`fixtures/otari/*.json`, marked synthetic); it has not run live end to end.
-- The Telegram bot is tested in-process against a fake Bot API; its webhook has not served real
+- The Telegram bot (long polling by default, a webhook with `TELEGRAM_MODE=webhook`) is tested
+  against a fake Bot API, in-process and through the whole server setup; it has not served real
   users yet.
+- The server setup (`scripts/server.sh`) was rehearsed end to end as an ordinary user with stand-ins
+  for cloudflared, Telegram and NEAR testnet; the real tunnels and the real testnet step have not
+  run yet.
 
 ## License
 

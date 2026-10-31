@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -95,7 +96,12 @@ def test_web_wiring_routes_the_console_and_mounts_mcp_and_the_guardrail() -> Non
     assert isinstance(runtime.notifier.default, LogNotifier)
     with TestClient(runtime.app) as client:
         health = client.get("/health").json()
-        assert health["mcp"] and health["guardrail"] and not health["telegram"]
+        assert health["mcp"] and health["guardrail"]
+        assert health["telegram"]["mode"] == "off" and not health["telegram"]["running"]
+        assert health["public_base_url"] == "http://testserver"
+        assert health["keeper"] == {
+            "running": False, "interval_s": 0.0, "rounds": 0, "last_ok_s": None, "last_error": None
+        }
         assert client.post("/mcp", json={}).status_code == 401  # no hold token, no MCP
         assert client.get("/profiles").status_code == 200
         body = {"profile": "checker-injection", "input_text": "hi", "validate_kwargs": {"token": "0.bad"}}
@@ -179,3 +185,67 @@ async def test_the_scripted_story_may_replay_on_a_real_network(tmp_path: Path) -
         assert runtime.otari.offline and runtime.resolver is not None
     finally:
         await runtime.aclose()
+
+
+# ----------------------------------------------------------------------
+# the Telegram mode, and the keeper loop of `holdup serve`
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("mode", "updater"), [("", True), ("polling", True), ("webhook", False)])
+def test_the_bot_is_built_for_its_mode(mode: str, updater: bool) -> None:
+    settings = offline_settings(telegram_bot_token="123456:TEST-TOKEN", telegram_mode=mode)
+    runtime = build_runtime(settings, clock=SimClock())
+    assert runtime.bot is not None and (runtime.bot.updater is not None) is updater
+
+
+def test_telegram_mode_off_keeps_the_bot_out_even_with_a_token() -> None:
+    runtime = build_runtime(offline_settings(telegram_bot_token="123456:TEST-TOKEN", telegram_mode="off"), clock=SimClock())
+    assert runtime.bot is None and runtime.notifier.route("tg") is None
+    with pytest.raises(ValueError, match="TELEGRAM_MODE"):
+        build_runtime(offline_settings(telegram_mode="sometimes"), web=False)
+
+
+def test_notifications_leave_out_links_nobody_else_can_open() -> None:
+    local = build_runtime(offline_settings(telegram_bot_token="123456:TEST-TOKEN", public_base_url="http://127.0.0.1:8000"))
+    assert local.notifier.route("tg").private_base_url == "http://127.0.0.1:8000"
+    public = build_runtime(offline_settings(telegram_bot_token="123456:TEST-TOKEN", public_base_url="https://holdup.example"))
+    assert public.notifier.route("tg").private_base_url == ""
+
+
+class FlakyKeeper:
+    """Fails its first rounds, like a keeper whose RPC answers garbage for a while."""
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.rounds = 0
+
+    async def run_once(self) -> list[object]:
+        self.rounds += 1
+        if self.rounds <= self.failures:
+            raise RuntimeError("the RPC answered nonsense")
+        return []
+
+
+async def test_the_keeper_loop_outlives_failed_rounds(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    runtime = build_runtime(offline_settings(), clock=SimClock(), web=False)
+    keeper = FlakyKeeper(failures=3)
+    monkeypatch.setattr(runtime.engine, "make_keeper", lambda interval_s=5.0: keeper)
+    stop = asyncio.Event()
+    task = asyncio.create_task(runtime.run_keeper(stop, interval_s=0.01))
+    while keeper.rounds < 2:
+        await asyncio.sleep(0.005)
+    failing = runtime.keeper_status.as_dict()
+    assert failing["running"] and failing["last_ok_s"] is None
+    assert failing["last_error"] == "RuntimeError: the RPC answered nonsense"
+
+    while keeper.rounds < 5:
+        await asyncio.sleep(0.005)
+    stop.set()
+    await asyncio.wait_for(task, timeout=1)
+    done = runtime.keeper_status.as_dict()
+    assert not done["running"] and done["last_error"] is None and done["last_ok_s"] == 0 and done["rounds"] >= 5
+    failures = [r for r in caplog.records if "keeper round failed" in r.getMessage()]
+    assert len(failures) == 1 and failures[0].exc_info is not None  # one traceback, then quiet for a minute

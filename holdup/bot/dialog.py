@@ -30,7 +30,15 @@ from ..models import AssetInfo, PaymentContext, UserAccount, parse_amount
 from . import texts
 from .parser import ParseError, PayCommand, parse_pay, payee_problem
 from .ratelimit import RateLimiter
-from .samples import STABLE_SYMBOLS, Sample, find_sample, load_samples, stable_symbol
+from .samples import (
+    STABLE_SYMBOLS,
+    Sample,
+    find_sample,
+    for_person,
+    friend_account,
+    load_samples,
+    stable_symbol,
+)
 
 log = logging.getLogger(__name__)
 
@@ -130,6 +138,10 @@ class Dialog:
     def command_names(self) -> list[str]:
         return ["start", *self._commands]
 
+    def busy_for(self, user_key: str) -> float:
+        """Seconds until this person's next action is accepted (0: now), without counting one."""
+        return self.limiter.wait(user_key)
+
     # ------------------------------------------------------------------
     # entry points
     # ------------------------------------------------------------------
@@ -225,6 +237,9 @@ class Dialog:
     def _now(self) -> int:
         return self.clock()
 
+    def _friend(self, user_key: str) -> str:
+        return friend_account(self.settings, user_key)
+
     def _page(self, hold_id: int) -> str:
         base = self.settings.public_base_url
         return f"{base}/h/{hold_id}" if base else ""
@@ -246,6 +261,7 @@ class Dialog:
                     created=created,
                     balances=balances,
                     symbol=self.symbol,
+                    payee=self._friend(user_key),
                 )
             )
         ]
@@ -265,7 +281,7 @@ class Dialog:
         if isinstance(parsed, ParseError) and typed:
             return [Reply(parsed.message)]
         if len(text.strip()) < MIN_CONTEXT_CHARS:
-            return [Reply(texts.chatter_text(self.symbol))]
+            return [Reply(texts.chatter_text(self.symbol, self._friend(user_key)))]
         ctx = PaymentContext(forwarded_text=text.strip()[:CONTEXT_MAX_CHARS])
         return await self._remember(user_key, ctx, forwarded=False)
 
@@ -273,7 +289,7 @@ class Dialog:
         self, user_key: str, ctx: PaymentContext, *, forwarded: bool, next_command: str = ""
     ) -> list[Reply]:
         if not ctx.forwarded_text and ctx.image_bytes is None:
-            return [Reply(texts.chatter_text(self.symbol))]
+            return [Reply(texts.chatter_text(self.symbol, self._friend(user_key)))]
         now = self._now()
         self.engine.remember_context(user_key, replace(ctx, received_ms=ctx.received_ms or now))
         for key, remembered in list(self._contexts.items()):
@@ -292,6 +308,7 @@ class Dialog:
             has_image=ctx.image_bytes is not None,
             forwarded=forwarded,
             symbol=self.symbol,
+            payee=self._friend(user_key),
             next_command=next_command,
         )
         return [Reply(text)]
@@ -311,7 +328,9 @@ class Dialog:
         parsed = parse_pay(" ".join(["pay", *args]))
         if isinstance(parsed, PayCommand):
             return await self._offer(user_key, parsed)
-        return [Reply(parsed.message if parsed is not None else texts.chatter_text(self.symbol))]
+        if parsed is not None:
+            return [Reply(parsed.message)]
+        return [Reply(texts.chatter_text(self.symbol, self._friend(user_key)))]
 
     def _asset_for(self, symbol: str) -> tuple[AssetInfo | None, str]:
         """The asset to pay in, and a note when it is not the one the person named."""
@@ -393,6 +412,8 @@ class Dialog:
             return [Reply("OK, nothing was sent.")]
         if action == "sample":
             return await self._use_sample(user_key, arg)
+        if action == "pay":  # the payment a training sample asks for, with this person's own payee
+            return await self._pay_sample(user_key, arg)
         if action == "gveto":  # the guardian in charge keeps an owner's guardian change from happening
             if not is_valid_account_id(arg):
                 return [Reply("That button is no longer valid.")]
@@ -413,10 +434,18 @@ class Dialog:
         sample = find_sample(self.samples, sample_id)
         if sample is None:
             return [Reply("That practice message is not available.")]
+        sample = for_person(sample, self.settings, user_key)
         text = f"Forwarded from {sample.sender}:\n{sample.text}" if sample.sender else sample.text
         return await self._remember(
             user_key, PaymentContext(forwarded_text=text), forwarded=True, next_command=sample.command
         )
+
+    async def _pay_sample(self, user_key: str, sample_id: str) -> list[Reply]:
+        sample = find_sample(self.samples, sample_id)
+        parsed = parse_pay(for_person(sample, self.settings, user_key).command) if sample is not None else None
+        if not isinstance(parsed, PayCommand):
+            return [Reply("That practice payment is not available.")]
+        return await self._offer(user_key, parsed)
 
     # ------------------------------------------------------------------
     # commands
@@ -426,7 +455,7 @@ class Dialog:
         return [Reply(f"I don't know /{name}. /help lists what I can do.")]
 
     async def _help(self, user_key: str, args: list[str]) -> list[Reply]:
-        return [Reply(texts.help_text(self.symbol))]
+        return [Reply(texts.help_text(self.symbol, self._friend(user_key)))]
 
     async def _balance(self, user_key: str, args: list[str]) -> list[Reply]:
         balances = await self.engine.balance(user_key)
@@ -440,7 +469,8 @@ class Dialog:
             for hold in holds
             if hold.active
         ][:5]
-        return [Reply(texts.holds_text(self.settings, holds, self._now(), self.symbol), buttons or None)]
+        text = texts.holds_text(self.settings, holds, self._now(), self.symbol, self._friend(user_key))
+        return [Reply(text, buttons or None)]
 
     async def _cancel_command(self, user_key: str, args: list[str]) -> list[Reply]:
         hold_id = _hold_id(args[0]) if args else None
@@ -510,7 +540,7 @@ class Dialog:
 
     async def _demo(self, user_key: str, args: list[str]) -> list[Reply]:
         chosen = [s for s in (find_sample(self.samples, i) for i in DEMO_SAMPLES) if s is not None]
-        chosen = chosen or [s for s in self.samples if s.scam]
+        chosen = [for_person(s, self.settings, user_key) for s in chosen or [s for s in self.samples if s.scam]]
         if not chosen:
             return [Reply("Practice messages are not installed on this server.")]
         replies = [Reply(texts.demo_intro(chosen))]
@@ -521,7 +551,8 @@ class Dialog:
             )
         benign = find_sample(self.samples, "benign")
         if benign is not None:
-            replies.append(Reply(f"For comparison, an ordinary payment to a friend: {benign.command}"))
+            command = for_person(benign, self.settings, user_key).command
+            replies.append(Reply(f"For comparison, an ordinary payment to a friend: {command}"))
         return replies
 
 

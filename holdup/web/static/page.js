@@ -51,6 +51,7 @@
   if (hold) {
     const id = hold.dataset.holdPoll;
     const signature = hold.dataset.signature;
+    const every = Number(hold.dataset.pollMs) || 4000;
     const poll = async () => {
       if (document.visibilityState === "visible") {
         try {
@@ -66,8 +67,8 @@
           // offline for a moment; try again on the next tick
         }
       }
-      setTimeout(poll, 4000);
+      setTimeout(poll, every);
     };
-    setTimeout(poll, 4000);
+    setTimeout(poll, every);
   }
 })();

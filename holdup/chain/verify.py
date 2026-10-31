@@ -24,6 +24,7 @@ from near.errors import NearError
 from ..config import Settings, load_settings
 from .fake import FakeVault
 from .keys import KEEPER_METHODS, ORACLE_METHODS
+from .rpc import make_client
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 WASM_PATH = REPO_ROOT / "res" / "holdvault.wasm"
@@ -206,9 +207,8 @@ async def verify_deploy(
 ) -> VerifyReport:
     """Verify a live deployment (read-only RPC calls only)."""
     settings = settings or load_settings()
-    client = near or AsyncNear(
-        settings.network if settings.network in ("testnet", "sandbox") else None,
-        rpc_url=settings.rpc_url or None,
+    client = near or make_client(
+        settings.network if settings.network in ("testnet", "sandbox") else None, settings.rpc_url or None
     )
     try:
         vault = settings.vault_account

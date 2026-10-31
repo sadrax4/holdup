@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import pytest
 from telegram import Bot
-from test_bot_fakes import BOT_TOKEN, FakeTelegram, RecordingNotifier
+from test_bot_fakes import BOT_TOKEN, FakeTelegram, RecordingNotifier, make_settings
 
 from holdup.bot import notify
 from holdup.bot.notify import (
     MESSAGE_LIMIT,
+    NOT_PUBLIC_NOTE,
     RoutingNotifier,
     TelegramNotifier,
     channel_of,
+    drop_links_to,
     keyboard,
+    private_base_url,
+    private_fixture_base,
+    replace_links_to,
     split_text,
     telegram_chat_id,
 )
@@ -137,3 +142,47 @@ async def test_routing_without_a_default_drops_unknown_channels(caplog: pytest.L
     router = RoutingNotifier({"tg": RecordingNotifier()})
     await router.notify("sms:+1", "hello")
     assert "no notifier for 'sms'" in caplog.text
+
+
+# ----------------------------------------------------------------------
+# links to a web view that only this machine can open
+# ----------------------------------------------------------------------
+
+LOCAL = "http://127.0.0.1:8000"
+
+
+def test_lines_with_private_links_are_left_out_and_explained() -> None:
+    text = f"Brakes on - held until 10:00 UTC\n- the payee is two hours old\nDetails: {LOCAL}/h/7"
+    assert drop_links_to(text, LOCAL) == (
+        f"Brakes on - held until 10:00 UTC\n- the payee is two hours old\n{NOT_PUBLIC_NOTE}"
+    )
+    assert drop_links_to(f"Timeline: {LOCAL}/h/7\nEvery AI step: {LOCAL}/why/7", LOCAL) == NOT_PUBLIC_NOTE
+    assert drop_links_to(f"Open {LOCAL}", LOCAL) == NOT_PUBLIC_NOTE
+
+
+def test_other_links_are_kept() -> None:
+    text = "tx: https://testnet.nearblocks.io/txns/abc\nhttp://127.0.0.1:80001/h/7"
+    assert drop_links_to(text, LOCAL) == text  # another port is another address
+    assert drop_links_to(f"Details: {LOCAL}/h/7", "") == f"Details: {LOCAL}/h/7"
+
+
+def test_a_private_practice_link_is_replaced_in_place() -> None:
+    text = f"Verify here: {LOCAL}/fixtures/coinhaven/verify. Act now!\nOr {LOCAL}/fixtures/x?ref=1, {LOCAL}"
+    assert replace_links_to(text, LOCAL, "(offline)") == "Verify here: (offline). Act now!\nOr (offline), (offline)"
+    assert replace_links_to(f"{LOCAL}0/fixtures/a", LOCAL, "(offline)") == f"{LOCAL}0/fixtures/a"  # another port
+    assert replace_links_to(text, "", "(offline)") == text
+    assert private_fixture_base(make_settings(fixture_base_url="http://localhost:47811")) == "http://localhost:47811"
+    assert private_fixture_base(make_settings(fixture_base_url="https://a-b.trycloudflare.com")) == ""
+
+
+def test_only_a_private_base_url_is_held_back() -> None:
+    assert private_base_url(make_settings(public_base_url=LOCAL)) == LOCAL
+    assert private_base_url(make_settings(public_base_url="https://holdup.example")) == ""
+
+
+async def test_the_notifier_leaves_out_private_links(bot: Bot, telegram: FakeTelegram) -> None:
+    await TelegramNotifier(bot, private_base_url=LOCAL).notify("tg:111", f"Released.\nDetails: {LOCAL}/h/7", BUTTONS)
+    await TelegramNotifier(bot).notify("tg:111", "Released.\nDetails: https://holdup.example/h/7")
+    first, second = telegram.sent()
+    assert first["text"] == f"Released.\n{NOT_PUBLIC_NOTE}" and "reply_markup" in first
+    assert second["text"] == "Released.\nDetails: https://holdup.example/h/7"

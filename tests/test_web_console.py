@@ -12,10 +12,18 @@ from fastapi.testclient import TestClient
 from test_bot_fakes import FakeEngine, RecordingNotifier, make_settings
 
 from holdup.bot.notify import RoutingNotifier
+from holdup.bot.samples import load_samples
 from holdup.chain.fake import FakeVault
 from holdup.store import Store
 from holdup.web.app import create_app
-from holdup.web.console import ConsoleNotifier, attach_console, find_console, tone_for
+from holdup.web.console import (
+    ConsoleNotifier,
+    attach_console,
+    find_console,
+    new_accounts_per_hour,
+    story_chips,
+    tone_for,
+)
 from holdup.web.signing import CONSOLE_COOKIE, new_console_identity
 
 
@@ -179,6 +187,19 @@ def test_new_identities_are_rate_limited_per_client(console: Console) -> None:
     refused = console.client.post("/console/api/start", json={})
     assert refused.status_code == 429
     assert "too many new console accounts" in refused.json()["error"]
+
+
+def test_the_dinner_payment_chip_lets_the_dialog_fill_in_the_persons_friend() -> None:
+    chips = story_chips(load_samples(make_settings(network="testnet", root_account="holdup.testnet")))
+    [dinner] = [chip for chip in chips if chip.action == "pay:benign"]
+    assert dinner.label == "send 12.5 HUSD to Ravi" and not dinner.send
+    assert any(chip.send == "send 50 HUSD to safe-wallet-77.holdup.testnet" for chip in chips)
+
+
+def test_new_accounts_overall_stay_within_what_the_faucet_refills() -> None:
+    assert new_accounts_per_hour(make_settings(network="testnet")) == 20  # about 5.2 test NEAR an hour
+    assert new_accounts_per_hour(make_settings(network="sandbox")) == 20
+    assert new_accounts_per_hour(make_settings()) == 200  # offline: free
 
 
 def test_made_up_cookies_cannot_open_accounts(console: Console) -> None:

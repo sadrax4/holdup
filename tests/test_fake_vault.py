@@ -713,3 +713,28 @@ async def test_adapter_keys_match_the_deployment_policy() -> None:
     assert fake.check_transaction(ORACLE, VAULT, [{"FunctionCall": {"method_name": "extend_hold", "deposit": "0"}}]) is None
     denied = fake.check_transaction(ORACLE, VAULT, [{"FunctionCall": {"method_name": "send", "deposit": "0"}}])
     assert denied is not None and denied["cause"]["name"] == "INVALID_TRANSACTION"
+
+
+async def test_onboarding_is_paid_by_the_treasury_and_resumes_after_a_refill() -> None:
+    from holdup.chain.budget import onboarding_steps
+    from holdup.chain.treasury import TREASURY_EMPTY
+
+    funds = {NEAR: 2 * 10**23, TOKEN: 2_000 * HUSD}
+    create, deposit, token = onboarding_steps(vault_id=VAULT, user_gas=3 * 10**22, registration_fee=FEE,
+                                              demo_near=funds[NEAR], tokens=1)
+    # Enough for creating the account, not for registering and funding it.
+    fake = FakeVault(make_config(), vault_id=VAULT, clock=SimClock(), treasury_near=create.at_hand)
+    user = derive_user("secret", "tg:9", "holdup.testnet")
+    with pytest.raises(VaultError) as info:
+        await fake.onboard_user(user, funds)
+    assert info.value.code == TREASURY_EMPTY
+    assert await fake.account_exists(user.account_id) and not await fake.is_registered(user.account_id)
+    assert fake.external_balance(user.account_id) == 3 * 10**22  # the user's own gas money
+    left = await fake.treasury_balance()
+    assert left == create.at_hand - create.spent
+    fake.model.world.near[fake.treasury_id] += deposit.at_hand + token.at_hand  # the faucet came by
+    txs = await fake.onboard_user(user, funds)
+    assert [fake.transactions[-2].method, fake.transactions[-1].method] == ["deposit_near_for", "ft_transfer_call"]
+    assert len(txs) == 2  # the account was not created twice
+    assert await fake.get_balance(user.account_id) == {NEAR: 2 * 10**23, TOKEN: 2_000 * HUSD}
+    assert await fake.treasury_balance() == left + deposit.at_hand + token.at_hand - deposit.spent - token.spent

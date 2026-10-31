@@ -7,6 +7,9 @@ as ``MethodNameMismatch``, ``RequiresFullAccess``, ``ReceiverMismatch`` or
 exact error the network returned. Every attempt is harmless even if a key
 were misconfigured: transfers go to the signer itself, and calls carry
 1 yoctoNEAR at most.
+
+The user's attempts need a user account. On a fresh deployment nobody has
+onboarded yet, so they are left out, and the report says why.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from near import AsyncNear, KeyPairSigner, generate_key, parse_key
+from near import AccountNotFoundError, AsyncNear, KeyPairSigner, generate_key, parse_key
 from near.actions import add_full_access_key, function_call, transfer
 from near.errors import ContractPanicError, NearError
 from near.units import Amount, Gas
@@ -23,6 +26,7 @@ from ..config import Settings
 from ..models import UserAccount
 from .errors import rejection_name
 from .fake import FakeVault
+from .rpc import make_client
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,7 @@ class ProveReport:
     vault_id: str
     results: list[AttemptResult] = field(default_factory=list)
     simulated: bool = False
+    notes: list[str] = field(default_factory=list)  # attempts left out, and why
 
     @property
     def ok(self) -> bool:
@@ -63,6 +68,7 @@ class ProveReport:
             "simulated": self.simulated,
             "ok": self.ok,
             "results": [asdict(r) for r in self.results],
+            "notes": list(self.notes),
         }
 
 
@@ -162,13 +168,21 @@ def _key_for(settings: Settings, attempt: Attempt, user: UserAccount | None) -> 
 async def prove(
     settings: Settings, *, near: AsyncNear | None = None, user: UserAccount | None = None
 ) -> ProveReport:
-    """Send each forbidden transaction to the network and record the rejection."""
-    client = near or AsyncNear(
-        settings.network if settings.network in ("testnet", "sandbox") else None,
-        rpc_url=settings.rpc_url or None,
+    """Send each forbidden transaction to the network and record the rejection.
+
+    The user's attempts are left out (with a note) when ``user``'s account does not exist.
+    """
+    client = near or make_client(
+        settings.network if settings.network in ("testnet", "sandbox") else None, settings.rpc_url or None
     )
     report = ProveReport(settings.network, settings.vault_account)
     try:
+        if user is not None and not await _exists(client, user.account_id):
+            report.notes.append(
+                f"user key: not tried, because {user.account_id} does not exist yet "
+                "(no user has been onboarded on this deployment)"
+            )
+            user = None
         for attempt in plan_attempts(settings, user):
             private_key = _key_for(settings, attempt, user)
             if not private_key:
@@ -189,6 +203,14 @@ async def prove(
         if near is None:
             await client.aclose()
     return report
+
+
+async def _exists(near: AsyncNear, account_id: str) -> bool:
+    try:
+        await near.account(account_id)
+    except AccountNotFoundError:
+        return False
+    return True
 
 
 def prove_fake(fake: FakeVault, settings: Settings, *, user: UserAccount | None = None) -> ProveReport:

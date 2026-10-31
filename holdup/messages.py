@@ -13,8 +13,9 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from .chain import errors as E
+from .chain.treasury import TREASURY_EMPTY
 from .config import Settings
-from .models import REASON_LABELS, Finding, Hold, Reason, format_amount
+from .models import NEAR, REASON_LABELS, Finding, Hold, Reason, format_amount
 
 Buttons = list[list[tuple[str, str]]]
 
@@ -416,12 +417,54 @@ _ERRORS = {
     E.UNKNOWN_PAYEE: "That account does not exist on NEAR. Check the name; nothing was sent.",
     E.INVALID_PAYEE: "That is not a valid NEAR account name. Nothing was sent.",
     E.INVALID_INVITE: "This guardian link is invalid, already used or expired. Ask for a new one.",
+    TREASURY_EMPTY: (
+        "HoldUp's supply of test money is used up for the moment, so it cannot set up new accounts or pay "
+        "network fees right now. It refills itself from the NEAR testnet faucet; please try again in about "
+        "10 minutes. Nothing changed."
+    ),
+    E.ONBOARDING_UNFINISHED: (
+        "Your HoldUp account is only partly set up: {reason}. Nothing is lost; send /start again in a few "
+        "minutes to finish it."
+    ),
 }
+_UNFINISHED_REASONS = {
+    TREASURY_EMPTY: "HoldUp's test money ran out for a moment (it refills itself from the NEAR faucet)",
+    E.E_RPC: "the NEAR network did not answer in time",
+}
+
+
+def not_enough(settings: Settings, asset_id: str, *, have: int, need: int, fee: int = 0) -> str:
+    """Why a payment was refused for its balance: which asset, what the sender has, what it takes.
+
+    ``fee`` is the hold's storage fee, which every payment pays in NEAR.
+    """
+    if asset_id == NEAR and fee and need <= fee:
+        return (
+            f"Not enough NEAR for the storage fee: each payment pays {fmt_amount(settings, NEAR, fee)} from your "
+            f"NEAR balance, and you have {fmt_amount(settings, NEAR, have)}. Nothing was sent."
+        )
+    if asset_id == NEAR and fee:
+        return (
+            f"Not enough NEAR: you have {fmt_amount(settings, NEAR, have)}, and this payment needs "
+            f"{fmt_amount(settings, NEAR, need)} with the {fmt_amount(settings, NEAR, fee)} storage fee. "
+            "Nothing was sent."
+        )
+    return (
+        f"Not enough {_symbol(settings, asset_id)}: you have {fmt_amount(settings, asset_id, have)} and this payment "
+        f"is {fmt_amount(settings, asset_id, need)}. Nothing was sent. /balance shows what you hold."
+    )
+
+
+def _symbol(settings: Settings, asset_id: str) -> str:
+    info = settings.assets.get(asset_id)
+    return info.symbol if info is not None else asset_id
 
 
 def error_text(code: str, detail: str = "") -> str:
     """A friendly sentence for a refusal or ``VaultError`` code."""
     text = _ERRORS.get(code)
+    if code == E.ONBOARDING_UNFINISHED:  # ``detail`` is the code of the step that failed
+        return _ERRORS[code].format(reason=_UNFINISHED_REASONS.get(detail, "a step did not go through"))
     if text:
         return text
     return f"That did not work ({code}{': ' + detail if detail else ''})."

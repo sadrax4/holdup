@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -20,7 +21,8 @@ from test_bot_fakes import (
 )
 
 from holdup.bot.app import BOT_COMMANDS, build_bot, channel_of, configure_webhook
-from holdup.models import MAX_IMAGE_BYTES
+from holdup.bot.notify import NOT_PUBLIC_NOTE, PRACTICE_PAGE_OFFLINE
+from holdup.models import MAX_IMAGE_BYTES, StepRecord, WhyView
 
 PHOTO = b"\xff\xd8\xff\xe0fake-jpeg"
 
@@ -35,9 +37,9 @@ class Bot:
         await self.app.process_update(Update.de_json(data, self.app.bot))
 
 
-@pytest.fixture
-async def bot() -> AsyncIterator[Bot]:
-    engine = FakeEngine()
+@contextlib.asynccontextmanager
+async def running_bot(**settings: Any) -> AsyncIterator[Bot]:
+    engine = FakeEngine(make_settings(**settings))
     telegram = FakeTelegram(files={"photos/ph-big.jpg": PHOTO})
     app = build_bot(engine.settings, engine, request=telegram, get_updates_request=FakeTelegram())
     await app.initialize()
@@ -45,6 +47,12 @@ async def bot() -> AsyncIterator[Bot]:
         yield Bot(app, engine, telegram)
     finally:
         await app.shutdown()
+
+
+@pytest.fixture
+async def bot() -> AsyncIterator[Bot]:
+    async with running_bot() as started:
+        yield started
 
 
 def keyboard(params: dict[str, Any]) -> list[list[tuple[str, str]]]:
@@ -159,12 +167,77 @@ async def test_export_sends_a_csv_document(bot: Bot) -> None:
 
 
 async def test_holds_and_guardian_commands(bot: Bot) -> None:
+    bot.engine.settings.public_base_url = "https://holdup.example"
     bot.engine.hold_list = [make_hold(4)]
     await bot.feed(message_update("/holds"))
     assert keyboard(bot.telegram.sent()[-1]) == [[("Cancel #4", "cancel:4"), ("Why? #4", "why:4")]]
     await bot.feed(message_update("/guardian@HoldUpTestBot"))
     assert f"https://t.me/HoldUpTestBot?start=g_{bot.engine.invite_code}" in bot.telegram.texts()[-1]
-    assert f"http://testserver/console?g={bot.engine.invite_code}" in bot.telegram.texts()[-1]
+    assert f"https://holdup.example/console?g={bot.engine.invite_code}" in bot.telegram.texts()[-1]
+
+
+async def test_links_to_a_private_web_view_are_left_out(bot: Bot) -> None:
+    """http://testserver only resolves here, like 127.0.0.1: a phone could not open its links."""
+    await bot.feed(message_update("/guardian"))
+    invite = bot.telegram.texts()[-1]
+    assert f"https://t.me/HoldUpTestBot?start=g_{bot.engine.invite_code}" in invite
+    assert "testserver" not in invite
+
+    for command in ("/prove", "/stats"):
+        await bot.feed(message_update(command))
+        text = bot.telegram.texts()[-1]
+        assert "testserver" not in text
+        assert text.endswith(NOT_PUBLIC_NOTE)
+
+    bot.engine.settings.public_base_url = "https://holdup.example"
+    await bot.feed(message_update("/prove"))
+    assert "https://holdup.example/prove" in bot.telegram.texts()[-1]
+    assert NOT_PUBLIC_NOTE not in bot.telegram.texts()[-1]
+
+
+async def test_why_links_to_the_hold_pages_under_the_public_base_url(bot: Bot) -> None:
+    step = StepRecord("triage", "openai/gpt-oss-20b", "groq", False, 1, "req-1", 0.0004, 800)
+    bot.engine.why_views[4] = WhyView(hold=make_hold(4), evidence_json=None, evidence_hash=None, steps=[step])
+    bot.engine.settings.public_base_url = "https://abc-def.trycloudflare.com"
+    await bot.feed(message_update("/why 4"))
+    text = bot.telegram.texts()[-1]
+    assert "Timeline: https://abc-def.trycloudflare.com/h/4" in text
+    assert "Every AI step: https://abc-def.trycloudflare.com/why/4" in text
+
+    bot.engine.settings.public_base_url = "http://127.0.0.1:47812"
+    await bot.feed(message_update("/why 4"))
+    text = bot.telegram.texts()[-1]
+    assert "127.0.0.1" not in text and "Timeline:" not in text and text.endswith(NOT_PUBLIC_NOTE)
+
+
+async def test_training_samples_are_sent_as_written() -> None:
+    async with running_bot(fixture_base_url="https://train-ing.trycloudflare.com") as bot:
+        await bot.feed(message_update("/demo"))
+        samples = [p["text"] for p in bot.telegram.sent() if "Check it with my next payment" in str(p)]
+    # The link stays, for forwarding back to the checks.
+    assert any("https://train-ing.trycloudflare.com/fixtures/" in text for text in samples)
+    assert samples and all(NOT_PUBLIC_NOTE not in text for text in samples)
+
+
+async def test_a_sample_never_links_to_a_practice_page_only_this_machine_can_open() -> None:
+    """While the tunnels are down the server runs without public addresses; a phone cannot open localhost."""
+    async with running_bot(fixture_base_url="http://localhost:47811") as bot:
+        await bot.feed(message_update("/demo"))
+        samples = [p["text"] for p in bot.telegram.sent() if "Check it with my next payment" in str(p)]
+    assert samples and not any("localhost" in text for text in samples)
+    assert any(f"Verify here: {PRACTICE_PAGE_OFFLINE}. " in text for text in samples)
+
+
+async def test_a_button_tapped_too_fast_keeps_its_buttons_and_says_why(bot: Bot) -> None:
+    for _ in range(20):  # the most a person may do in a minute
+        await bot.feed(message_update("/balance"))
+    bot.telegram.calls.clear()
+    await bot.feed(callback_update("confirm:abc"))
+    names = [name for name, _ in bot.telegram.calls]
+    assert "editMessageReplyMarkup" not in names and "sendMessage" not in names
+    [(_, answer)] = [(name, params) for name, params in bot.telegram.calls if name == "answerCallbackQuery"]
+    assert answer["text"].startswith("Slow down: try again in ") and answer["text"].endswith(" s.")
+    assert not bot.engine.called("pay")
 
 
 async def test_cancel_button_on_a_notification(bot: Bot) -> None:

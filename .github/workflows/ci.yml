@@ -31,7 +31,7 @@ jobs:
       - name: Set up uv and Python 3.12
         uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
         with:
-          # Same uv as deploy/requirements-uv.txt and the one that wrote uv.lock.
+          # The uv that wrote uv.lock; the server job checks the lock with the server's uv too.
           version: "0.11.32"
           python-version: "3.12"
           enable-cache: true
@@ -40,6 +40,10 @@ jobs:
       # --locked also fails the job when uv.lock no longer matches pyproject.toml.
       - name: Install dependencies from uv.lock
         run: uv sync --locked
+
+      # tests/test_server_runner.py runs scripts/server.sh end to end in tmux; without it they are skipped.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends tmux
 
       - name: Run pytest
         run: uv run --locked pytest -q
@@ -87,56 +91,26 @@ jobs:
       - name: Build the wasm files and check them against nearcore's rules
         run: bash scripts/build_contracts.sh --plain
 
-  deploy:
-    name: Deployment files and Docker image
+  server:
+    name: Server scripts
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Check the syntax of the deploy scripts
+      - name: Set up uv 0.12.9, the version on the server HoldUp runs on
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          version: "0.12.9"
+
+      # Read-only: fails when that uv would not accept uv.lock as it is (server.sh runs uv sync --locked).
+      - name: Check uv.lock with the server's uv
+        run: uv lock --check
+
+      - name: Check the syntax of the server scripts
         run: |
-          for script in deploy/*.sh; do bash -n "$script"; done
-          python3 -m py_compile deploy/credentials_to_env.py
-
-      - name: Validate docker-compose.yml with the example settings
-        working-directory: deploy
-        env:
-          HOLDUP_HOST: holdup.203-0-113-7.sslip.io
-          FIXTURE_HOST: fixtures.203-0-113-7.sslip.io
-          ACME_EMAIL: ci@example.com
-        run: |
-          install -d -m 700 ../../secrets
-          install -m 600 holdup.env.example ../../secrets/holdup.env
-          docker compose config --quiet
-
-      - name: Build the image
-        run: docker build --file deploy/Dockerfile --tag holdup:ci .
-
-      - name: Start the container (in-memory demo network) and wait until it is healthy
-        run: |
-          docker run --detach --name holdup-ci --publish 127.0.0.1:8000:8000 \
-            --env HOLDUP_NETWORK=offline holdup:ci
-          for _ in $(seq 1 45); do
-            status="$(docker inspect --format '{{.State.Health.Status}}' holdup-ci)"
-            if [ "$status" = healthy ]; then
-              curl --fail --silent --show-error http://127.0.0.1:8000/health
-              echo
-              test "$(docker exec holdup-ci id -u)" = 10001
-              exit 0
-            fi
-            if [ "$(docker inspect --format '{{.State.Running}}' holdup-ci)" != true ]; then
-              echo "The container stopped." >&2
-              break
-            fi
-            sleep 2
-          done
-          echo "The container did not become healthy (last status: ${status:-unknown})." >&2
-          exit 1
-
-      - name: Container logs
-        if: always()
-        run: docker logs holdup-ci 2>&1 || true
+          for script in scripts/server.sh scripts/testnet.sh deploy/backup.sh; do bash -n "$script"; done
+          python3 -m py_compile scripts/server_tools.py

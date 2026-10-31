@@ -6,7 +6,15 @@ from pathlib import Path
 
 from test_bot_fakes import make_settings
 
-from holdup.bot.samples import demo_account, find_sample, load_samples, stable_symbol
+from holdup.bot.samples import (
+    demo_account,
+    find_sample,
+    for_person,
+    friend_account,
+    load_samples,
+    stable_symbol,
+)
+from holdup.chain.profiles import FRIENDS
 from holdup.models import NEAR
 
 
@@ -41,6 +49,21 @@ def test_on_a_network_the_demo_payees_live_under_the_root() -> None:
     assert "safe-wallet-77.holdup.testnet" in hero.text
     assert demo_account(settings, "northwindpaper.testnet") == "northwindpaper.holdup.testnet"
     assert demo_account(settings, "someone-else.testnet") == "someone-else.testnet"
+
+
+def test_each_person_has_a_practice_friend_of_their_own_on_a_network() -> None:
+    settings = make_settings(network="testnet", root_account="holdup.testnet")
+    friends = {friend_account(settings, f"tg:{n}") for n in range(200)}
+    assert friends == {f"{label}.holdup.testnet" for label in FRIENDS}  # all ten get people
+    assert friend_account(settings, "tg:7") == friend_account(settings, "tg:7")  # always the same one
+    assert friend_account(settings) == "ravi.holdup.testnet"  # nobody in particular (the landing page)
+    assert friend_account(make_settings(), "tg:7") == "ravi.testnet"  # offline, the world's own ravi
+    benign = find_sample(load_samples(settings), "benign")
+    assert benign is not None
+    own = for_person(benign, settings, "tg:7")
+    assert own.command == f"send 12.5 HUSD to {friend_account(settings, 'tg:7')}"
+    hero = find_sample(load_samples(settings), "hero")
+    assert hero is not None and for_person(hero, settings, "tg:7") == hero  # nothing to change there
 
 
 def test_stable_symbol_prefers_what_people_are_funded_with() -> None:

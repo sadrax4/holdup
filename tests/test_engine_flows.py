@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from holdup import messages
 from holdup.chain import errors as E
 from holdup.chain.errors import VaultError
 from holdup.chain.fake import FakeVault, SimClock
@@ -98,6 +99,40 @@ def husd(world: World) -> str:
     return world.settings.husd_token
 
 
+async def test_a_setup_that_stopped_half_way_is_finished_by_the_next_start(
+    world: World, husd: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = world.engine(StubRisk(CLEAN))
+    real = world.vault.onboard_user
+    asked: list[dict[str, int]] = []
+
+    async def token_transfer_fails_once(user: Any, funds: dict[str, int]) -> Any:
+        asked.append(dict(funds))
+        if len(asked) == 1:  # the account and its NEAR go through, the HUSD transfer does not
+            await real(user, {asset: amount for asset, amount in funds.items() if asset == NEAR})
+            raise VaultError(E.E_RPC, "timed out")
+        return await real(user, funds)
+
+    monkeypatch.setattr(world.vault, "onboard_user", token_transfer_fails_once)
+    with pytest.raises(VaultError) as failed:
+        await engine.start("tg:1", "Priya")
+    assert (failed.value.code, failed.value.message) == (E.ONBOARDING_UNFINISHED, E.E_RPC)
+    text = messages.error_text(failed.value.code, failed.value.message)
+    assert "only partly set up: the NEAR network did not answer" in text and "/start again" in text
+    assert not (await engine.balance("tg:1")).get(husd)
+
+    account, created = await engine.start("tg:1", "Priya")
+    assert created and asked[1] == {husd: 2_000 * HUSD}  # only what was missing
+    assert await engine.balance("tg:1") == {NEAR: 2 * 10**24, husd: 2_000 * HUSD}
+    assert await engine.start("tg:1", "Priya") == (account, False) and len(asked) == 2
+
+    # The store remembers a finished setup, but a vault that does not know the user (the offline
+    # world starts empty after a restart) still gets one.
+    fresh = offline_vault(world.settings, world.clock)
+    again = Engine(world.settings, fresh, StubRisk(CLEAN), None, world.store, world.notifier, clock=world.clock)
+    assert (await again.start("tg:1", "Priya"))[1] is True
+
+
 async def test_start_onboards_each_user_once(world: World, husd: str) -> None:
     engine = world.engine(StubRisk(CLEAN))
     account, created = await engine.start("tg:1", "Priya", chat_ref="chat-1")
@@ -130,6 +165,8 @@ async def test_refusals_send_nothing(world: World, husd: str) -> None:
         assert outcome.message
     assert not [tx for tx in world.vault.transactions if tx.method == "send"]
     assert "nobody-here.testnet does not exist" in (await engine.pay("tg:1", "nobody-here.testnet", husd, 1)).message
+    short = await engine.pay("tg:1", WALLET, husd, 10_000 * HUSD)  # says which token, what is there, what it takes
+    assert short.message.startswith("Not enough HUSD: you have 2000 HUSD and this payment is 10000 HUSD.")
 
     # Every payment also pays the hold storage fee in NEAR: the whole NEAR balance cannot go out.
     fee = (await world.vault.get_config()).hold_storage_fee

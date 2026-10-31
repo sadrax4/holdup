@@ -208,7 +208,13 @@ def story_chips(samples: Sequence[Sample]) -> list[Chip]:
             continue
         chips += [Chip(f"/trust {account}", send=f"/trust {account}") for account in sample.trusted]
         chips.append(Chip(f"Sample: {title}", action=f"sample:{sample.id}"))
-        chips.append(Chip(sample.command, send=sample.command))
+        if sample.id == "benign":
+            # Each person has a friend account of their own (samples.friend_account): the dialog
+            # fills it in, so the chip names the friend rather than an account.
+            what = sample.command.rsplit(" to ", 1)[0]
+            chips.append(Chip(f"{what} to {sample.sender or 'a friend'}", action=f"pay:{sample.id}"))
+        else:
+            chips.append(Chip(sample.command, send=sample.command))
     return chips
 
 
@@ -221,6 +227,16 @@ COMMAND_CHIPS = (
     Chip("Export CSV", send="/export"),
     Chip("Help", send="/help"),
 )
+
+
+# On a real network each new account costs the treasury about 0.26 test NEAR, and the faucet refills
+# it by at most 5 NEAR every 10 minutes and 150 NEAR a day: 20 an hour stays within that.
+NEW_ACCOUNTS_PER_HOUR = 20
+NEW_ACCOUNTS_PER_HOUR_OFFLINE = 200  # the in-memory world costs nothing
+
+
+def new_accounts_per_hour(settings: Settings) -> int:
+    return NEW_ACCOUNTS_PER_HOUR_OFFLINE if settings.network == "offline" else NEW_ACCOUNTS_PER_HOUR
 
 
 class Console:
@@ -250,7 +266,7 @@ class Console:
             settings, engine, invite_links=self.invite_links, export_link=self.export_link, clock=self.clock
         )
         self.new_per_client = RateLimiter(5, 3600.0)
-        self.new_overall = RateLimiter(200, 3600.0)
+        self.new_overall = RateLimiter(new_accounts_per_hour(settings), 3600.0)
         self.requests = RateLimiter(120, 60.0)
 
     # ------------------------------------------------------------------

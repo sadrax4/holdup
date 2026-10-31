@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""A stand-in for cloudflared in the server runner tests: quick tunnel mode only.
+
+It takes the flags scripts/server_tools.py passes, refuses unknown ones (as the
+real one does), and serves what a real quick tunnel serves on its --metrics
+address: /quicktunnel with a random *.trycloudflare.com hostname, /ready and
+/metrics. Nothing goes out to the network. It also enforces HoldUp's rules: the
+metrics address must be on 127.0.0.1, auto-update must be off, debug logging is
+refused, and --config must name an existing file.
+
+Each start is recorded (arguments and environment) in ../records/ next to this
+file when that directory exists, so the tests can check what it was given.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import random
+import signal
+import string
+import sys
+import threading
+import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+VALUE_FLAGS = {
+    "url", "metrics", "protocol", "edge-ip-version", "config", "loglevel", "transport-loglevel",
+    "grace-period", "logfile", "log-directory", "pidfile",
+}
+BOOL_FLAGS = {"no-autoupdate", "no-prechecks"}
+HERE = Path(__file__).resolve().parent
+
+
+def log(message: str) -> None:
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    print(f"{stamp} INF {message}", file=sys.stderr, flush=True)
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
+    sys.exit(1)
+
+
+def parse(argv: list[str]) -> dict[str, object]:
+    if argv[:1] in (["--version"], ["version"]):
+        print("cloudflared version 2026.10.7 (fake for tests)")
+        sys.exit(0)
+    if argv[:1] != ["tunnel"]:
+        fail("Incorrect Usage: this fake only runs `cloudflared tunnel`")
+    options: dict[str, object] = {}
+    index = 1
+    while index < len(argv):
+        arg = argv[index]
+        if not arg.startswith("--"):
+            fail(f"Incorrect Usage: unexpected argument {arg!r} (quick tunnels take no subcommand)")
+        name, equals, value = arg[2:].partition("=")
+        if name in BOOL_FLAGS:
+            options[name] = True
+        elif name in VALUE_FLAGS:
+            if not equals:
+                index += 1
+                if index >= len(argv):
+                    fail(f"Incorrect Usage: flag needs an argument: -{name}")
+                value = argv[index]
+            options[name] = value
+        else:
+            fail(f"Incorrect Usage: flag provided but not defined: -{name}")
+        index += 1
+    return options
+
+
+def check(options: dict[str, object]) -> tuple[str, int]:
+    if not options.get("no-autoupdate"):
+        fail("fake cloudflared: --no-autoupdate is required (the updater would restart it with a new hostname)")
+    metrics = str(options.get("metrics") or "")
+    host, _, port = metrics.rpartition(":")
+    if host != "127.0.0.1" or not port.isdigit():
+        fail(f"fake cloudflared: --metrics must be 127.0.0.1:<port> (got {metrics!r})")
+    url = str(options.get("url") or "")
+    if not url.startswith("http://127.0.0.1:"):
+        fail(f"fake cloudflared: --url must be a local origin (got {url!r})")
+    config = options.get("config")
+    if not config or not Path(str(config)).is_file():
+        fail(f"Cannot determine default configuration path. No file {config!r} found")
+    if options.get("loglevel") == "debug":
+        fail("fake cloudflared: --loglevel debug would log request headers")
+    if options.get("protocol", "quic") not in ("http2", "auto", "quic"):
+        fail("fake cloudflared: --protocol must be http2, auto or quic")
+    return host, int(port)
+
+
+def behaviour() -> dict[str, object]:
+    """Optional knobs for a test, in ../fake-cloudflared.json."""
+    try:
+        return json.loads((HERE.parent / "fake-cloudflared.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def random_hostname() -> str:
+    letters = string.ascii_lowercase
+    words = ["".join(random.choice(letters) for _ in range(n)) for n in (5, 6, 4, 7)]
+    return "-".join(words) + ".trycloudflare.com"
+
+
+def record(argv: list[str]) -> None:
+    folder = HERE.parent / "records"
+    if folder.is_dir():
+        data = {"argv": argv, "env": dict(os.environ), "cwd": os.getcwd(), "pid": os.getpid()}
+        (folder / f"cloudflared-{os.getpid()}.json").write_text(json.dumps(data))
+
+
+def main() -> None:
+    argv = sys.argv[1:]
+    options = parse(argv)
+    host, port = check(options)
+    record(argv)
+    knobs = behaviour()
+    hostname = random_hostname()
+    connector = str(uuid.uuid4())
+    started = time.monotonic()
+    ready_after = float(knobs.get("ready_after", 0.1))
+    never_ready = bool(knobs.get("never_ready", False))
+
+    log("Requesting new quick Tunnel on trycloudflare.com...")
+    time.sleep(float(knobs.get("provision_delay", 0.1)))
+    log("+" + "-" * 90 + "+")
+    log("|  Your quick Tunnel has been created! Visit it at (it may take some time to be reachable):  |")
+    log(f"|  https://{hostname}".ljust(91) + "|")
+    log("+" + "-" * 90 + "+")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server's naming
+            if self.path == "/quicktunnel":
+                self.reply(200, json.dumps({"hostname": hostname}))
+            elif self.path == "/ready":
+                ready = not never_ready and time.monotonic() - started >= ready_after
+                status = 200 if ready else 503
+                self.reply(status, json.dumps({"status": status, "readyConnections": int(ready),
+                                               "connectorId": connector}))
+            elif self.path == "/metrics":
+                self.reply(200, "cloudflared_tunnel_ha_connections 1\n")
+            elif self.path == "/healthcheck":
+                self.reply(200, "OK\n")
+            else:
+                self.reply(404, "404 page not found\n")
+
+        def reply(self, status: int, body: str) -> None:
+            data = body.encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+    try:
+        server = ThreadingHTTPServer((host, port), Handler)
+    except OSError as exc:
+        log(f"Error opening metrics server listener: {exc}")
+        sys.exit(1)
+    server.daemon_threads = True
+    log(f"Starting metrics server on {host}:{port}/metrics")
+    stop = threading.Event()
+
+    def on_signal(signum: int, frame: object) -> None:
+        log(f"Initiating graceful shutdown due to signal {signal.Signals(signum).name} ...")
+        stop.set()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, on_signal)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    log(f"Registered tunnel connection connIndex=0 connection={connector} protocol={options.get('protocol', 'quic')}")
+    while not stop.wait(0.2):
+        pass
+    server.shutdown()
+    server.server_close()
+    log("Tunnel server stopped")
+
+
+if __name__ == "__main__":
+    main()

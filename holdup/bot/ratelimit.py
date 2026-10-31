@@ -55,6 +55,17 @@ class RateLimiter:
         self._evict()
         return Decision(allowed=True)
 
+    def wait(self, key: str) -> float:
+        """Seconds until ``key`` may act again; 0 when it may now. Counts nothing."""
+        hits = self._hits.get(key)
+        if not hits:
+            return 0.0
+        now = self.clock()
+        recent = [t for t in hits if t > now - self.window_s]
+        if len(recent) < self.limit:
+            return 0.0
+        return max(0.0, recent[0] + self.window_s - now)
+
     def _evict(self) -> None:
         while len(self._hits) > self.max_keys:
             key, _ = self._hits.popitem(last=False)

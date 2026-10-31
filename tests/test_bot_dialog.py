@@ -9,7 +9,7 @@ from test_bot_fakes import HUSD, NOW_MS, FakeEngine, make_hold, make_settings
 
 from holdup.bot.dialog import CONFIRM_TTL_MS, Dialog, Document, Reply
 from holdup.bot.ratelimit import RateLimiter
-from holdup.bot.samples import Sample
+from holdup.bot.samples import Sample, friend_account, load_samples
 from holdup.chain import errors as E
 from holdup.chain.errors import VaultError
 from holdup.models import NEAR, Finding, PaymentOutcome, Reason, StepRecord, WhyView
@@ -85,7 +85,7 @@ async def test_start_opens_an_account_and_explains_the_brakes(dialog: Dialog, en
     assert account in reply.text
     assert "2 NEAR, 2000 HUSD" in reply.text  # the demo funds
     assert "HUSD: HoldUp demo dollar (test token)." in reply.text
-    assert "send 10 HUSD to friend.testnet" in reply.text
+    assert "send 10 HUSD to ravi.testnet" in reply.text  # an account of the offline world, not a stranger
 
 
 async def test_start_again_shows_the_balance(dialog: Dialog, engine: FakeEngine) -> None:
@@ -467,3 +467,20 @@ async def test_rate_limit_warns_once_then_stays_quiet(engine: FakeEngine) -> Non
     now[0] += 61
     [reply] = await dialog.command(USER, "balance")
     assert reply.text.startswith("Balance of")
+
+
+async def test_on_a_network_each_person_pays_a_practice_friend_of_their_own() -> None:
+    """People trying the dinner sample must not all pay one account: its senders and reports would add up."""
+    engine = FakeEngine(make_settings(network="testnet", root_account="holdup-abc123.testnet"))
+    dialog = Dialog(engine.settings, engine, samples=load_samples(engine.settings))
+    friend = friend_account(engine.settings, USER)
+    assert friend.startswith("ravi-") and friend.endswith(".holdup-abc123.testnet")
+    [welcome] = await dialog.start(USER, display_name="Priya")
+    assert f"send 10 HUSD to {friend}" in welcome.text
+    demo = await dialog.command(USER, "demo")
+    assert demo[-1].text == f"For comparison, an ordinary payment to a friend: send 12.5 HUSD to {friend}"
+    [saved] = await dialog.button(USER, "sample:benign")
+    assert saved.text.endswith(f"send 12.5 HUSD to {friend}")
+    [offer] = await dialog.button(USER, "pay:benign")  # the console's chip for the same payment
+    assert friend in offer.text and offer.buttons and offer.buttons[0][0][0] == "Confirm"
+    assert (await dialog.button(USER, "pay:nothing"))[0].text == "That practice payment is not available."

@@ -11,7 +11,9 @@ shapes (U64/U128 as strings), which the adapter parses with the same
 the oracle, the keeper or the treasury, like ``NearVault`` does on a real
 network, and returns ``TxResult`` objects with simulated transaction ids. It
 also models access keys, so the offline proof and attack demos can show the
-same rejections nearcore gives for restricted keys.
+same rejections nearcore gives for restricted keys, and the treasury's NEAR:
+onboarding takes what it costs on chain (``budget.onboarding_steps``) and stops
+with ``TREASURY_EMPTY`` when the treasury cannot pay. Other gas is not modelled.
 """
 
 from __future__ import annotations
@@ -23,7 +25,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from decimal import Decimal
 from typing import Any
 
 import base58
@@ -42,10 +43,12 @@ from ..models import (
     VaultConfig,
 )
 from . import errors as E
+from .budget import near_text, near_to_yocto, onboarding_steps
 from .errors import VaultError
 from .events import event_log, make_event
 from .keys import KEEPER_METHODS, ORACLE_METHODS, USER_METHODS
 from .profiles import YOCTO_PER_NEAR, config_input, vault_config
+from .treasury import TREASURY_EMPTY
 
 VERSION = "1.0.0"
 DAY_MS = 86_400_000
@@ -897,7 +900,8 @@ class FakeVault:
         keeper_id: str | None = None,
         treasury_id: str | None = None,
         reserve: int = 5 * YOCTO_PER_NEAR,
-        user_gas: int = YOCTO_PER_NEAR // 20,
+        user_gas: int = 3 * YOCTO_PER_NEAR // 100,
+        treasury_near: int = 1_000_000 * YOCTO_PER_NEAR,
         code_hash: str | None = None,
     ) -> None:
         root = vault_id.split(".", 1)[1] if "." in vault_id else vault_id
@@ -917,7 +921,8 @@ class FakeVault:
 
         now = self.clock()
         world = self.model.world
-        for account in {self.treasury_id, self.keeper_id, *self.model.config.oracles}:
+        world.create(self.treasury_id, near=treasury_near, created_ms=now)
+        for account in {self.keeper_id, *self.model.config.oracles}:
             world.create(account, near=10 * YOCTO_PER_NEAR, created_ms=now)
         world.create(vault_id, near=reserve, created_ms=now)
         for token in self.model.config.tokens:
@@ -936,6 +941,7 @@ class FakeVault:
     def from_settings(
         cls, settings: Settings, *, profile: str = "demo", clock: Callable[[], int] | None = None, **kwargs: Any
     ) -> FakeVault:
+        kwargs.setdefault("user_gas", near_to_yocto(settings.user_gas_near))
         return cls(
             vault_config(settings, profile),
             vault_id=settings.vault_account,
@@ -1049,6 +1055,9 @@ class FakeVault:
     async def is_registered(self, account_id: str) -> bool:
         return self.model.is_registered(account_id)
 
+    async def treasury_balance(self) -> int:
+        return self.model.world.near.get(self.treasury_id, 0)
+
     async def get_solvency(self) -> dict[str, int]:
         return {k: int(v) for k, v in self.model.get_solvency().items()}
 
@@ -1144,45 +1153,75 @@ class FakeVault:
             lambda: self.model.release(self.keeper_id, hold_id),
         )
 
+    def _treasury_pays(self, cost: Any, step: Callable[[], TxResult]) -> TxResult:
+        """Run one onboarding step if the treasury can pay for it, and charge it what the step cost.
+
+        Like the node, refuse before anything changes when the treasury cannot pay.
+        """
+        world = self.model.world
+        balance = world.near.get(self.treasury_id, 0)
+        if balance < cost.at_hand:
+            raise VaultError(
+                TREASURY_EMPTY,
+                f"the treasury holds {near_text(balance, up=False)} NEAR "
+                f"and this step needs {near_text(cost.at_hand)} NEAR",
+            )
+        result = step()
+        world.near[self.treasury_id] = world.near.get(self.treasury_id, 0) - cost.spent
+        return result
+
     async def onboard_user(self, user: UserAccount, demo_funds: dict[str, int]) -> list[TxResult]:
-        """Create, register and fund a user, like the treasury does on chain."""
+        """Create, register and fund a user, like the treasury does on chain, and charge the treasury for it."""
         results: list[TxResult] = []
         world = self.model.world
+        tokens = [t for t, amount in demo_funds.items() if t != NEAR and amount > 0 and t in self.model.config.tokens]
+        create, deposit, *token_steps = onboarding_steps(
+            vault_id=self.vault_id,
+            user_gas=self.user_gas,
+            registration_fee=self.model.config.registration_fee,
+            demo_near=demo_funds.get(NEAR, 0),
+            tokens=len(tokens),
+        )
         if not world.exists(user.account_id):
-            world.create(user.account_id, near=self.user_gas, created_ms=self.clock())
-            self.keys[user.account_id] = [
-                AccessKeyModel(user.public_key, self.vault_id, USER_METHODS)
-            ]
-            results.append(
-                self._run(
+
+            def create_user() -> TxResult:
+                world.create(user.account_id, near=self.user_gas, created_ms=self.clock())
+                self.keys[user.account_id] = [AccessKeyModel(user.public_key, self.vault_id, USER_METHODS)]
+                return self._run(
                     self.treasury_id,
                     "create_account",
                     {"public_key": user.public_key, "methods": list(USER_METHODS)},
                     lambda: None,
                     receiver=user.account_id,
                 )
-            )
+
+            results.append(self._treasury_pays(create, create_user))
         if not self.model.is_registered(user.account_id):
             attached = self.model.config.registration_fee + demo_funds.get(NEAR, 0)
             results.append(
-                self._run(
-                    self.treasury_id,
-                    "deposit_near_for",
-                    {"account_id": user.account_id, "attached": str(attached)},
-                    lambda: self.model.deposit_near_for(self.treasury_id, user.account_id, attached),
+                self._treasury_pays(
+                    deposit,
+                    lambda: self._run(
+                        self.treasury_id,
+                        "deposit_near_for",
+                        {"account_id": user.account_id, "attached": str(attached)},
+                        lambda: self.model.deposit_near_for(self.treasury_id, user.account_id, attached),
+                    ),
                 )
             )
-        for token, amount in demo_funds.items():
-            if token == NEAR or amount <= 0 or token not in self.model.config.tokens:
-                continue
+        for token, step in zip(tokens, token_steps, strict=True):
             msg = json.dumps({"credit_to": user.account_id}, separators=(",", ":"))
             results.append(
-                self._run(
-                    self.treasury_id,
-                    "ft_transfer_call",
-                    {"receiver_id": self.vault_id, "amount": str(amount), "msg": msg},
-                    functools.partial(self.model.ft_on_transfer, token, self.treasury_id, amount, msg),
-                    receiver=token,
+                self._treasury_pays(
+                    step,
+                    functools.partial(
+                        self._run,
+                        self.treasury_id,
+                        "ft_transfer_call",
+                        {"receiver_id": self.vault_id, "amount": str(demo_funds[token]), "msg": msg},
+                        functools.partial(self.model.ft_on_transfer, token, self.treasury_id, demo_funds[token], msg),
+                        receiver=token,
+                    ),
                 )
             )
         return results
@@ -1251,6 +1290,3 @@ def flatten_balance(view: dict[str, Any]) -> dict[str, int]:
         out[token] = int(amount)
     return out
 
-
-def near_to_yocto(text: str) -> int:
-    return int(Decimal(text) * YOCTO_PER_NEAR)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from near import AccountNotFoundError
 from near.errors import ContractPanicError, RpcError
 from near.wire import Action
 
@@ -129,3 +130,34 @@ async def test_live_proof_skips_roles_without_keys() -> None:
     report = await prove(offline_settings(), near=RecordedNode([]))  # type: ignore[arg-type]
     assert {r.observed for r in report.results} == {"skipped"}
     assert not report.ok
+
+
+class AccountsNode(RecordedNode):
+    """A RecordedNode that also answers ``account``: only the accounts in ``existing`` exist."""
+
+    def __init__(self, outcomes: list[Any], existing: set[str]) -> None:
+        super().__init__(outcomes)
+        self.existing = existing
+
+    async def account(self, account_id: str) -> Any:
+        if account_id not in self.existing:
+            raise AccountNotFoundError(account_id)
+        return object()
+
+
+async def test_live_proof_leaves_out_a_user_nobody_has_onboarded_yet() -> None:
+    settings = offline_settings()
+    settings.oracle_private_key = derive_user("k", "oracle", "x.testnet").private_key
+    settings.keeper_private_key = derive_user("k", "keeper", "x.testnet").private_key
+    user = derive_user(settings.secret, "demo:priya", settings.root_account)
+    roles = plan_attempts(settings)
+    node = AccountsNode([RpcError("rejected", data=RECORDED[a.expected[0]]) for a in roles], existing=set())
+    report = await prove(settings, near=node, user=user)  # type: ignore[arg-type]
+    assert report.ok and {r.actor for r in report.results} == {"oracle", "keeper"}
+    assert len(report.notes) == 1 and user.account_id in report.notes[0]
+    assert report.to_dict()["notes"] == report.notes
+
+    everyone = plan_attempts(settings, user)
+    node = AccountsNode([RpcError("rejected", data=RECORDED[a.expected[0]]) for a in everyone], {user.account_id})
+    report = await prove(settings, near=node, user=user)  # type: ignore[arg-type]
+    assert report.ok and [r.actor for r in report.results].count("user") == 4 and report.notes == []

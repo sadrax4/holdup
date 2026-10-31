@@ -22,9 +22,18 @@ REGISTRATION_FEE = YOCTO_PER_NEAR // 100  # 0.01 NEAR kept by the vault as stora
 MAX_ACTIVE_HOLDS = 10
 INSTANT_CAP_UNITS = {"NEAR": 10, "HUSD": 100, "USDC": 100}  # whole tokens per UTC day
 
-# Payees of the scripted demo story. Offline they are .testnet names; on a live
-# network ``holdup deploy --profile demo`` creates them as keyless sub-accounts of the root.
+# Payees of the training samples and the scripted demo story. Offline they are .testnet names;
+# on a live network they are keyless sub-accounts of the root, which the deployment creates:
+# all of them with the demo profile, and with the hosted profile only SAMPLE_PAYEES (both add FRIENDS).
 DEMO_PAYEES = ("safe-wallet-77", "northwind-paper", "northwindpaper", "ravi", "mum", "attacker")
+# What the training samples pay or trust (fixtures/messages/index.json). The scripted story
+# also pays "mum", and the attack walkthrough "attacker".
+SAMPLE_PAYEES = ("safe-wallet-77", "northwind-paper", "northwindpaper", "ravi")
+# The friend of the dinner sample on a live network: each person pays one of these, chosen from
+# their user key (holdup.bot.samples.friend_account). Were it one shared account, a busy day of
+# people trying the sample (eight senders) or two cancels after a warning would brake everyone's
+# ordinary payment to it.
+FRIENDS = tuple(f"ravi-{number}" for number in range(10))
 
 
 @dataclass(frozen=True)
@@ -36,12 +45,15 @@ class Profile:
     max_hold_ms: int = 72 * HOUR_MS
 
 
-# A guardian change waits long enough on the hosted bot for the guardian in charge to hear about
-# it (from the bot or from the vault's guardian_changed events) and veto it.
+# The hosted bot is for people trying HoldUp for a few minutes, so a new payee waits five minutes
+# and trust takes five. A guardian change still waits a day, long enough for the guardian in
+# charge to hear about it (from the bot or from the vault's guardian_changed events) and veto it.
 PROFILES: dict[str, Profile] = {
     "demo": Profile("demo", 20 * SECOND_MS, 30 * SECOND_MS, 30 * SECOND_MS),
-    "hosted": Profile("hosted", 10 * MINUTE_MS, 10 * MINUTE_MS, 24 * HOUR_MS),
+    "hosted": Profile("hosted", 5 * MINUTE_MS, 5 * MINUTE_MS, 24 * HOUR_MS),
 }
+# The payees each profile's deployment creates.
+PROFILE_PAYEES: dict[str, tuple[str, ...]] = {"demo": (*DEMO_PAYEES, *FRIENDS), "hosted": (*SAMPLE_PAYEES, *FRIENDS)}
 
 
 def vault_config(settings: Settings, profile: str = "demo") -> VaultConfig:

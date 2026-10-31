@@ -16,6 +16,7 @@ NETWORK ?= offline
 PROFILE ?= demo
 HOST ?= 127.0.0.1
 PORT ?= 8000
+SERVE_ARGS ?=
 SANDBOX_CREDENTIALS ?= .holdup/sandbox-credentials.json
 BENCH_ARGS ?= $(if $(OTARI_API_KEY),,--replay)
 
@@ -34,6 +35,7 @@ cargo = cd contracts && $(if $(RUST_TOOLCHAIN),RUSTUP_TOOLCHAIN=$(RUST_TOOLCHAIN
 help: ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-15s %s\n", $$1, $$2}'
 	@echo "  Variables: NETWORK=offline|sandbox|testnet (default offline), PROFILE=demo|hosted, HOST, PORT"
+	@echo "  serve listens on 127.0.0.1; another HOST needs SERVE_ARGS=--allow-public. On a server: scripts/server.sh"
 
 setup: ## install the Python environment exactly as uv.lock pins it (uv sync)
 	uv sync --locked
@@ -89,8 +91,8 @@ attack: ## three attacks (injected message, oracle key, compromised server) and 
 verify-deploy: ## code hash and access keys of the deployment (offline: a clearly labelled sample)
 	$(HOLDUP) verify-deploy $(net_flag)
 
-serve: ## web app, web console, Telegram webhook, MCP, guardrail and keeper on http://HOST:PORT
-	$(HOLDUP) serve $(net_flag) --host $(HOST) --port $(PORT)
+serve: ## web app, web console, Telegram bot (polling), MCP, guardrail and keeper on http://HOST:PORT
+	$(HOLDUP) serve $(net_flag) --host $(HOST) --port $(PORT) $(SERVE_ARGS)
 
 chat: ## line-based console on the same engine (offline: recorded AI answers, simulated time)
 	$(HOLDUP) chat $(net_flag)

@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""A stand-in for uv in the server runner tests.
+
+`uv sync` only checks its flags: the real one would rewrite the repository's
+.venv, which the test suite itself runs from. `uv run` checks its flags and runs
+`holdup serve` with the project's .venv the way uv does: as a child process that
+receives SIGTERM, SIGINT and SIGHUP from uv, whose exit code uv returns.
+
+The NEAR testnet commands (scripts/testnet_tools.py bootstrap, topup and status,
+holdup deploy, verify-deploy and prove) are simulated without any network access;
+they read and write a fake credentials file at $HOLDUP_CREDENTIALS. No other
+command is run.
+
+Each call is recorded (arguments, directory and the names of the environment
+variables, never their values) in ../records/ next to this file when that
+directory exists.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+KNOWN_FLAGS = {"--locked", "--frozen", "--no-dev", "--no-managed-python", "--no-python-downloads",
+               "--offline", "--no-sync", "--quiet"}
+REQUIRED_FLAGS = ("--locked", "--no-dev", "--no-managed-python", "--no-python-downloads")
+
+
+def record(argv: list[str]) -> None:
+    folder = HERE.parent / "records"
+    if folder.is_dir():
+        data = {"argv": argv, "cwd": os.getcwd(), "env_keys": sorted(os.environ), "pid": os.getpid()}
+        name = f"uv-{time.monotonic_ns()}-{os.getpid()}.json"
+        (folder / name).write_text(json.dumps(data))
+
+
+def fail(message: str, code: int = 2) -> None:
+    print(f"fake uv: {message}", file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+def split_flags(args: list[str]) -> tuple[list[str], list[str]]:
+    flags = []
+    while args and args[0].startswith("-"):
+        if args[0] not in KNOWN_FLAGS:
+            fail(f"unknown flag {args[0]}")
+        flags.append(args.pop(0))
+    missing = [flag for flag in REQUIRED_FLAGS if flag not in flags]
+    if missing:
+        fail(f"expected {' '.join(missing)}")
+    return flags, args
+
+
+# ----------------------------------------------------------------------
+# simulated testnet commands
+# ----------------------------------------------------------------------
+
+
+def credentials_path() -> Path:
+    path = os.environ.get("HOLDUP_CREDENTIALS")
+    if not path:
+        fail("HOLDUP_CREDENTIALS is not set", 3)
+    return Path(path)
+
+
+def load() -> dict:
+    try:
+        return json.loads(credentials_path().read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save(data: dict) -> None:
+    path = credentials_path()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        json.dump(data, handle, indent=2)
+
+
+def testnet_tools(args: list[str]) -> int:
+    command = args[0] if args else ""
+    if command == "bootstrap":
+        root = args[1]
+        data = load()
+        if data.get("root_account") not in (None, root):
+            fail(f"{root} already exists and is not ours", 1)
+        data.update(network="testnet", root_account=root, treasury_private_key="ed25519:fake-root-key",
+                    funder_implicit_account="0" * 64, funder_private_key="ed25519:fake-funder-key")
+        save(data)
+        print(f"{root} created with test NEAR (simulated)")
+        return 0
+    if command == "topup":
+        print(f"{args[1]}: 5.0000 NEAR, target {args[3]} NEAR (simulated)")
+        return 0
+    if command == "status":
+        data = load()
+        for name in (data.get("root_account"), data.get("vault_account")):
+            if name:
+                print(f"{name}: 5 NEAR, 1 access key(s) (simulated)")
+        return 0
+    fail(f"testnet_tools.py {command} is not simulated", 3)
+    return 3
+
+
+def holdup_testnet(args: list[str]) -> int:
+    command = args[0]
+    if "--network" not in args or args[args.index("--network") + 1] != "testnet":
+        fail(f"holdup {command} without --network testnet", 3)
+    data = load()
+    if command == "deploy":
+        root = args[args.index("--root") + 1] if "--root" in args else data.get("root_account")
+        if not data.get("treasury_private_key") or data.get("root_account") != root:
+            fail("deploy needs the root account and its key in HOLDUP_CREDENTIALS", 1)
+        if "--profile" not in args or args[args.index("--profile") + 1] != "hosted":
+            fail("expected --profile hosted", 3)
+        data = {
+            "network": "testnet", "root_account": root, "vault_account": f"vault.{root}",
+            "oracle_accounts": [f"oracle.{root}"], "keeper_account": f"keeper.{root}",
+            "husd_token": f"husd.{root}", "treasury_private_key": data["treasury_private_key"],
+            "oracle_private_key": "ed25519:fake-oracle-key", "keeper_private_key": "ed25519:fake-keeper-key",
+            "secret": os.environ.get("HOLDUP_SECRET", ""), "deployment": {"profile": "hosted", "transactions": []},
+        }
+        save(data)
+        print(f"Deployed to testnet (simulated): vault vault.{root}")
+        return 0
+    if command in ("verify-deploy", "prove"):
+        if not data.get("vault_account"):
+            fail(f"{command}: nothing deployed", 1)
+        print(f"[ok] {command}: everything checks out (simulated)")
+        return 0
+    fail(f"holdup {command} is not simulated", 3)
+    return 3
+
+
+# ----------------------------------------------------------------------
+# uv run holdup serve
+# ----------------------------------------------------------------------
+
+
+def run_serve(command: list[str]) -> int:
+    venv_python = Path.cwd() / ".venv" / "bin" / "python"
+    if not (Path.cwd() / "pyproject.toml").is_file() or not venv_python.exists():
+        fail("run me from the project directory (with pyproject.toml and .venv)")
+    child = subprocess.Popen([str(venv_python), "-m", "holdup", *command[1:]])
+
+    def forward(signum: int, frame: object) -> None:
+        try:
+            child.send_signal(signum)
+        except ProcessLookupError:
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, forward)
+    code = child.wait()
+    return code if code >= 0 else 128 - code
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    record(argv)
+    if argv[:1] in (["--version"], ["version"]):
+        print("uv 0.12.9 (fake for tests)")
+        return 0
+    if not argv:
+        fail("no command")
+    command, rest = argv[0], argv[1:]
+    if command == "sync":
+        split_flags(rest)
+        if rest:
+            fail(f"unexpected arguments {rest}")
+        print("Resolved 57 packages (fake uv: nothing was installed)", file=sys.stderr)
+        return 0
+    if command == "run":
+        _, program = split_flags(rest)
+        if program[:2] == ["holdup", "serve"]:
+            return run_serve(program)
+        if program[:1] == ["holdup"] and len(program) > 1:
+            return holdup_testnet(program[1:])
+        if program[:2] == ["python", "scripts/testnet_tools.py"]:
+            return testnet_tools(program[2:])
+        fail(f"`uv run {' '.join(program)}` is not something these tests run", 3)
+    fail(f"`uv {command}` is not simulated")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

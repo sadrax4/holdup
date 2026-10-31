@@ -36,6 +36,18 @@ def test_window_slides_and_refusals_do_not_count() -> None:
     assert not limiter.hit("a").allowed
 
 
+def test_wait_says_how_long_until_the_next_action_without_counting_one() -> None:
+    clock = Clock()
+    limiter = RateLimiter(2, 60.0, clock=clock)
+    assert limiter.wait("a") == 0
+    limiter.hit("a")
+    clock.now += 15
+    limiter.hit("a")
+    assert limiter.wait("a") == 45.0 and limiter.wait("a") == 45.0  # asking twice changes nothing
+    clock.now += 45
+    assert limiter.wait("a") == 0 and limiter.hit("a").allowed
+
+
 def test_keys_are_independent_and_memory_is_bounded() -> None:
     limiter = RateLimiter(1, 60.0, clock=Clock(), max_keys=2)
     assert limiter.hit("a").allowed

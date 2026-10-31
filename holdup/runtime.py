@@ -10,8 +10,9 @@
   network), the hosted gateway when it is ``live``, and no AI step at all when
   it is ``off``;
 - the store, the notifiers and the engine;
-- with ``web=True``: the Telegram bot (when a token is set) and the web app,
-  with the near-intel MCP server at ``/mcp`` and the guardrail at ``/validate``.
+- with ``web=True``: the Telegram bot (when a token is set and
+  ``TELEGRAM_MODE`` is not ``off``) and the web app, with the near-intel MCP
+  server at ``/mcp`` and the guardrail at ``/validate``.
 
 Every command of the CLI (``serve``, ``demo``, ``attack``, ``chat``, ``prove``,
 ``verify-deploy``, ``keeper``) starts here, so they all run the same wiring.
@@ -19,17 +20,20 @@ Every command of the CLI (``serve``, ``demo``, ``attack``, ``chat``, ``prove``,
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import functools
 import logging
 import re
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .bot.notify import RoutingNotifier
 from .chain.fake import FakeVault, wall_clock_ms
 from .chain.verify import expected_code_hash
-from .config import NETWORKS, OFFLINE_SECRET, OTARI_MODES, Settings
+from .config import NETWORKS, OFFLINE_SECRET, OTARI_MODES, TELEGRAM_MODES, Settings
 from .engine import Engine
 from .intel import PayeeIntel, load_payee_fixtures
 from .interfaces import Notifier
@@ -41,6 +45,7 @@ log = logging.getLogger(__name__)
 HOUR_MS = 3_600_000
 CONSOLE_CHANNEL = "web"
 TELEGRAM_CHANNEL = "tg"
+KEEPER_LOG_INTERVAL_S = 60.0  # a keeper that keeps failing says so at most this often
 
 
 _PAYEE_FACT = re.compile(r"^- payee account: ([a-z0-9._-]+)\s*$", re.MULTILINE)
@@ -105,6 +110,28 @@ def offline_vault(
 
 
 @dataclass
+class KeeperStatus:
+    """Liveness of the keeper loop that ``holdup serve`` runs, for ``/health``."""
+
+    running: bool = False
+    interval_s: float = 0.0
+    rounds: int = 0
+    last_ok_at: float | None = None  # clock() when a round last finished without an error
+    last_error: str | None = None  # what went wrong in the latest round; None once a round works
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False, compare=False)
+
+    def as_dict(self) -> dict[str, Any]:
+        last_ok = None if self.last_ok_at is None else round(self.clock() - self.last_ok_at)
+        return {
+            "running": self.running,
+            "interval_s": self.interval_s,
+            "rounds": self.rounds,
+            "last_ok_s": last_ok,
+            "last_error": self.last_error,
+        }
+
+
+@dataclass
 class Runtime:
     """Everything ``build_runtime`` wired together."""
 
@@ -120,8 +147,9 @@ class Runtime:
     engine: Engine
     clock: Callable[[], int]
     console: Any = None  # holdup.web.console.ConsoleNotifier, with the web app
-    bot: Any = None  # telegram.ext.Application, when TELEGRAM_BOT_TOKEN is set
+    bot: Any = None  # telegram.ext.Application, when TELEGRAM_BOT_TOKEN is set and TELEGRAM_MODE is not off
     app: Any = None  # fastapi.FastAPI, with web=True
+    keeper_status: KeeperStatus = field(default_factory=KeeperStatus)
 
     @property
     def fake(self) -> FakeVault | None:
@@ -145,6 +173,43 @@ class Runtime:
         if requests is None:
             return None
         return [r.step for r in requests if str((r.body.get("metadata") or {}).get("hold")) == str(hold_id)]
+
+    async def run_keeper(self, stop: asyncio.Event, interval_s: float = 5.0) -> None:
+        """Release due holds every ``interval_s`` seconds until ``stop`` is set.
+
+        A round that fails is logged and shown in ``/health``, and the loop goes
+        on: one bad RPC answer must not end every later release.
+        """
+        # The error text is redacted: /health shows it publicly.
+        from .bot.app import describe_error
+
+        keeper = self.engine.make_keeper(interval_s)
+        status = self.keeper_status
+        status.running, status.interval_s = True, interval_s
+        logged_at: float | None = None
+        try:
+            while not stop.is_set():
+                try:
+                    await keeper.run_once()
+                except Exception as exc:
+                    now = status.clock()
+                    first = status.last_error is None
+                    status.last_error = describe_error(exc, *self.settings.secret_values())
+                    if first or logged_at is None or now - logged_at >= KEEPER_LOG_INTERVAL_S:
+                        logged_at = now
+                        log.error(
+                            "keeper round failed (%s); trying again every %.0f s",
+                            status.last_error,
+                            interval_s,
+                            exc_info=first,
+                        )
+                else:
+                    status.last_ok_at, status.last_error = status.clock(), None
+                status.rounds += 1
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        finally:
+            status.running = False
 
     async def aclose(self) -> None:
         """Release network clients and the database."""
@@ -179,6 +244,8 @@ def build_runtime(
         raise ValueError(f"unknown network {settings.network!r}")
     if settings.otari_mode not in OTARI_MODES:
         raise ValueError(f"unknown OTARI_MODE {settings.otari_mode!r}")
+    if settings.telegram_mode and settings.telegram_mode not in TELEGRAM_MODES:
+        raise ValueError(f"unknown TELEGRAM_MODE {settings.telegram_mode!r}")
     offline = settings.network == "offline"
     if not offline and settings.secret in ("", OFFLINE_SECRET):
         raise ValueError("a real network needs its own HOLDUP_SECRET (every user's account is derived from it)")
@@ -274,12 +341,14 @@ def _add_web(runtime: Runtime) -> None:
     settings, engine = runtime.settings, runtime.engine
     runtime.console = ConsoleNotifier()
     runtime.notifier.routes[CONSOLE_CHANNEL] = runtime.console
-    if settings.telegram_bot_token:
+    if settings.bot_mode() != "off":
         from .bot.app import build_bot
-        from .bot.notify import TelegramNotifier
+        from .bot.notify import TelegramNotifier, private_base_url
 
         runtime.bot = build_bot(settings, engine)
-        runtime.notifier.routes[TELEGRAM_CHANNEL] = TelegramNotifier(runtime.bot.bot)
+        runtime.notifier.routes[TELEGRAM_CHANNEL] = TelegramNotifier(
+            runtime.bot.bot, private_base_url=private_base_url(settings)
+        )
     classifier = None
     if settings.otari_mode == "live" and runtime.otari is not None:
         from .risk.guard_models import make_classifier
@@ -293,4 +362,5 @@ def _add_web(runtime: Runtime) -> None:
         bot_app=runtime.bot,
         mcp=build_mcp(settings, runtime.vault, runtime.intel, runtime.store, runtime.store.record_mcp_call),
         guard_router=build_router(settings, classifier),
+        health_extra=lambda: {"keeper": runtime.keeper_status.as_dict()},
     )

@@ -4,17 +4,19 @@ The texts live in ``fixtures/messages``: fictional brands (CoinHaven,
 Northwind Paper Co.) made up for practice. On a live network the demo payees
 are sub-accounts of the HoldUp root account, and the stablecoin is whichever
 one this server funds new users with (the HUSD demo token unless Circle USDC
-is configured), so the samples are rewritten to match.
+is configured), so the samples are rewritten to match. There, each person's
+ordinary payments go to a friend account of their own (``friend_account``).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from ..chain.profiles import DEMO_PAYEES
+from ..chain.profiles import DEMO_PAYEES, FRIENDS
 from ..config import Settings
 from ..models import NEAR
 
@@ -22,6 +24,7 @@ log = logging.getLogger(__name__)
 
 MESSAGES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "messages"
 STABLE_SYMBOLS = ("USDC", "HUSD")
+FRIEND = "ravi.testnet"  # the dinner sample's payee, as the fixtures write it
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,32 @@ def demo_account(settings: Settings, account: str) -> str:
     if settings.network == "offline" or label not in DEMO_PAYEES:
         return account
     return f"{label}.{settings.root_account}"
+
+
+def friend_account(settings: Settings, user_key: str = "") -> str:
+    """The account this person's ordinary practice payments go to (the dinner sample, the examples).
+
+    Offline it is ravi.testnet. On a live network each person gets one of the deployment's
+    ``FRIENDS`` (ravi-0 ... ravi-9), always the same one, so that everyone trying the samples
+    does not pay a single account; without a person it is ravi under the root.
+    """
+    if settings.network == "offline" or not user_key:
+        return demo_account(settings, FRIEND)
+    number = int.from_bytes(hashlib.sha256(user_key.encode()).digest()[:4], "big") % len(FRIENDS)
+    return f"{FRIENDS[number]}.{settings.root_account}"
+
+
+def for_person(sample: Sample, settings: Settings, user_key: str) -> Sample:
+    """``sample`` with the friend's account replaced by this person's own (see ``friend_account``)."""
+    shared, own = demo_account(settings, FRIEND), friend_account(settings, user_key)
+    if shared == own:
+        return sample
+    return replace(
+        sample,
+        text=sample.text.replace(shared, own),
+        command=sample.command.replace(shared, own),
+        trusted=tuple(own if account == shared else account for account in sample.trusted),
+    )
 
 
 def load_samples(settings: Settings, directory: Path | None = None) -> list[Sample]:

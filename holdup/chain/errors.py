@@ -77,6 +77,7 @@ E_NOT_CONFIGURED = "E_NOT_CONFIGURED"  # a signing key or account is missing fro
 UNKNOWN_PAYEE = "UNKNOWN_PAYEE"
 INVALID_PAYEE = "INVALID_PAYEE"
 INVALID_INVITE = "INVALID_INVITE"
+ONBOARDING_UNFINISHED = "ONBOARDING_UNFINISHED"  # a step of a new account failed after others were done
 
 _PANIC_MARKER = "Smart contract panicked:"
 _PANIC_PREFIXES = ("Contract panicked:", _PANIC_MARKER)
