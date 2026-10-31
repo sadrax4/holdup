@@ -1,0 +1,138 @@
+"""Runtime settings, read from environment variables and an optional local credentials file.
+
+Secrets never live in the repository. `make deploy` writes `.holdup/credentials.json`
+(git-ignored) with the account ids and keys it created; environment variables win
+over that file.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from .models import NEAR, AssetInfo
+
+USDC_TESTNET = "3e2210e1184b45b64c8a434c0a7e7b23cc04ea7eb7a6c3c32520d03d4afcb8af"
+
+RPC_URLS = {
+    "testnet": "https://rpc.testnet.near.org",
+    "sandbox": "http://127.0.0.1:3030",
+}
+EXPLORER_TX = {
+    "testnet": "https://testnet.near.rocks/tx/{tx}",
+    "sandbox": "",
+}
+EXPLORER_TX_FALLBACK = {
+    "testnet": "https://testnet.nearblocks.io/txns/{tx}",
+}
+
+
+@dataclass
+class Settings:
+    network: str = "offline"  # "offline" (in-memory vault), "sandbox" or "testnet"
+    rpc_url: str = ""
+    root_account: str = "holdup.testnet"
+    vault_account: str = ""
+    oracle_accounts: list[str] = field(default_factory=list)
+    keeper_account: str = ""
+    treasury_private_key: str = field(default="", repr=False)
+    oracle_private_key: str = field(default="", repr=False)
+    keeper_private_key: str = field(default="", repr=False)
+    secret: str = field(default="", repr=False)
+    usdc_token: str | None = None
+    husd_token: str | None = None
+    telegram_bot_token: str = field(default="", repr=False)
+    telegram_webhook_secret: str = field(default="", repr=False)
+    public_base_url: str = "http://127.0.0.1:8000"
+    otari_api_key: str = field(default="", repr=False)
+    otari_base_url: str = ""
+    otari_mode: str = "replay"  # "live", "replay" (recorded fixtures) or "off" (rules only)
+    database_path: str = ".holdup/holdup.sqlite3"
+    demo_funds: dict[str, int] = field(default_factory=dict)
+    user_gas_near: str = "0.05"
+
+    # ------------------------------------------------------------------
+    @property
+    def assets(self) -> dict[str, AssetInfo]:
+        out = {NEAR: AssetInfo(NEAR, "NEAR", 24, "NEAR")}
+        if self.usdc_token:
+            out[self.usdc_token] = AssetInfo(self.usdc_token, "USDC", 6, "Circle testnet USDC")
+        if self.husd_token:
+            out[self.husd_token] = AssetInfo(self.husd_token, "HUSD", 6, "HoldUp demo dollar (test token)")
+        return out
+
+    def asset_by_symbol(self, symbol: str) -> AssetInfo | None:
+        symbol = symbol.strip().upper()
+        for info in self.assets.values():
+            if info.symbol == symbol:
+                return info
+        return None
+
+    def tx_link(self, tx_hash: str) -> str:
+        template = EXPLORER_TX.get(self.network, "")
+        return template.format(tx=tx_hash) if template and tx_hash else ""
+
+    def tx_link_fallback(self, tx_hash: str) -> str:
+        template = EXPLORER_TX_FALLBACK.get(self.network, "")
+        return template.format(tx=tx_hash) if template and tx_hash else ""
+
+    def otari_url(self) -> str:
+        if self.otari_base_url:
+            return self.otari_base_url.rstrip("/")
+        if self.otari_api_key.startswith("otk_v1_eu_"):
+            return "https://eu.api.otari.ai/api/v1"
+        return "https://api.otari.ai/api/v1"
+
+
+def _load_credentials(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def load_settings(env: dict[str, str] | None = None, credentials_path: str | None = None) -> Settings:
+    env = dict(os.environ if env is None else env)
+    creds_file = Path(credentials_path or env.get("HOLDUP_CREDENTIALS", ".holdup/credentials.json"))
+    creds = _load_credentials(creds_file)
+
+    def pick(name: str, key: str | None = None, default: str = "") -> str:
+        if env.get(name):
+            return env[name]
+        if key and creds.get(key):
+            return str(creds[key])
+        return default
+
+    network = pick("HOLDUP_NETWORK", "network", "offline")
+    root = pick("HOLDUP_ROOT_ACCOUNT", "root_account", "holdup.testnet" if network == "testnet" else "holdup.test.near")
+    oracles = pick("HOLDUP_ORACLE_ACCOUNTS", None, "")
+    oracle_list = [a.strip() for a in oracles.split(",") if a.strip()] or list(creds.get("oracle_accounts", [])) or [f"oracle.{root}"]
+
+    s = Settings(
+        network=network,
+        rpc_url=pick("NEAR_RPC_URL", "rpc_url", RPC_URLS.get(network, "")),
+        root_account=root,
+        vault_account=pick("HOLDUP_VAULT_ACCOUNT", "vault_account", f"vault.{root}"),
+        oracle_accounts=oracle_list,
+        keeper_account=pick("HOLDUP_KEEPER_ACCOUNT", "keeper_account", f"keeper.{root}"),
+        treasury_private_key=pick("HOLDUP_TREASURY_KEY", "treasury_private_key"),
+        oracle_private_key=pick("HOLDUP_ORACLE_KEY", "oracle_private_key"),
+        keeper_private_key=pick("HOLDUP_KEEPER_KEY", "keeper_private_key"),
+        secret=pick("HOLDUP_SECRET", "secret"),
+        usdc_token=pick("HOLDUP_USDC_TOKEN", "usdc_token", USDC_TESTNET if network == "testnet" else "") or None,
+        husd_token=pick("HOLDUP_HUSD_TOKEN", "husd_token", "") or None,
+        telegram_bot_token=pick("TELEGRAM_BOT_TOKEN"),
+        telegram_webhook_secret=pick("TELEGRAM_WEBHOOK_SECRET"),
+        public_base_url=pick("PUBLIC_BASE_URL", None, "http://127.0.0.1:8000").rstrip("/"),
+        otari_api_key=pick("OTARI_API_KEY"),
+        otari_base_url=pick("OTARI_BASE_URL"),
+        otari_mode=pick("OTARI_MODE", None, "live" if env.get("OTARI_API_KEY") else "replay"),
+        database_path=pick("HOLDUP_DB", None, ".holdup/holdup.sqlite3"),
+    )
+    funds: dict[str, int] = {NEAR: int(pick("HOLDUP_DEMO_NEAR_YOCTO", None, str(2 * 10**24)))}
+    if s.husd_token:
+        funds[s.husd_token] = int(pick("HOLDUP_DEMO_HUSD", None, str(2_000 * 10**6)))
+    s.demo_funds = funds
+    return s

@@ -1,0 +1,69 @@
+"""Ports between the engine and its adapters.
+
+The engine only talks to these protocols, so the same flow runs against the
+NEAR sandbox, testnet, or the in-memory vault used by unit tests.
+"""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from .models import (
+    Hold,
+    PayeeStats,
+    PaymentContext,
+    SendResult,
+    TxResult,
+    UserAccount,
+    UserView,
+    VaultConfig,
+    Verdict,
+)
+
+
+class VaultPort(Protocol):
+    vault_id: str
+
+    # views
+    async def get_config(self) -> VaultConfig: ...
+    async def get_hold(self, hold_id: int) -> Hold | None: ...
+    async def get_holds_for(self, account_id: str, limit: int = 50) -> list[Hold]: ...
+    async def get_active_holds(self, account_id: str) -> list[Hold]: ...
+    async def get_due_holds(self, limit: int = 50) -> list[Hold]: ...
+    async def get_balance(self, account_id: str) -> dict[str, int]: ...
+    async def get_user(self, account_id: str) -> UserView | None: ...
+    async def get_payee_stats(self, account_id: str) -> PayeeStats: ...
+    async def account_exists(self, account_id: str) -> bool: ...
+    async def now_ms(self) -> int: ...
+
+    # signed by the user's own sub-account (function-call key, zero deposit)
+    async def send(
+        self, user: UserAccount, payee: str, asset: str, amount: int, memo_hash: str | None = None
+    ) -> SendResult: ...
+    async def cancel(self, user: UserAccount, hold_id: int) -> TxResult: ...
+    async def guardian_cancel(self, guardian: UserAccount, hold_id: int) -> TxResult: ...
+    async def add_trusted(self, user: UserAccount, payee: str) -> TxResult: ...
+    async def remove_trusted(self, user: UserAccount, payee: str) -> TxResult: ...
+    async def set_guardian(self, user: UserAccount, guardian: str | None) -> TxResult: ...
+
+    # signed by the oracle account (its only key can call extend_hold)
+    async def extend_hold(
+        self, hold_id: int, release_at_ms: int, reason_bits: int, evidence: str
+    ) -> TxResult: ...
+
+    # signed by the keeper account (its only key can call release)
+    async def release(self, hold_id: int) -> TxResult: ...
+
+    # signed by the treasury (root account): create the user's sub-account,
+    # register it in the vault and fund it with demo money
+    async def onboard_user(self, user: UserAccount, demo_funds: dict[str, int]) -> list[TxResult]: ...
+
+
+class RiskPort(Protocol):
+    async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict: ...
+
+
+class Notifier(Protocol):
+    async def notify(self, user_key: str, text: str, buttons: list[list[tuple[str, str]]] | None = None) -> None:
+        """Send a message to a channel user. Buttons are rows of (label, callback_data)."""
+        ...
