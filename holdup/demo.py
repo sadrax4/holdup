@@ -404,8 +404,9 @@ async def _everyday(story: Story) -> None:
     hold = await story.runtime.vault.get_hold(dinner.hold.id)
     assert hold is not None
     if hold.extensions:
-        # On a live network the story's payees are only as old as the deployment, so the checks
-        # may brake this payment (a brand-new account, say). Waiting that out would take an hour.
+        # On a live network the story's payees are only as old as the deployment, and the AI steps may
+        # brake this payment for it (to the rules a brand-new payee alone is only context). Waiting that
+        # out would take an hour.
         await story.show_hold(hold.id)
         story.say(
             f"  {ravi} was created with the demo deployment, so the checks braked this ordinary payment "

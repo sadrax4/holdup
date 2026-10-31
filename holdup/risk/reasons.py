@@ -21,6 +21,17 @@ REPORT_WINDOW_MS = 30 * DAY_MS
 STRONG_REASONS = frozenset({Reason.PAYEE_REPORTED, Reason.SECRET_REQUEST})
 """Reasons that justify a day-long brake without any AI step agreeing."""
 
+WEAK_REASONS = frozenset({Reason.NEW_ACCOUNT, Reason.URGENCY, Reason.IMPERSONATION})
+"""Signals the rules brake for only together with another one. Each alone is common in honest
+payments: a payee who opened an account this week, a real deadline, a message from a business.
+A rule can still mark one of its own patterns as strong (a request to move funds to a "protected"
+wallet is impersonation that brakes alone) or as weak (a trusted payee's name with a word added)."""
+
+CONTEXT_REASONS = frozenset({Reason.MULE_PATTERN})
+"""Facts the rules pass on to the AI checks and the Why? view but do not brake for on their own:
+shops, charities and landlords are paid by many different people every day. A busy payee whose
+account is also new is the money-mule profile; there it weighs as a weak signal (see ``weigh``)."""
+
 FAIL_CLOSED_REASONS = frozenset({Reason.AI_UNAVAILABLE, Reason.BUDGET_EXHAUSTED})
 """Reasons that describe a check that could not run rather than the payment itself."""
 
@@ -46,8 +57,11 @@ SHORT_LABELS: dict[Reason, str] = {
 
 
 def rules_hold_ms(findings: Iterable[Finding]) -> int:
-    """The wait the rules ask for: none when clean, 24 h for a strong reason, 1 h otherwise."""
-    reasons = {finding.reason for finding in findings}
+    """The wait the rules ask for: none without a reason, 24 h for a strong reason, 1 h otherwise.
+
+    Context findings are not reasons and ask for no wait.
+    """
+    reasons = {finding.reason for finding in findings if not finding.context}
     if not reasons:
         return 0
     return STRONG_HOLD_MS if reasons & STRONG_REASONS else PROVISIONAL_HOLD_MS

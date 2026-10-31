@@ -611,3 +611,71 @@ def test_findings_merge_by_reason_source_and_model() -> None:
     )
     assert [f.reason for f in merged] == [Reason.SECRET_REQUEST, Reason.PUBLIC_WARNING, Reason.NEW_ACCOUNT]
     assert merged[1].citations == ["https://1", "https://2"] and merged[1].detail == "b"
+
+
+# ----------------------------------------------------------------------
+# context from the rules
+# ----------------------------------------------------------------------
+
+YOUNG = Finding(Reason.NEW_ACCOUNT, "created about 5 h ago", "rules", context=True)
+BUSY = Finding(Reason.MULE_PATTERN, "40 different senders paid it in the last 24 h", "rules", context=True)
+
+
+async def test_rules_context_reaches_the_investigator_and_brakes_nothing() -> None:
+    risk, transport = make_risk("benign", rules=Rules(YOUNG, BUSY, hold_for_ms=0))
+    verdict = await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    assert not verdict.brake and verdict.hold_for_ms == 0 and verdict.reason_bits == 0
+    found = [(f.reason, f.context) for f in verdict.findings]
+    assert found == [(Reason.MULE_PATTERN, True), (Reason.NEW_ACCOUNT, True)]
+    assert "rules: nothing found, 2 as context" in verdict.summary
+    sent = {r.step: json.dumps(r.body["messages"]) for r in transport.requests}
+    assert "CONTEXT FROM THE HOLDUP RULES" in sent["investigator"]
+    assert "Payee account is brand new: created about 5 h ago" in sent["investigator"]
+    assert "CONTEXT FROM" not in sent["triage"]  # triage judges the message alone
+    assert "'" not in sent["investigator"].split("CONTEXT FROM", 1)[1]  # nothing for the gateway firewall to trip on
+
+
+async def test_rules_context_stays_context_next_to_a_rules_brake() -> None:
+    reason = Finding(Reason.DETAILS_CHANGED, "announces a new wallet or account", "rules")
+    risk, _ = make_risk("benign", rules=Rules(reason, BUSY))
+    verdict = await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    assert verdict.brake and verdict.hold_for_ms == HOUR and verdict.reason_bits == int(Reason.DETAILS_CHANGED)
+    assert [f.context for f in verdict.findings if f.reason == Reason.MULE_PATTERN] == [True]
+
+
+def test_rules_context_adds_to_a_reason_the_ai_found_but_is_none_itself() -> None:
+    triage = Finding(Reason.URGENCY, "message sets a deadline", "triage", TRIAGE_MODEL)
+    assert P.hold_for([YOUNG, BUSY]) == 0  # no reason to hold, so no wait
+    assert P.hold_for([triage]) == P.DAY_MS
+    assert P.hold_for([triage, YOUNG, BUSY]) == P.MAX_HOLD_MS  # three signals, as at 98941a1
+    # Approval words alone are context: they count towards three signals but are no strong injection.
+    approval = Finding(Reason.CHECKER_INJECTION, "says the payment is pre-approved", "rules", context=True)
+    assert P.hold_for([triage, approval]) == P.DAY_MS
+
+
+async def test_rules_context_lengthens_the_hold_once_the_ai_brakes() -> None:
+    risk, _ = make_risk("hero", rules=Rules(YOUNG, BUSY, hold_for_ms=0))
+    verdict = await risk.assess(make_hold("safe-wallet-77.testnet", 50), PaymentContext(forwarded_text=HERO))
+    assert verdict.brake and verdict.hold_for_ms == P.MAX_HOLD_MS
+
+
+def test_a_merged_finding_is_context_only_when_every_part_is() -> None:
+    merged = P.merge_findings([YOUNG, Finding(Reason.NEW_ACCOUNT, "young", "rules")])
+    assert len(merged) == 1 and not merged[0].context
+    assert P.merge_findings([BUSY])[0].context
+
+
+async def test_approval_words_passed_on_as_context_still_go_through_the_gate() -> None:
+    """The rules pass "pre-approved" on as context, not as a reason; it still counts as a suspected injection,
+    so the blocking guardrail sees the text first, and without one the investigator (it has tools) never does."""
+    approval = Finding(Reason.CHECKER_INJECTION, "says the payment is pre-approved", "rules", context=True)
+    client = replay_client(SETTINGS, "benign")
+    risk = P.OtariRisk(SETTINGS, client, Intel(), Rules(approval, hold_for_ms=0), None, None)
+    verdict = await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    assert [r.step for r in client.transport.requests] == ["triage", "gate", "investigator"]
+    assert not verdict.brake and verdict.reason_bits == 0
+    client = replay_client(SETTINGS, "benign")
+    risk = P.OtariRisk(SETTINGS, client, Intel(), Rules(approval, hold_for_ms=0), None, None)
+    risk.guard_url = None
+    await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    assert "withheld" in client.transport.requests[-1].body["messages"][1]["content"]

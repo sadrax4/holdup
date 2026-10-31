@@ -200,6 +200,7 @@ def fallback_evidence(
             "citations": [] if compact else list(f.citations[:2]),
         }
         for f in verdict.findings
+        if not f.context  # the evidence records why the hold was extended
     ]
     steps = [
         {

@@ -311,6 +311,9 @@ class Finding:
     source: str
     model: str | None = None
     citations: list[str] = field(default_factory=list)
+    # A fact worth passing on that is no reason to hold on its own (a busy payee, say). Context
+    # findings reach the AI steps and the Why? view, but no brake and no reason bit rests on them.
+    context: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -320,6 +323,7 @@ class Finding:
             "source": self.source,
             "model": self.model,
             "citations": list(self.citations),
+            "context": self.context,
         }
 
 
@@ -355,9 +359,11 @@ class Verdict:
 
     @property
     def reason_bits(self) -> int:
+        """The reasons the verdict rests on; context findings are not among them."""
         bits = 0
         for f in self.findings:
-            bits |= int(f.reason.value)
+            if not f.context:
+                bits |= int(f.reason.value)
         return bits
 
 

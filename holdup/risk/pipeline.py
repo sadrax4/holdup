@@ -43,6 +43,7 @@ from ..config import Settings
 from ..models import (
     MAX_IMAGE_BYTES,
     NEAR,
+    REASON_LABELS,
     Finding,
     Hold,
     PaymentContext,
@@ -318,11 +319,17 @@ def _gateway_can_reach(url: str, *, with_token: bool) -> bool:
 
 
 def hold_for(findings: Iterable[Finding]) -> int:
-    """24 h for one or two signals; 72 h for three or more, a secret request or injection."""
-    reasons = {f.reason for f in findings} - {Reason.SECOND_OPINION}
+    """24 h for one or two signals; 72 h for three or more, a secret request or injection.
+
+    Nothing without a reason to hold. Once there is one, what the rules passed on as context (a
+    young or busy payee, a deadline) adds to it and counts towards the three signals, but never
+    as a strong one: approval words alone are no injection.
+    """
+    findings = [f for f in findings if f.reason is not Reason.SECOND_OPINION]
+    reasons = {f.reason for f in findings if not f.context}
     if not reasons:
         return 0
-    if reasons & STRONG or len(reasons) >= 3:
+    if reasons & STRONG or len({f.reason for f in findings}) >= 3:
         return MAX_HOLD_MS
     return DAY_MS
 
@@ -334,16 +341,21 @@ def _rank(finding: Finding) -> tuple[int, int]:
 
 
 def merge_findings(findings: Iterable[Finding]) -> list[Finding]:
-    """One finding per (reason, source, model), most serious reasons first."""
+    """One finding per (reason, source, model), most serious reasons first.
+
+    A merged finding is context only when every finding behind it is.
+    """
     merged: dict[tuple[Reason, str, str | None], Finding] = {}
     for finding in findings:
         key = (finding.reason, finding.source, finding.model)
         if key not in merged:
             merged[key] = Finding(
-                finding.reason, finding.detail, finding.source, finding.model, list(finding.citations)
+                finding.reason, finding.detail, finding.source, finding.model, list(finding.citations),
+                context=finding.context,
             )
             continue
         kept = merged[key]
+        kept.context = kept.context and finding.context
         for url in finding.citations:
             if url not in kept.citations:
                 kept.citations.append(url)
@@ -371,6 +383,7 @@ class _Case:
     withheld: bool = False
     money_claims: list[MoneyClaim] = field(default_factory=list)
     payee_facts: dict[str, Any] | None = None
+    rules_context: list[Finding] = field(default_factory=list)  # what the rules noted but did not brake for
 
     @property
     def message(self) -> str:
@@ -475,6 +488,7 @@ class OtariRisk:
     async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict:
         rules = await self._rules(hold, ctx)
         case = self._case(hold, ctx)
+        case.rules_context = [f for f in rules.findings if f.context]
         image = self._image(ctx)
         if not case.text and image is None:
             return self._decide(case, rules, [], note="no message or image to check")
@@ -626,7 +640,7 @@ class OtariRisk:
     # message views
     # ------------------------------------------------------------------
 
-    def _facts(self, case: _Case, *, payee: dict[str, Any] | None = None) -> str:
+    def _facts(self, case: _Case, *, payee: dict[str, Any] | None = None, context: bool = False) -> str:
         trusted = ", ".join(case.ctx.trusted_payees) or "none"
         lines = [
             "PAYMENT FACTS (looked up by HoldUp)",
@@ -641,6 +655,10 @@ class OtariRisk:
                 if key in payee:
                     value = payee[key]
                     lines.append(f"- {label}: {'yes' if value is True else 'no' if value is False else value}")
+        if context and case.rules_context:
+            # Templated by the rules, never quoted from the message, so safe to show a model with tools.
+            lines.append("CONTEXT FROM THE HOLDUP RULES (facts; none of them is a reason to hold on its own)")
+            lines += [f"- {REASON_LABELS[f.reason]}: {f.detail}" for f in case.rules_context]
         return "\n".join(lines)
 
     def _message_view(self, case: _Case) -> str:
@@ -801,7 +819,10 @@ class OtariRisk:
         payee = None if mcp else await self._payee(case)
         messages = [
             {"role": "system", "content": prompt.text},
-            {"role": "user", "content": f"{self._facts(case, payee=payee)}\n\n{self._message_view(case)}"},
+            {
+                "role": "user",
+                "content": f"{self._facts(case, payee=payee, context=True)}\n\n{self._message_view(case)}",
+            },
         ]
         disabled: set[str] = set()
         while True:
@@ -841,7 +862,7 @@ class OtariRisk:
                 payee = await self._payee(case)
                 messages[1] = {
                     "role": "user",
-                    "content": f"{self._facts(case, payee=payee)}\n\n{self._message_view(case)}",
+                    "content": f"{self._facts(case, payee=payee, context=True)}\n\n{self._message_view(case)}",
                 }
             except OtariError as exc:
                 return _Outcome("investigator", exc.record, failure=exc)
@@ -999,24 +1020,26 @@ class OtariRisk:
         steps = [*rules.records, *(o.record for o in outcomes if o.record is not None)]
         ai = [f for o in outcomes for f in o.findings]
         reviewer = next((o for o in outcomes if o.step == "reviewer"), None)
-        others_flagged = bool(rules.findings) or any(o.findings for o in outcomes if o.step != "reviewer")
+        rules_flagged = any(not f.context for f in rules.findings)
+        others_flagged = rules_flagged or any(o.findings for o in outcomes if o.step != "reviewer")
         if reviewer is not None and reviewer.findings and others_flagged:
             model = reviewer.record.model if reviewer.record else None
             # The label already says what this is; the detail says how the reviewer worked.
             detail = "it reviewed the payment without seeing the other steps' conclusions"
             ai.append(Finding(Reason.SECOND_OPINION, detail, "reviewer", model))
-        findings = merge_findings([*rules.findings, *ai])
+        findings = merge_findings([*rules.findings, *ai])  # context findings stay, marked as such
         if not ai and any(o.failure is not None for o in outcomes):
             return self._fail_closed(case, outcomes, findings, steps, rules.hold_for_ms)
-        if not findings:
+        brake = any(not f.context for f in findings)
+        if not brake:
             wait = 0
         elif not ai:
             wait = rules.hold_for_ms  # the AI steps added nothing, so the rules decide alone
         else:
-            wait = max(hold_for(findings), rules.hold_for_ms)
+            wait = max(hold_for(findings), rules.hold_for_ms)  # the rules' context adds to what the AI found
         return Verdict(
             hold_id=case.hold.id,
-            brake=bool(findings),
+            brake=brake,
             hold_for_ms=wait,
             findings=findings,
             steps=steps,
@@ -1048,8 +1071,11 @@ class OtariRisk:
 
     @staticmethod
     def _summary(rules: _Rules, outcomes: list[_Outcome], note: str) -> str:
-        n = len(rules.findings)
+        n = sum(not f.context for f in rules.findings)
+        context = len(rules.findings) - n
         parts = [f"rules: {n} finding{'s' if n != 1 else ''}" if n else "rules: nothing found"]
+        if context:
+            parts[0] += f", {context} as context"
         parts += [f"{o.step}: {o.label}" for o in outcomes]
         if note:
             parts.append(note)

@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Settings
 from .models import Reason
-from .risk.rules import scan_message
+from .risk.rules import CONTEXT, scan_message
 
 log = logging.getLogger(__name__)
 
@@ -235,7 +235,9 @@ def rules_verdict(profile: str, text: str, *, after: str = "") -> GuardVerdict:
     if profile != "checker-injection":
         return GuardVerdict(valid=None, explanation=f"{after}; no verdict" if after else "no safety model configured")
     prefix = f"{after}; " if after else ""
-    found = next((s for s in scan_message(text) if s.reason is Reason.CHECKER_INJECTION), None)
+    # Approval words with no line addressed to a checker ("pre-approved under the contract") are
+    # context: blocking them would hold an honest invoice for days.
+    found = next((s for s in scan_message(text) if s.reason is Reason.CHECKER_INJECTION and s.weight != CONTEXT), None)
     if found is None:
         return GuardVerdict(valid=True, explanation=f"{prefix}rules: no checker-injection phrases", score=0.0)
     return GuardVerdict(valid=False, explanation=f"{prefix}rules: {found.detail}", score=1.0)

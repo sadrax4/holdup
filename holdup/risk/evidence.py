@@ -149,9 +149,14 @@ class _Reason:
 
 
 def _reason_entries(findings: Iterable[Finding]) -> list[_Reason]:
-    """One entry per reason bit of each finding, deduplicated and in canonical order."""
+    """One entry per reason bit of each finding, deduplicated and in canonical order.
+
+    Context findings are left out: the evidence records why the hold was extended.
+    """
     entries: set[_Reason] = set()
     for finding in findings:
+        if finding.context:
+            continue
         citations = tuple(dict.fromkeys(c for c in map(clean_citation, finding.citations) if c))[:MAX_CITATIONS]
         for reason in reasons_from_bits(int(finding.reason)):
             entries.add(_Reason(

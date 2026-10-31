@@ -30,7 +30,7 @@ RUST_TOOLCHAIN = $(shell rustup toolchain list 2>/dev/null | grep -q '^$(RUST_PI
 cargo = cd contracts && $(if $(RUST_TOOLCHAIN),RUSTUP_TOOLCHAIN=$(RUST_TOOLCHAIN) )cargo
 
 .PHONY: help setup test test-contract build-contract contracts sandbox-test \
-	demo-offline demo demo-sandbox deploy prove attack verify-deploy serve chat probe bench
+	demo-offline demo demo-sandbox deploy prove attack verify-deploy serve chat probe bench bench-rules
 
 help: ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-15s %s\n", $$1, $$2}'
@@ -101,4 +101,7 @@ probe: ## live checks of the Otari gateway (needs OTARI_API_KEY; spends at most 
 	$(HOLDUP) probe $(PROBE_ARGS)
 
 bench: ## ScamBench on the triage prompt (replays recorded answers unless OTARI_API_KEY is set)
-	$(PY) bench/run.py $(BENCH_ARGS)
+	$(PY) -m bench.run $(BENCH_ARGS)
+
+bench-rules: ## ScamBench on the rules layer, offline and free (SPLIT=dev|test|all, default dev)
+	$(PY) -m bench.run --rules --split $(or $(SPLIT),dev)

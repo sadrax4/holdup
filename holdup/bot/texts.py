@@ -11,7 +11,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from ..config import Settings
-from ..messages import fmt_amount, fmt_utc, reason_lines, short_model
+from ..messages import fmt_amount, fmt_utc, reason_lines, short_model, split_context
 from ..models import Hold, HoldStatus, StepRecord, WhyView, reasons_from_bits
 from ..risk.reasons import SHORT_LABELS
 from .samples import Sample
@@ -167,13 +167,14 @@ def why_text(settings: Settings, view: WhyView, now_ms: int, *, page: str = "", 
         status[:1].upper() + status[1:] + ".",  # str.capitalize() would also lowercase "Nov" and "UTC"
     ]
     findings = [f for f in view.findings if f.reason]
-    if findings:
+    reasons, _ = split_context(findings)
+    if reasons:
         lines.append("What the checks found:")
-        lines += reason_lines(findings)
     elif hold.status == HoldStatus.HELD:
         lines.append("No warning signs so far. New payees always wait; checks can only add time.")
     else:
         lines.append("No warning signs were recorded.")
+    lines += reason_lines(findings)  # context findings come last, under their own heading
     summary = steps_summary(view.steps)
     if summary:
         lines.append(f"Checked by: {summary}")

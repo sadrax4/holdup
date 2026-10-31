@@ -21,6 +21,7 @@ Buttons = list[list[tuple[str, str]]]
 
 HOUR_MS = 3_600_000
 DETAIL_MAX = 120
+CONTEXT_HEADING = "Context, not a reason to hold on its own:"
 
 _PLAIN_TAGS = {
     "rules": "rules",
@@ -87,8 +88,30 @@ def finding_tag(finding: Finding) -> str:
     return f"[{label} {model}]" if model else f"[{label}]"
 
 
+def split_context(findings: Iterable[Finding]) -> tuple[list[Finding], list[Finding]]:
+    """The findings a hold rests on, and those passed on only as context.
+
+    A reason that any step found as a reason is one, and its context findings go with it
+    (their tags show that the rules saw it too).
+    """
+    findings = list(findings)
+    held = {f.reason for f in findings if not f.context}
+    return [f for f in findings if f.reason in held], [f for f in findings if f.reason not in held]
+
+
 def reason_lines(findings: Iterable[Finding]) -> list[str]:
-    """One line per reason, merging the tags of every step that found it."""
+    """One line per reason, merging the tags of every step that found it.
+
+    Context findings follow under ``CONTEXT_HEADING``, so they are never read as reasons.
+    """
+    reasons, context = split_context(findings)
+    lines = _grouped_lines(reasons)
+    if context:
+        lines += [CONTEXT_HEADING, *_grouped_lines(context)]
+    return lines
+
+
+def _grouped_lines(findings: Iterable[Finding]) -> list[str]:
     grouped: dict[Reason, list[Finding]] = {}
     for finding in findings:
         grouped.setdefault(finding.reason, []).append(finding)
@@ -225,14 +248,25 @@ def check_slow(settings: Settings, hold: Hold, until_ms: int, *, now_ms: int, tx
     return _with_footer(lines, tx_text=tx_text)
 
 
-def checks_clear(settings: Settings, hold: Hold, *, now_ms: int, after_brake: bool = False) -> str:
+def checks_clear(
+    settings: Settings,
+    hold: Hold,
+    *,
+    now_ms: int,
+    after_brake: bool = False,
+    context: Iterable[Finding] = (),
+) -> str:
     when = fmt_utc(hold.release_at_ms, now_ms)
     if after_brake:
         return (
             "Full check finished: no further warning signs.\n"
             f"The earlier brake stays until {when}; holds can only get longer."
         )
-    return f"Checks finished: nothing unusual found. {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee} releases at {when}."
+    payment = f"{fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee} releases at {when}."
+    lines = reason_lines(context)
+    if not lines:
+        return f"Checks finished: nothing unusual found. {payment}"
+    return "\n".join([f"Checks finished: no reason to hold it longer. {payment}", *lines])
 
 
 def brake_not_recorded(settings: Settings, hold: Hold, findings: Iterable[Finding]) -> str:

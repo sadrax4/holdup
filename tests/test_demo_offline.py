@@ -9,6 +9,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from holdup.cli import Console, main
 from holdup.demo import Transcript, TranscriptNotifier, offline_demo_runtime, run_offline_attack, run_offline_demo
 from holdup.models import HoldStatus, Reason
@@ -148,14 +150,16 @@ def test_python_dash_m_holdup_demo_offline() -> None:
 
 
 async def test_a_braked_everyday_payment_does_not_stall_the_story(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """On testnet the story's payees are as old as the deployment, so the rules brake the dinner payment
-    as a new account; the story used to sleep through that hour-long brake (review finding)."""
+    """When the checks brake the dinner payment, the story moves on instead of sleeping through the brake
+    (review finding). On testnet the AI steps may brake it because the story's payees are as old as the
+    deployment; a young payee alone no longer brakes it in the rules, so two recent reports do it here."""
     import holdup.runtime
     from holdup.chain.fake import DEMO_START_MS
     from holdup.intel import load_payee_fixtures
 
     fixtures = load_payee_fixtures()
-    fixtures["payees"]["ravi.testnet"] = {**fixtures["payees"]["ravi.testnet"], "age_hours": 1}
+    reported = {"cancelled_after_flag": 2, "last_report_ms": DEMO_START_MS}
+    fixtures["payees"]["ravi.testnet"] = {**fixtures["payees"]["ravi.testnet"], "reputation": reported}
     monkeypatch.setattr(holdup.runtime, "load_payee_fixtures", lambda: fixtures)
     result = await run_offline_demo(out=None, rules_only=True)
     text = result.transcript.text
@@ -164,3 +168,39 @@ async def test_a_braked_everyday_payment_does_not_stall_the_story(monkeypatch) -
     assert "the story moves on rather than wait" in text
     assert "Released: 12.5 HUSD" not in text
     assert result.runtime.clock() - DEMO_START_MS < 5 * 60_000  # never the hour of the brake
+
+
+async def test_a_young_payee_alone_no_longer_brakes_dinner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """A payee created an hour ago, as on testnet, is context for the checks and not a reason to hold:
+    the dinner split is released after the normal wait, and the Why? view names the young account as context."""
+    import holdup.runtime
+    from holdup.intel import load_payee_fixtures
+
+    fixtures = load_payee_fixtures()
+    fixtures["payees"]["ravi.testnet"] = {**fixtures["payees"]["ravi.testnet"], "age_hours": 1}
+    monkeypatch.setattr(holdup.runtime, "load_payee_fixtures", lambda: fixtures)
+    result = await run_offline_demo(out=None, rules_only=True)
+    benign = await result.runtime.vault.get_hold(result.holds["benign"])
+    assert benign.status == HoldStatus.RELEASED and benign.extensions == 0 and benign.reason_bits == 0
+    view = await result.runtime.engine.why(benign.id)
+    assert view is not None and [(f.reason, f.context) for f in view.findings] == [(Reason.NEW_ACCOUNT, True)]
+    text = result.transcript.text
+    assert "Checks finished: no reason to hold it longer." in text and "Context, not a reason to hold" in text
+
+
+@pytest.mark.parametrize("rules_only", [False, True])
+async def test_a_payment_to_the_mule_wallet_without_a_message_is_braked(rules_only: bool) -> None:
+    """Most payments come without a forwarded message, and then no model reads anything: the rules decide
+    alone. The demo's scam wallet is two hours old and paid by fourteen senders (the money-mule profile),
+    so the rules brake it, with recorded AI answers and with the AI switched off."""
+    lines: list[str] = []
+    runtime = offline_demo_runtime(TranscriptNotifier(Transcript(lines.append)), rules_only=rules_only)
+    engine = runtime.engine
+    await engine.start("k:lee", "Lee", chat_ref="test-lee")
+    asset = runtime.settings.asset_by_symbol("HUSD")
+    paid = await engine.pay("k:lee", "safe-wallet-77.testnet", asset.asset_id, 20 * 10**asset.decimals)
+    await engine.wait_idle()
+    hold = await runtime.vault.get_hold(paid.hold.id)
+    assert hold is not None and hold.status == HoldStatus.HELD and hold.extensions >= 1
+    assert hold.reason_bits == Reason.NEW_ACCOUNT | Reason.MULE_PATTERN
+    assert any("Brakes on - held until" in line for line in lines)

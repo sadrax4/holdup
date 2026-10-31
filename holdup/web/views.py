@@ -15,7 +15,7 @@ from typing import Any
 
 from ..chain import links
 from ..config import Settings
-from ..messages import finding_tag, fmt_amount, fmt_duration, fmt_utc, short_model
+from ..messages import finding_tag, fmt_amount, fmt_duration, fmt_utc, short_model, split_context
 from ..models import (
     REASON_LABELS,
     Finding,
@@ -83,6 +83,7 @@ class HoldView:
     evidence_published: str | None
     context_note: str
     account_urls: dict[str, str]
+    context: list[ReasonRow] = field(default_factory=list)  # noted by the rules, not a reason to hold
 
     @property
     def evidence_match(self) -> bool | None:
@@ -128,7 +129,21 @@ def tx_link(settings: Settings, label: str, tx_hash: str, *, simulated: bool) ->
 
 
 def reason_rows(findings: Iterable[Finding]) -> list[ReasonRow]:
-    """One row per reason, with the tag of every step that found it (same grouping as the bot)."""
+    """One row per reason the hold rests on, with the tag of every step that found it (as the bot groups them).
+
+    Context findings are left out; ``context_rows`` lists them.
+    """
+    reasons, _ = split_context(findings)
+    return _rows(reasons)
+
+
+def context_rows(findings: Iterable[Finding]) -> list[ReasonRow]:
+    """One row per reason that was only passed on as context: noted, but no reason to hold on its own."""
+    _, context = split_context(findings)
+    return _rows(context)
+
+
+def _rows(findings: Iterable[Finding]) -> list[ReasonRow]:
     grouped: dict[Reason, list[Finding]] = {}
     for finding in findings:
         grouped.setdefault(finding.reason, []).append(finding)
@@ -261,6 +276,7 @@ def build_hold_view(
         cap=fmt_duration(config.max_hold_ms),
         progress=progress,
         reasons=reason_rows(f for f in findings if f.reason),
+        context=context_rows(f for f in findings if f.reason),
         timeline=build_timeline(
             settings, hold, config=config, now_ms=now_ms, txs=txs, evidence_docs=evidence_docs, simulated=simulated
         ),

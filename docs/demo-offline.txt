@@ -49,7 +49,7 @@ Priya: send 50 USDC to safe-wallet-77.testnet
                 - Payee account is brand new: created about 2 h ago [rules] [MCP near-intel] [code execution]
                 - Pressure or an artificial deadline: a short deadline, a threat to freeze or lose funds [rules] [triage gpt-oss-20b]
                 Only you or your guardian can cancel. Nobody can release it early.
-                tx BdN9Lj...DWDL (simulated)
+                tx 2KPVU4...zokp (simulated)
                 [Cancel & refund]  [Why?]
   bot -> Sam: Guardian alert: Priya's payment of 50 HUSD to safe-wallet-77.testnet is held until 5 Nov 09:00 UTC.
               - Asks for a recovery phrase, key or code: the linked page asks for a 12 word recovery phrase [web fetch]
@@ -64,7 +64,7 @@ Priya: send 50 USDC to safe-wallet-77.testnet
               [Cancel for Priya]  [Why?]
   checks: 3 model requests through Otari (triage, gate, investigator), answered from recorded fixtures.
   chain: hold #0 is held, releases 5 Nov 09:00 UTC; 2 extension(s); reason bits 4911 = NEW_ACCOUNT, MULE_PATTERN, IMPERSONATION, URGENCY, CHECKER_INJECTION, PHISHING_LINK, PUBLIC_WARNING, SECRET_REQUEST
-  chain: evidence sha256 80ebeb2c459a26b9...; the stored evidence JSON (4072 bytes) hashes to the same value
+  chain: evidence sha256 a5de186f58d81e9c...; the stored evidence JSON (4072 bytes) hashes to the same value
 Priya taps "Why?".
   bot -> Priya: Payment #0: 50 HUSD to safe-wallet-77.testnet
                 Brakes on, held until 5 Nov 09:00 UTC.
@@ -78,10 +78,10 @@ Priya taps "Why?".
                 - Linked page asks for secrets or imitates a login: the linked page imitates a wallet sign-in page [web fetch]
                 - Matches public fraud warnings: consumer protection agencies warn that requests to move funds into a protected wallet are a common scam [web search, 2 sources]
                 Checked by: precheck, triage gpt-oss-20b, gate gpt-oss-20b (blocked the text), investigator gpt-oss-120b ($0.0216)
-                Evidence sha256 (on-chain): 80ebeb2c459a26b94c8dcd359551e3a42a361cd9b4c2b35ae14069f7dd51dbba
+                Evidence sha256 (on-chain): a5de186f58d81e9c6c25181871649baa57cb38fca8660b30176cb8c000edba5c
   [web fetch] cites: http://127.0.0.1:8000/fixtures/coinhaven/verify
   [web search, 2 sources] cites: https://consumer.ftc.gov/articles/what-know-about-cryptocurrency-and-scams, https://www.consumerfinance.gov/consumer-tools/fraud/
-  step triage: openai/gpt-oss-20b, via deepinfra (recorded), 1 attempt, 0.000067 USD, 37 ms, guardrail: flagged
+  step triage: openai/gpt-oss-20b, via deepinfra (recorded), 1 attempt, 0.000067 USD, 36 ms, guardrail: flagged
   step gate: openai/gpt-oss-20b, 1 attempt, 1 ms, guardrail: flagged, the guardrail blocked the text, so later steps only saw facts HoldUp extracted
   step investigator: openai/gpt-oss-120b, via deepinfra (recorded), 1 attempt, 0.021523 USD, 7 ms, tools: otari_web_search, otari_web_fetch, guardrail: passed
 Priya taps "Cancel & refund".

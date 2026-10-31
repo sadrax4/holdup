@@ -106,7 +106,8 @@ def _iso(ms: int | None) -> str:
     return datetime.fromtimestamp(ms / 1000, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _flags(verdict: Verdict | None) -> TypeGuard[Verdict]:
+def asks_to_brake(verdict: Verdict | None) -> TypeGuard[Verdict]:
+    """Whether a verdict asks for a brake. A quick rules verdict that does goes on chain at once."""
     return verdict is not None and verdict.brake and verdict.reason_bits != 0
 
 
@@ -116,7 +117,7 @@ def _is_failure(finding: Finding) -> bool:
 
 def _adds_nothing(fast: Verdict | None, full: Verdict) -> bool:
     """The full check found only what the quick brake already put on chain, and asks no longer."""
-    return _flags(fast) and full.reason_bits & ~fast.reason_bits == 0 and full.hold_for_ms <= PROVISIONAL_HOLD_MS
+    return asks_to_brake(fast) and full.reason_bits & ~fast.reason_bits == 0 and full.hold_for_ms <= PROVISIONAL_HOLD_MS
 
 
 def _keep_rules_decision(fast: Verdict | None, full: Verdict | None) -> Verdict | None:
@@ -125,10 +126,10 @@ def _keep_rules_decision(fast: Verdict | None, full: Verdict | None) -> Verdict 
     Only matters when the rules asked for more than the provisional hour (a
     reported payee, a secret request): that wait stands even if the AI found nothing.
     """
-    if full is None or not _flags(fast) or fast.hold_for_ms <= PROVISIONAL_HOLD_MS:
+    if full is None or not asks_to_brake(fast) or fast.hold_for_ms <= PROVISIONAL_HOLD_MS:
         return full
     extra = [f for f in fast.findings if f not in full.findings]
-    hold_for = max(fast.hold_for_ms, full.hold_for_ms if _flags(full) else 0)
+    hold_for = max(fast.hold_for_ms, full.hold_for_ms if asks_to_brake(full) else 0)
     return replace(full, brake=True, hold_for_ms=hold_for, findings=[*full.findings, *extra])
 
 
@@ -462,7 +463,7 @@ class Engine:
         try:
             if self.full_risk is not None:
                 fast = await self._assess_fast(hold, ctx)
-                if _flags(fast):
+                if asks_to_brake(fast):
                     provisional = replace(
                         fast, brake=True, provisional=True, hold_for_ms=PROVISIONAL_HOLD_MS
                     )
@@ -529,7 +530,7 @@ class Engine:
     ) -> None:
         if verdict is None:
             return
-        if _flags(verdict) and not _adds_nothing(fast, verdict):
+        if asks_to_brake(verdict) and not _adds_nothing(fast, verdict):
             await self._apply_verdict(user_key, hold, verdict, "final")
             return
         # Clean, or nothing beyond the quick brake: no second extension and no second "Brakes on".
@@ -541,7 +542,11 @@ class Engine:
             return
         now = await self.vault.now_ms()
         text = messages.checks_clear(
-            self.settings, current, now_ms=now, after_brake=current.extensions > 0
+            self.settings,
+            current,
+            now_ms=now,
+            after_brake=current.extensions > 0,
+            context=[f for f in verdict.findings if f.context],
         )
         await self._notify(user_key, text)
 
@@ -638,7 +643,7 @@ class Engine:
             findings = [Finding(reason, f"AI check failed: {detail}", source="fail_closed")]
             if verdict is not None:
                 findings += [f for f in verdict.findings if not _is_failure(f)]
-            if _flags(fast):
+            if asks_to_brake(fast):
                 findings += [f for f in fast.findings if f not in findings]
 
             now = await self.vault.now_ms()
@@ -647,7 +652,7 @@ class Engine:
                 max(state.base_release_ms + state.failures * FAIL_CLOSED_STEP_MS, now + FAIL_CLOSED_STEP_MS),
                 cap,
             )
-            if _flags(fast):  # with the AI down, the rules verdict stands as final
+            if asks_to_brake(fast):  # with the AI down, the rules verdict stands as final
                 target = max(target, now + fast.hold_for_ms)
             closed = Verdict(
                 hold_id=hold.id,
@@ -1128,6 +1133,7 @@ def finding_from_dict(data: dict[str, Any]) -> Finding:
         source=data.get("source") or "",
         model=data.get("model"),
         citations=list(data.get("citations") or []),
+        context=bool(data.get("context")),
     )
 
 

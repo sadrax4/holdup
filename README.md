@@ -85,6 +85,7 @@ make attack          # three attacks and why each one fails
 make prove           # the oracle and user keys try forbidden actions; every one is refused
 make serve           # web app and web console on http://127.0.0.1:8000 (open /console)
 make test            # the Python tests; `make test-contract` runs the Rust tests
+make bench-rules     # ScamBench (labelled payments) on the rules layer, dev split: bench/results-rules.md
 ```
 
 The story ([docs/demo-offline.txt](docs/demo-offline.txt)): Priya forwards a fictional "CoinHaven

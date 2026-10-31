@@ -367,7 +367,9 @@ class Console:
             self.out(error_text("E_HOLD_NOT_FOUND"))
             return
         for finding in view.findings:
-            self.out(f"- {finding.reason.name} [{finding.source}{' ' + finding.model if finding.model else ''}] {finding.detail}")
+            context = " (context)" if finding.context else ""
+            source = f"{finding.source}{' ' + finding.model if finding.model else ''}"
+            self.out(f"- {finding.reason.name}{context} [{source}] {finding.detail}")
         for step in view.steps:
             fields = (("model", step.model), ("provider", step.provider), ("fallback", step.fallback),
                       ("attempts", step.attempts), ("cost USD", step.cost_usd), ("latency ms", step.latency_ms))

@@ -270,6 +270,7 @@ class Site:
             {
                 "why": why,
                 "reasons": views.reason_rows(f for f in why.findings if f.reason),
+                "context": views.context_rows(f for f in why.findings if f.reason),
                 "steps": views.step_rows(why.steps),
                 "totals": views.step_totals(why.steps),
                 "mcp_calls": [views.mcp_call_text(c) for c in self.store.get_mcp_calls(hold_id)],

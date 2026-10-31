@@ -431,3 +431,13 @@ def test_unexpected_errors_get_a_friendly_answer(world: World, caplog: pytest.Lo
     assert data.status_code == 500
     assert data.json() == {"error": "Something went wrong on our side. Please try again in a moment."}
     assert "GET /h/1 failed" in caplog.text
+
+
+def test_context_findings_are_shown_apart_from_the_reasons(world: World) -> None:
+    hold = world.braked_hold()
+    busy = Finding(Reason.MULE_PATTERN, "40 different senders paid it in the last 24 h", "rules", context=True)
+    world.engine.why_views[hold.id].findings.append(busy)
+    for path in (f"/h/{hold.id}", f"/why/{hold.id}"):
+        text = visible(world.client.get(path).text)
+        assert text.index("Payee account is brand new") < text.index("None of them is a reason to hold")
+        assert text.index("None of them is a reason to hold") < text.index("Payee is collecting from many unrelated")

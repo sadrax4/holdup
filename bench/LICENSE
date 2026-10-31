@@ -1,0 +1,20 @@
+ScamBench data licence
+
+The ScamBench data in this folder is released under the Creative Commons Attribution 4.0
+International licence (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+(legal code: https://creativecommons.org/licenses/by/4.0/legalcode).
+
+This covers scambench.jsonl (every item, its notes and its split), DATASHEET.md and SOURCES.md.
+Suggested attribution: "ScamBench v1.1, HoldUp project, CC BY 4.0".
+
+The scam patterns draw on public warnings. US federal works (FBI IC3, CFTC, SEC investor.gov) are
+in the public domain. The UK pages (GOV.UK, NCSC, Stop! Think Fraud) are used under the Open
+Government Licence v3.0: Contains public sector information licensed under the Open Government
+Licence v3.0. No source text is reproduced in the items, and no agency endorses ScamBench.
+SOURCES.md gives the URL and licence of every source.
+
+All names, brands, agencies, accounts and domains in the items are fictional. The items were
+written with AI assistance (see DATASHEET.md, section 5).
+
+The code in this folder (run.py, validate.py) and the reports it writes are part of HoldUp and
+are licensed under the MIT licence in the repository root.
