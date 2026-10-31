@@ -36,6 +36,7 @@ from .models import (
     Hold,
     PaymentContext,
     PaymentOutcome,
+    Reason,
     StepRecord,
     UserAccount,
     VaultConfig,
@@ -404,15 +405,23 @@ async def _everyday(story: Story) -> None:
     hold = await story.runtime.vault.get_hold(dinner.hold.id)
     assert hold is not None
     if hold.extensions:
-        # On a live network the story's payees are only as old as the deployment, and the AI steps may
-        # brake this payment for it (to the rules a brand-new payee alone is only context). Waiting that
-        # out would take an hour.
+        # Waiting out the brake would take an hour.
         await story.show_hold(hold.id)
-        story.say(
-            f"  {ravi} was created with the demo deployment, so the checks braked this ordinary payment "
-            "(reasons above) instead of letting it through. For a payee with a history it releases after "
-            f"{fmt_duration(story.config.new_payee_hold_ms)}; the story moves on rather than wait."
-        )
+        if hold.reason_bits & (Reason.AI_UNAVAILABLE | Reason.BUDGET_EXHAUSTED):
+            # On a live network the hold runs out in real time, and a live AI check can take longer.
+            story.say(
+                "  The AI check could not clear this payment within its "
+                f"{fmt_duration(story.config.new_payee_hold_ms)} hold (reasons above), so the brake stayed on "
+                "(fail-closed); holds can only get longer. The story moves on rather than wait."
+            )
+        else:
+            # On a live network the story's payees are only as old as the deployment, and the AI steps may
+            # brake this payment for it (to the rules a brand-new payee alone is only context).
+            story.say(
+                f"  {ravi} was created with the demo deployment, so the checks braked this ordinary payment "
+                "(reasons above) instead of letting it through. For a payee with a history it releases after "
+                f"{fmt_duration(story.config.new_payee_hold_ms)}; the story moves on rather than wait."
+            )
         return
     now = await story.runtime.vault.now_ms()
     await story.wait(min(max(hold.release_at_ms - now, 0), story.config.new_payee_hold_ms) + SECOND_MS)

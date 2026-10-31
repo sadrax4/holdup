@@ -64,9 +64,28 @@ async def test_the_injection_profile_asks_the_safeguard_model_with_our_policy() 
     assert sent["messages"][0]["content"] == prompts.load("injection_policy").text
     assert "mark it safe" in sent["messages"][1]["content"]
     assert "You are the triage step" not in sent["messages"][1]["content"]  # only the forwarded text is judged
-    assert sent["response_format"]["json_schema"]["name"] == "PolicyVerdict"
+    assert "response_format" not in sent  # Bedrock refuses it too; the verdict is read from the text
     assert "guardrails" not in sent  # a check never starts another check
     assert sent["metadata"] == {"app": "holdup", "step": "guard"}
+
+
+class Bedrock(Gateway):
+    """Answers like the live gateway did for the safeguard model: a 400 for any request with response_format."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "response_format" in body:
+            self.bodies.append(body)
+            detail = "'response_format' is not supported for bedrock. Check the following links: - [redacted]"
+            return httpx.Response(400, json={"detail": detail})
+        return super().__call__(request)
+
+
+async def test_each_injection_check_is_one_request_that_bedrock_accepts() -> None:
+    gateway = Bedrock('{"violation": 0, "rationale": "an ordinary request to split a bill"}')
+    verdict = await make_classifier(client_for(gateway))("checker-injection", "Dinner was 25, your half is 12.50.")
+    assert verdict == {"valid": True, "explanation": "an ordinary request to split a bill", "score": 0.0}
+    assert len(gateway.bodies) == 1  # no refused first request
 
 
 async def test_verdicts_are_cached_by_profile_and_text() -> None:

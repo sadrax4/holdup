@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Callable
+import time
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -11,7 +13,7 @@ import pytest
 
 from holdup.config import Settings
 from holdup.risk import otari as O
-from holdup.risk.prompts.contracts import TriageResult
+from holdup.risk.prompts.contracts import ReviewerResult, TriageResult
 
 BACKTICK = chr(0x60)
 TRIAGE_JSON = {
@@ -351,6 +353,226 @@ async def test_a_stream_that_closes_without_finishing_is_a_failure() -> None:
     assert caught.value.label == "provider_stream_interrupted"
 
 
+async def test_a_stream_kept_open_by_keepalives_ends_at_the_time_limit_and_the_next_family_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live 2026-10-31: gpt-oss-120b sent one turn of reasoning, then only keepalive comments for 209 s."""
+    monkeypatch.setattr(O, "TOOL_LOOP_TIMEOUT_S", 0.5)
+    thinking = "Let us run code."
+    opening = [
+        chunk({"content": "", "role": "assistant", "provider_specific_fields": {"reasoning_content": None}}),
+        chunk(
+            {
+                "content": "",
+                "role": "assistant",
+                "reasoning": thinking,
+                "reasoning_content": thinking,
+                "provider_specific_fields": {"reasoning_content": thinking},
+            }
+        ),
+    ]
+
+    async def stalled() -> AsyncIterator[bytes]:
+        for event in opening:
+            yield f"data: {json.dumps(event)}\n\n".encode()
+        while True:
+            await asyncio.sleep(0.05)
+            yield b": keepalive\n\n"
+
+    def handler(body: dict[str, Any], req: httpx.Request) -> httpx.Response:
+        stream = {**SERVED, "content-type": "text/event-stream"}
+        if body["model"] == O.INVESTIGATOR_MODEL:
+            return httpx.Response(200, headers=stream, content=stalled())
+        answer = [chunk({"content": '{"findings": [], "brake": false}'}, "stop"), {**chunk(), "choices": []}]
+        served = {**stream, "otari-model": "deepseek-ai/DeepSeek-V4.1-Flash-1017"}
+        return httpx.Response(200, headers=served, content=sse(answer))
+
+    gateway = Gateway(handler)
+    started = time.monotonic()
+    text, record = await asyncio.wait_for(
+        client_for(gateway).chat(
+            "investigator",
+            O.INVESTIGATOR_MODEL,
+            [{"role": "user", "content": "check this payment"}],
+            tools=[{"type": O.CODE_EXECUTION}],
+            fallbacks=O.fallbacks_for(O.INVESTIGATOR_MODEL),
+        ),
+        10,
+    )
+    assert time.monotonic() - started < 5
+    assert json.loads(text) == {"findings": [], "brake": False}
+    assert [b["model"] for b in gateway.bodies] == [O.INVESTIGATOR_MODEL, O.REVIEWER_MODEL]
+    assert record.model == O.REVIEWER_MODEL and record.fallback is True and record.attempts == 2
+
+
+async def test_a_stalled_stream_without_a_fallback_fails_as_a_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(O, "TOOL_LOOP_TIMEOUT_S", 0.3)
+
+    async def keepalives() -> AsyncIterator[bytes]:
+        while True:
+            await asyncio.sleep(0.05)
+            yield b": keepalive\n\n"
+
+    def handler(body: dict[str, Any], req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={**SERVED, "content-type": "text/event-stream"}, content=keepalives())
+
+    with pytest.raises(O.OtariUnavailable) as caught:
+        await asyncio.wait_for(client_for(Gateway(handler)).chat("reviewer", O.REVIEWER_MODEL, [], stream=True), 10)
+    assert caught.value.label == "timeout" and caught.value.record.error == "timeout"
+
+
+async def test_the_check_deadline_ends_an_attempt_and_no_other_model_starts_after_it() -> None:
+    async def keepalives() -> AsyncIterator[bytes]:
+        while True:
+            await asyncio.sleep(0.05)
+            yield b": keepalive\n\n"
+
+    def handler(body: dict[str, Any], req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={**SERVED, "content-type": "text/event-stream"}, content=keepalives())
+
+    gateway = Gateway(handler)
+    started = time.monotonic()
+    with pytest.raises(O.OtariUnavailable) as caught:
+        await asyncio.wait_for(
+            client_for(gateway).chat(
+                "investigator",
+                O.INVESTIGATOR_MODEL,
+                [],
+                tools=[{"type": O.CODE_EXECUTION}],
+                fallbacks=O.fallbacks_for(O.INVESTIGATOR_MODEL),
+                deadline=started + 0.3,
+            ),
+            10,
+        )
+    assert time.monotonic() - started < 2  # well before the 150 s limit of one attempt
+    assert caught.value.label == "timeout" and caught.value.record.attempts == 3
+    assert [b["model"] for b in gateway.bodies] == [O.INVESTIGATOR_MODEL]  # the fallbacks were never sent
+
+
+def turns(*answers: tuple[str, dict[str, Any]], usage: dict[str, Any] | None = None) -> bytes:
+    """A streamed tool loop: each (completion id, chunk) pair is one model turn, then the usage chunk."""
+    events = [{**event, "id": turn} for turn, event in answers]
+    last = answers[-1][0]
+    events.append({**chunk(), "id": last, "choices": [], "usage": usage or {"cost_usd": "0.010219"}})
+    return sse(events)
+
+
+async def test_rounds_of_tools_the_stream_does_not_report_are_recorded_as_sandbox_runs() -> None:
+    """Live 2026-10-31: sandbox runs left no otari_tool_calls, only a new completion id and a tool fee."""
+    search = {
+        "id": "otari_ws_1",
+        "type": "web_search",
+        "status": "completed",
+        "query": "northwind-paper.testnet scam",
+        "sources": [{"url": "https://a.example/r", "title": "A", "published_date": None}],
+    }
+    reviewer = turns(
+        ("chatcmpl-1", chunk({"content": "", "role": "assistant", "provider_specific_fields": {}})),
+        ("chatcmpl-2", chunk({"content": '{"brake": false}'}, "stop")),
+        usage={"prompt_tokens": 2568, "completion_tokens": 158, "estimated_cost": 4.04152e-05, "cost_usd": "0.010091"},
+    )
+    investigator = turns(
+        ("chatcmpl-1", chunk(otari_tool_calls=[search])),
+        ("chatcmpl-2", chunk({"content": "", "role": "assistant", "reasoning": "Now sum the items."})),
+        ("chatcmpl-3", chunk({"content": '{"findings": []}'}, "stop")),
+    )
+    one_turn = turns(("chatcmpl-1", chunk({"content": '{"findings": []}'}, "stop")))
+
+    async def record_of(body: bytes, **kwargs: Any) -> Any:
+        stream = {**SERVED, "content-type": "text/event-stream"}
+        gateway = Gateway(lambda b, r: httpx.Response(200, headers=stream, content=body))
+        _, record = await client_for(gateway).chat("x", O.REVIEWER_MODEL, [], **kwargs)
+        return record
+
+    code = [{"type": O.CODE_EXECUTION}]
+    sandbox = {"name": "otari_code_execution", "status": "inferred", "rounds": 1}
+    assert (await record_of(reviewer, tools=code)).tool_calls == [sandbox]
+    assert (await record_of(reviewer, tools=code)).cost_usd == pytest.approx(0.010091)
+    searched = await record_of(investigator, tools=[{"type": O.WEB_SEARCH, "max_uses": 3}, *code])
+    assert [c["name"] for c in searched.tool_calls] == ["otari_web_search", "otari_code_execution"]
+    assert searched.tool_calls[1] == sandbox  # the round with the search was reported; the other was not
+    assert (await record_of(one_turn, tools=code)).tool_calls == []
+    # With near-intel attached, a round the gateway did not report may have been an MCP call.
+    servers = [{"name": "near-intel", "url": "https://h.example/mcp"}]
+    assert (await record_of(reviewer, tools=code, mcp_servers=servers)).tool_calls == []
+    assert (await record_of(reviewer, tools=[{"type": O.WEB_SEARCH}])).tool_calls == []
+
+
+def relayed(turn: str, provider_id: str, *deltas: dict[str, Any], finish: str | None = None) -> list[dict[str, Any]]:
+    """One model turn as the gateway streamed it live: its own opening chunk, then the provider's chunks."""
+    opening = {**chunk({"content": "", "role": "assistant"}), "id": turn}
+    rest = [{**chunk(delta), "id": provider_id, "service_tier": "default"} for delta in deltas]
+    if finish:
+        rest[-1]["choices"][0]["finish_reason"] = finish
+    return [opening, *rest]
+
+
+async def test_provider_chunks_with_their_own_ids_open_no_turn() -> None:
+    """Live 2026-10-31: glm-5.3-flash chunks keep the provider's completion id between the gateway's turn ids."""
+    answer = '{"brake": false, "reasons": []}'
+    reasoning = {"content": "", "role": "assistant", "reasoning": "Line items: 600 + 350 + 200."}
+    usage = {**chunk(), "choices": [], "service_tier": "default", "usage": {"cost_usd": "0.010413"}}
+    glm = [
+        *relayed("chatcmpl-Rj42lzPucbqe3ZIW", "chatcmpl-0ae63e56-e248-453f-9426-fcdc8bcbd482", reasoning, reasoning),
+        *relayed(
+            "chatcmpl-RD0oqlGi5uSvcJZK",
+            "chatcmpl-4590b576-a2fb-43f0-a177-94119f526822",
+            reasoning,
+            {"content": answer},
+            finish="stop",
+        ),
+        {**usage, "id": "chatcmpl-RD0oqlGi5uSvcJZK"},
+    ]
+    one_turn = glm[3:]
+    # deepseek-v4.1-flash-1017: the provider's chunks carry the gateway's id of their turn
+    deepseek = [
+        *relayed("chatcmpl-Rn5BKAgwCxoOQdtP", "chatcmpl-Rn5BKAgwCxoOQdtP", reasoning),
+        *relayed("chatcmpl-RpLwOF94NC1stEFm", "chatcmpl-RpLwOF94NC1stEFm", {"content": answer}, finish="stop"),
+        {**usage, "id": "chatcmpl-RpLwOF94NC1stEFm"},
+    ]
+
+    async def record_of(events: list[dict[str, Any]], model: str) -> Any:
+        stream = {**SERVED, "content-type": "text/event-stream"}
+        gateway = Gateway(lambda b, r: httpx.Response(200, headers=stream, content=sse(events)))
+        text, record = await client_for(gateway).chat("reviewer", model, [], tools=[{"type": O.CODE_EXECUTION}])
+        assert text == answer
+        return record
+
+    sandbox = [{"name": "otari_code_execution", "status": "inferred", "rounds": 1}]
+    glm_record = await record_of(glm, O.VISION_MODEL)
+    assert glm_record.tool_calls == sandbox and glm_record.cost_usd == pytest.approx(0.010413)
+    assert (await record_of(one_turn, O.VISION_MODEL)).tool_calls == []
+    assert (await record_of(deepseek, O.REVIEWER_MODEL)).tool_calls == sandbox
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # deepseek-v4.1-flash-1017 after a sandbox run, four times out of four
+        (
+            '{"brake": false, "reasons": [], "amount_check": {"line_items": ["600.00", "350.00", "200.00"], '
+            '"stated_total": "1,150.00", "computed_total": 1150.0, "currency": "USDC"}, "confidence": "low", '
+            '"summary": "Invoice line items sum to the stated 1,150 total."}'
+        ),
+        # glm-5.3-flash, once
+        (
+            '{"brake": false, "reasons": [], "amount_check": {"line_items": ["600.00", "350.00", "200.00"], '
+            '"stated_total": "1,150.00", "computed_total": 1150, "currency": "USDC"}, "confidence": medium, '
+            '"summary": "Message matches hold details; payee is a two-year-old active account."}'
+        ),
+    ],
+)
+async def test_reviewer_answers_from_the_live_run_fit_the_contract(answer: str) -> None:
+    stream = {**SERVED, "content-type": "text/event-stream"}
+    body = turns(("chatcmpl-1", chunk({"content": ""})), ("chatcmpl-2", chunk({"content": answer}, "stop")))
+    gateway = Gateway(lambda b, r: httpx.Response(200, headers=stream, content=body))
+    value, record = await client_for(gateway).chat(
+        "reviewer", O.REVIEWER_MODEL, [], output=ReviewerResult, tools=[{"type": O.CODE_EXECUTION}]
+    )
+    assert record.error is None and value.brake is False and value.confidence in ("low", "medium")
+    assert value.amount_check is not None and value.amount_check.computed_total in ("1150.0", "1150")
+
+
 async def test_timeouts_and_lost_connections_are_unavailable() -> None:
     def handler(body: dict[str, Any], req: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused")
@@ -512,3 +734,16 @@ def test_extract_json_tolerates_prose_and_fences() -> None:
     assert O.extract_json(BACKTICK * 3 + '\n{"a": 2}\n' + BACKTICK * 3) == {"a": 2}
     with pytest.raises(ValueError):
         O.extract_json("no json at all")
+
+
+def test_extract_json_quotes_bare_words_but_leaves_strings_and_literals_alone() -> None:
+    answer = '{"confidence": medium, "brake": False, "check": None, "n": 1e3, "summary": "risk: low, ok"}'
+    assert O.extract_json(answer) == {
+        "confidence": "medium",
+        "brake": False,
+        "check": None,
+        "n": 1000.0,
+        "summary": "risk: low, ok",
+    }
+    with pytest.raises(ValueError):
+        O.extract_json('{"confidence": very high}')

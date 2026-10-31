@@ -17,10 +17,12 @@ through the Otari gateway:
 
 Findings merge with an OR rule: any step that flags keeps the brake on. Model
 claims are checked before they count: a web search citation must be a page the
-gateway reports the search returned, a fetched page one it reports fetching,
-and an amount mismatch must hold when HoldUp redoes the arithmetic on numbers
-that appear in the message. A gateway failure that leaves no brake fails
-closed: the payment waits another hour and the engine tries again.
+gateway reports the search returned, a fetched page one it reports fetching or
+one that near-intel logged reading with fetch_page for this hold, and an amount
+mismatch must hold when HoldUp redoes the arithmetic on numbers that appear in
+the message. A claim about what a linked page or the public web shows needs
+such a page: without one it is dropped. A gateway failure that leaves no brake
+fails closed: the payment waits another hour and the engine tries again.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ import hmac
 import ipaddress
 import logging
 import re
+import time
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
@@ -91,6 +94,9 @@ HOUR_MS = 3_600_000
 DAY_MS = 24 * HOUR_MS
 MAX_HOLD_MS = 72 * HOUR_MS
 FAIL_CLOSED_MS = HOUR_MS
+CHECK_BUDGET_S = 280.0
+"""Time the steps of one check may take. The engine stops waiting for a check after five minutes;
+ending the model calls before that leaves the decision, with what the steps found, to the pipeline."""
 
 INJECTION_PROFILE = "checker-injection"
 MCP_SERVER = "near-intel"
@@ -109,6 +115,8 @@ REVIEW_STABLE_UNITS = 100
 REVIEW_NEAR = 10
 STABLECOINS = frozenset({"USDC", "HUSD", "USDT"})
 STRONG = frozenset({Reason.SECRET_REQUEST, Reason.CHECKER_INJECTION})
+PAGE_CLAIMS = frozenset({Reason.PHISHING_LINK, Reason.SECRET_REQUEST})
+"""Reasons a linked page can show, so a finding of them cites the page."""
 
 _SIGNALS = (
     ("urgency", Reason.URGENCY, "sets a deadline or threatens a loss"),
@@ -176,6 +184,7 @@ _PAYEE_LABELS = {
     "cancelled_after_flag": "reports: senders who cancelled a payment after a HoldUp warning",
 }
 _URL = re.compile(r"https?://[^\s<>()\[\]{}\"'\u0060]+", re.IGNORECASE)
+_WHOLE_NUMBER = re.compile(r"(?<![0-9.])[0-9]+(?:\.[0-9]+)?(?![0-9]|\.[0-9])")
 _FORWARDED_FROM = re.compile(r"\A\s*forwarded from ([^\n]{1,80}?):[ \t]*(?:\n|\Z)", re.IGNORECASE)
 _NOT_WORDISH = re.compile(r"[^A-Za-z0-9 .&-]+")
 _QUOTE_CHARS = str.maketrans("", "", "\"'\u0060")
@@ -248,14 +257,23 @@ def _amount(value: str) -> Decimal:
     return Decimal(digits)
 
 
+def _places(value: Decimal) -> int:
+    exponent = value.as_tuple().exponent
+    return -exponent if isinstance(exponent, int) and exponent < 0 else 0
+
+
 def _appears(amount: str, text: str) -> bool:
-    plain = amount.replace(",", "").strip()
-    plain = re.sub(r"[^0-9.]", "", plain)
-    if not plain:
+    """Whether ``amount`` equals one of the whole amounts written in ``text``.
+
+    Compared by value, because a model in a tool loop may write 1150.0 for 1,150.00, and without
+    the sign, which a message may leave to a word (discount 50.00 is a line item of -50.00). A
+    part of a longer number (50 in 1150) or the integer part of a decimal (12 in 12.50) does not count.
+    """
+    try:
+        value = abs(_amount(amount))
+    except InvalidOperation:
         return False
-    haystack = text.replace(",", "")
-    # A whole amount: not part of a longer number, and not the integer part of a decimal.
-    return re.search(rf"(?<![0-9.]){re.escape(plain)}(?![0-9]|\.[0-9])", haystack) is not None
+    return any(Decimal(number) == value for number in _WHOLE_NUMBER.findall(text.replace(",", "")))
 
 
 @dataclass(frozen=True)
@@ -273,16 +291,19 @@ class AmountMismatch:
 def verify_amount_check(check: AmountCheck | None, message: str) -> AmountMismatch | None:
     """Redo a model's sum: a mismatch counts only if HoldUp's own arithmetic agrees.
 
-    Every line item and the stated total must appear in the message as
-    written, the model's computed total must equal HoldUp's sum, and that sum
-    must differ from the stated total.
+    Every line item and the stated total must appear in the message, the
+    model's computed total must equal HoldUp's sum, and that sum must differ
+    from the stated total. The computed total is rounded to the places of the
+    amounts first: summed as floats, 19.99, 5.01 and 0.10 print as
+    25.099999999999998.
     """
     if check is None or not check.line_items:
         return None
     try:
         items = [_amount(item) for item in check.line_items]
         stated = _amount(check.stated_total)
-        computed = _amount(check.computed_total)
+        places = max(_places(value) for value in [*items, stated])
+        computed = _amount(check.computed_total).quantize(Decimal(1).scaleb(-places))
     except InvalidOperation:
         return None
     if not all(_appears(value, message) for value in [*check.line_items, check.stated_total]):
@@ -384,6 +405,7 @@ class _Case:
     money_claims: list[MoneyClaim] = field(default_factory=list)
     payee_facts: dict[str, Any] | None = None
     rules_context: list[Finding] = field(default_factory=list)  # what the rules noted but did not brake for
+    deadline: float | None = None  # time.monotonic() by which every model call of the check has ended
 
     @property
     def message(self) -> str:
@@ -399,6 +421,7 @@ class _Outcome:
     failure: Exception | None = None
     result: Any = None
     blocked: bool = False  # a guardrail in block mode refused the request
+    replaced: bool = False  # asked again on another model family; only its step record still counts
 
     @property
     def label(self) -> str:
@@ -486,8 +509,10 @@ class OtariRisk:
     # ------------------------------------------------------------------
 
     async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict:
+        deadline = time.monotonic() + CHECK_BUDGET_S
         rules = await self._rules(hold, ctx)
         case = self._case(hold, ctx)
+        case.deadline = deadline
         case.rules_context = [f for f in rules.findings if f.context]
         image = self._image(ctx)
         if not case.text and image is None:
@@ -533,6 +558,8 @@ class OtariRisk:
             and family(reviewer.record.model or "") == family(served)
         ):
             # The investigator fell back to the family of the reviewer; ask a third family instead.
+            # The first review was paid for, so its step stays on record.
+            outcomes.append(_Outcome("reviewer", reviewer.record, replaced=True))
             reviewer = await self._guarded("reviewer", self._review(case, avoid=family(served)))
         if reviewer is None and self._disagree(triage, investigator, case):
             reviewer = await self._guarded("reviewer", self._review(case, avoid=family(served)))
@@ -734,6 +761,7 @@ class OtariRisk:
                 reasoning_effort="low",
                 fallbacks=fallbacks_for(TRIAGE_MODEL),
                 prompt_sha256=prompt.sha256,
+                deadline=case.deadline,
             )
         except GuardrailViolation as exc:
             return self._blocked("triage", exc)
@@ -770,6 +798,7 @@ class OtariRisk:
                 max_tokens=3_000,
                 fallbacks=(REVIEWER_MODEL,),  # the only other chain model that reads images
                 prompt_sha256=prompt.sha256,
+                deadline=case.deadline,
             )
         except GuardrailViolation as exc:
             return self._blocked("vision", exc)
@@ -799,6 +828,7 @@ class OtariRisk:
                 max_tokens=256,
                 reasoning_effort="low",
                 prompt_sha256=prompt.sha256,
+                deadline=case.deadline,
             )
         except GuardrailViolation as exc:
             return self._blocked("gate", exc)
@@ -843,6 +873,7 @@ class OtariRisk:
                     max_tool_iterations=8,
                     fallbacks=fallbacks_for(INVESTIGATOR_MODEL),
                     prompt_sha256=prompt.sha256,
+                    deadline=case.deadline,
                 )
                 break
             except ToolNotEnabled as exc:
@@ -893,6 +924,7 @@ class OtariRisk:
                     max_tool_iterations=4 if tools else None,
                     fallbacks=fallbacks,
                     prompt_sha256=prompt.sha256,
+                    deadline=case.deadline,
                 )
                 break
             except ToolNotEnabled as exc:
@@ -907,6 +939,9 @@ class OtariRisk:
         findings = []
         for item in result.reasons:
             reason = Reason[item.reason]
+            if not self._shown(reason, "reviewer", [], case.withheld):
+                log.info("reviewer claimed %s, which it has no tool to check", reason.name)
+                continue
             if reason == Reason.AMOUNT_MISMATCH:
                 mismatch = verify_amount_check(result.amount_check, case.message)
                 if mismatch is None:
@@ -954,12 +989,9 @@ class OtariRisk:
             if call.get("name") == WEB_FETCH and call.get("status") == "completed" and call.get("url")
         }
         computed = {c.label for c in result.computations if c.result}
-        # Only a call our MCP server answered counts: a refused one returned no data to cite.
-        mcp_ran = "mcp" in available and (
-            self.mcp_log is None
-            or any("refused" not in (call.get("args") or {}) for call in self.mcp_log(case.hold.id))
-        )
-        message_links = {_url_key(u) for u in case.links}
+        if "mcp" not in available and not any(call.get("name") == CODE_EXECUTION for call in record.tool_calls):
+            computed = set()  # the stream shows no sandbox run, so the model worked these out itself
+        mcp_ran, paged = self._near_intel_reads(case, available)
 
         def attribute(tool: str, citations: list[str], computation: str) -> tuple[str, list[str]]:
             if tool == "web_search" and WEB_SEARCH in available:
@@ -970,11 +1002,11 @@ class OtariRisk:
                 cited = [u for u in citations if _url_key(u) in fetched][:2]
                 if cited and WEB_FETCH in available:
                     return "web_fetch", cited
-                read = [u for u in citations if _url_key(u) in message_links][:2]
-                if read and mcp_ran and WEB_FETCH not in available:
-                    return "mcp", read  # read through the fetch_page tool of near-intel
+                read = [u for u in citations if _url_key(u) in paged][:2]
+                if read:
+                    return "mcp", read  # the gateway did not fetch it; the fetch_page tool of near-intel did
             elif tool == "near-intel" and mcp_ran:
-                return "mcp", [u for u in citations if _url_key(u) in message_links][:2]
+                return "mcp", [u for u in citations if _url_key(u) in paged][:2]
             elif tool == "code_execution" and CODE_EXECUTION in available and computed:
                 if not computation or computation in computed:
                     return "code_execution", []
@@ -984,6 +1016,12 @@ class OtariRisk:
         for item in result.findings:
             reason = Reason[item.reason]
             source, citations = attribute(item.tool, item.citations, item.computation)
+            if source == "mcp" and not item.citations and reason in PAGE_CLAIMS:
+                # The prompt asks for no citations on near-intel findings; the log shows which links it read.
+                citations = [u for u in case.links if _url_key(u) in paged][:2]
+            if not self._shown(reason, source, citations, case.withheld):
+                log.info("investigator claimed %s without a page or search result that shows it", reason.name)
+                continue
             if reason == Reason.AMOUNT_MISMATCH:
                 mismatch = verify_amount_check(result.amount_check, case.message)
                 if mismatch is None:
@@ -1000,6 +1038,45 @@ class OtariRisk:
                 source = "code_execution" if CODE_EXECUTION in available and computed else "investigator"
                 findings.append(Finding(Reason.AMOUNT_MISMATCH, mismatch.detail, source, record.model))
         return findings
+
+    def _near_intel_reads(self, case: _Case, available: set[str]) -> tuple[bool, set[str]]:
+        """Whether near-intel answered a call for this hold, and the message links its fetch_page read.
+
+        Only a call the server answered counts: a refused one returned nothing to cite. Replayed
+        exchanges never reach the server and come without a log, so their calls are taken as made,
+        and a link as read by fetch_page when web fetch was not offered, the case in which the
+        prompt sends the model there.
+        """
+        if "mcp" not in available:
+            return False, set()
+        links = {_url_key(u) for u in case.links}
+        if self.mcp_log is None:
+            return True, links if WEB_FETCH not in available else set()
+        answered = [call for call in self.mcp_log(case.hold.id) if "refused" not in (call.get("args") or {})]
+        read: set[str] = set()
+        for call in answered:
+            url = (call.get("args") or {}).get("url")
+            if call.get("tool") == "fetch_page" and isinstance(url, str):
+                read.add(_url_key(url))
+        return bool(answered), read & links
+
+    @staticmethod
+    def _shown(reason: Reason, source: str, citations: list[str], withheld: bool) -> bool:
+        """Whether a claim about a web page rests on a page that HoldUp knows was read.
+
+        A phishing page needs a read page among the citations (a fetch that the gateway reports, or
+        a fetch_page call that near-intel logged), a public warning a cited search result, and a
+        secret request a read page unless the model read the message itself. The other reasons rest
+        on the message, the payee facts or HoldUp's own arithmetic.
+        """
+        read = source in ("web_fetch", "mcp") and bool(citations)
+        if reason == Reason.PHISHING_LINK:
+            return read
+        if reason == Reason.PUBLIC_WARNING:
+            return source == "web_search"
+        if reason == Reason.SECRET_REQUEST and withheld:
+            return read
+        return True
 
     # ------------------------------------------------------------------
     # decision
@@ -1018,6 +1095,7 @@ class OtariRisk:
 
     def _decide(self, case: _Case, rules: _Rules, outcomes: list[_Outcome], note: str = "") -> Verdict:
         steps = [*rules.records, *(o.record for o in outcomes if o.record is not None)]
+        outcomes = [o for o in outcomes if not o.replaced]
         ai = [f for o in outcomes for f in o.findings]
         reviewer = next((o for o in outcomes if o.step == "reviewer"), None)
         rules_flagged = any(not f.context for f in rules.findings)

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
+import time
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -368,10 +371,61 @@ async def test_unverifiable_claims_lose_their_tool_tag_or_are_dropped(tmp_path: 
     risk, _ = make_risk("claims", fixtures_dir=folder)
     verdict = await risk.assess(make_hold("northwind-paper.testnet", 50), PaymentContext(forwarded_text=INVOICE))
     tagged = {(f.reason, f.source, tuple(f.citations)) for f in verdict.findings}
-    assert (Reason.PUBLIC_WARNING, "investigator", ()) in tagged
-    assert (Reason.PHISHING_LINK, "investigator", ()) in tagged
+    # No search returned the cited page and nothing was fetched, so nothing shows the warning or the phishing page.
+    assert not any(f.reason in (Reason.PUBLIC_WARNING, Reason.PHISHING_LINK) for f in verdict.findings)
     assert (Reason.NEW_ACCOUNT, "investigator", ()) in tagged
     assert not any(f.reason == Reason.AMOUNT_MISMATCH for f in verdict.findings)  # the model summed wrongly
+
+
+async def test_a_phishing_claim_after_a_failed_fetch_is_dropped(tmp_path: Path) -> None:
+    """Live 2026-10-31: the fetch failed (url_invalid), and the model reported PHISHING_LINK from the message."""
+    content = {
+        "findings": [
+            {"reason": "NEW_ACCOUNT", "tool": "message", "detail": "Payee account is only 2 hours old"},
+            {
+                "reason": "MULE_PATTERN",
+                "tool": "message",
+                "detail": "New account received funds from 14 distinct senders in last 24h",
+            },
+            {"reason": "PHISHING_LINK", "tool": "message", "detail": "Message includes link to localhost address"},
+        ],
+        "computations": [],
+        "amount_check": None,
+        "brake": True,
+        "summary": "The payment shows multiple risk indicators requiring further delay.",
+    }
+    failed = {
+        "id": "otari_wf_1",
+        "type": "web_fetch",
+        "status": "failed",
+        "url": VERIFY_URL,
+        "error": {"provider": "builtin", "status": None, "tag": "url_invalid", "retryable": False},
+    }
+    hero = json.loads((FIXTURES_DIR / "hero.json").read_text())["steps"]["triage"]
+    steps = {"triage": hero, "investigator": investigator_answer(content, [failed])}
+    folder = scenario_dir(tmp_path, "deadlink", steps)
+    risk, _ = make_risk("deadlink", fixtures_dir=folder)
+    risk.guard_url = None  # as on 127.0.0.1: the message is withheld from the investigator
+    verdict = await risk.assess(make_hold("safe-wallet-77.testnet", 50), PaymentContext(forwarded_text=HERO))
+
+    assert {f.reason for f in by(verdict, "investigator")} == {Reason.NEW_ACCOUNT, Reason.MULE_PATTERN}
+    assert not any(f.reason == Reason.PHISHING_LINK for f in verdict.findings)
+    assert verdict.brake  # triage and the payee facts still brake it
+    investigator = next(s for s in verdict.steps if s.step == "investigator")
+    assert [(c["name"], c["status"]) for c in investigator.tool_calls] == [("otari_web_fetch", "failed")]
+
+
+async def test_a_secret_request_from_a_withheld_message_needs_a_read_page(tmp_path: Path) -> None:
+    content = {"findings": [{"reason": "SECRET_REQUEST", "tool": "message", "detail": "asks for a recovery phrase"}]}
+    folder = scenario_dir(tmp_path, "secret", {"investigator": investigator_answer(content)})
+    risk, _ = make_risk("secret", fixtures_dir=folder)
+    read = await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    assert [f.reason for f in by(read, "investigator")] == [Reason.SECRET_REQUEST]  # the model read the message
+    approval = Finding(Reason.CHECKER_INJECTION, "says the payment is pre-approved", "rules", context=True)
+    risk, _ = make_risk("secret", fixtures_dir=folder, rules=Rules(approval, hold_for_ms=0))
+    risk.guard_url = None
+    withheld = await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    assert by(withheld, "investigator") == []  # it never saw the message, and no page was read
 
 
 async def test_a_mismatch_the_model_did_not_list_still_counts_once_confirmed(tmp_path: Path) -> None:
@@ -427,6 +481,289 @@ async def test_mcp_claims_need_a_logged_call_when_a_log_is_given(tmp_path: Path)
     calls[7] = [{"tool": "payee_profile", "args": {"account_id": "safe-wallet-77.testnet"}}]
     logged = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=DINNER))
     assert sources(logged) == {"mcp"}
+
+
+OTHER_URL = "https://coinhaven-support.example/login"
+LOCKED = f"Your wallet is locked. Unlock it within the hour here: {VERIFY_URL} or at {OTHER_URL}"
+
+
+@pytest.mark.parametrize(
+    ("claim", "shown"),
+    [
+        # near-intel findings cite nothing, as the prompt asks
+        ({"reason": "PHISHING_LINK", "tool": "near-intel", "detail": "fetch_page shows a wallet login form"}, True),
+        # the gateway fetch failed (the page blocks bots), so the model read the page with fetch_page
+        ({"reason": "PHISHING_LINK", "tool": "web_fetch", "detail": "a login form", "citations": [VERIFY_URL]}, True),
+        # a page that nothing read: the page that near-intel did read does not stand in for it
+        ({"reason": "PHISHING_LINK", "tool": "near-intel", "detail": "a login form", "citations": [OTHER_URL]}, False),
+    ],
+)
+async def test_a_phishing_page_read_through_near_intel_counts_once_its_log_shows_the_read(
+    tmp_path: Path, claim: dict[str, Any], shown: bool
+) -> None:
+    failed = {
+        "id": "otari_wf_1",
+        "type": "web_fetch",
+        "status": "failed",
+        "url": VERIFY_URL,
+        "error": {"provider": "builtin", "status": 403, "tag": "fetch_failed", "retryable": False},
+    }
+    content = {"findings": [claim], "brake": True}
+    folder = scenario_dir(tmp_path, "paged", {"investigator": investigator_answer(content, [failed])})
+    calls: dict[int, list[dict[str, Any]]] = {}
+    risk, transport = make_risk("paged", fixtures_dir=folder, mcp_log=lambda hold_id: calls.get(hold_id, []))
+
+    async def phishing() -> list[tuple[str, list[str]]]:
+        verdict = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=LOCKED))
+        return [(f.source, f.citations) for f in verdict.findings if f.reason == Reason.PHISHING_LINK]
+
+    calls[7] = [{"tool": "payee_profile", "args": {"account_id": "safe-wallet-77.testnet"}}]
+    assert await phishing() == []  # near-intel answered, but it read no page
+    calls[7].append({"tool": "fetch_page", "args": {"url": VERIFY_URL, "refused": "not fetched: too slow"}})
+    assert await phishing() == []
+    calls[7].append({"tool": "fetch_page", "args": {"url": VERIFY_URL + "/"}})
+    assert await phishing() == ([("mcp", [VERIFY_URL])] if shown else [])
+    offered = {t["type"] for r in transport.requests if r.step == "investigator" for t in r.body["tools"]}
+    assert "otari_web_fetch" in offered
+    # Replayed without a log while web fetch was offered: nothing shows that fetch_page read the page.
+    risk, _ = make_risk("paged", fixtures_dir=folder)
+    assert await phishing() == []
+
+
+async def test_a_secret_request_on_a_page_near_intel_read_counts_for_a_withheld_message(tmp_path: Path) -> None:
+    claim = {"reason": "SECRET_REQUEST", "tool": "near-intel", "detail": "the linked page asks for the 12 words"}
+    folder = scenario_dir(tmp_path, "secretpage", {"investigator": investigator_answer({"findings": [claim]})})
+    calls = [{"tool": "fetch_page", "args": {"url": VERIFY_URL}}]
+    approval = Finding(Reason.CHECKER_INJECTION, "says the payment is pre-approved", "rules", context=True)
+    risk, _ = make_risk(
+        "secretpage", fixtures_dir=folder, rules=Rules(approval, hold_for_ms=0), mcp_log=lambda h: calls
+    )
+    risk.guard_url = None  # the message is withheld from the investigator
+    verdict = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=LOCKED))
+    assert [(f.reason, f.citations) for f in by(verdict, "mcp")] == [(Reason.SECRET_REQUEST, [VERIFY_URL])]
+    calls[:] = [{"tool": "payee_profile", "args": {"account_id": "safe-wallet-77.testnet"}}]
+    unread = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=LOCKED))
+    assert not any(f.reason == Reason.SECRET_REQUEST for f in unread.findings)  # no page was read
+
+
+# ----------------------------------------------------------------------
+# reviewer answers from the first live run
+# ----------------------------------------------------------------------
+
+LIVE_INVESTIGATOR = {
+    "findings": [
+        {"reason": "NEW_ACCOUNT", "tool": "near-intel", "detail": "Payee account age is only 26 hours"},
+        {
+            "reason": "LOOKALIKE_PAYEE",
+            "tool": "message",
+            "detail": "Sender previously trusted northwindpaper.testnet, similar to northwind-paper.testnet",
+        },
+        {
+            "reason": "AMOUNT_MISMATCH",
+            "tool": "code_execution",
+            "detail": "Invoice line items sum to 1150.00 but stated total is 1,250.00",
+            "computation": "sum_invoice",
+        },
+    ],
+    "computations": [{"label": "sum_invoice", "code": "print(600.00 + 350.00 + 200.00)", "result": "1150.0"}],
+    "amount_check": {
+        "line_items": ["600.00", "350.00", "200.00"],
+        "stated_total": "1,250.00",
+        "computed_total": "1150.0",
+        "currency": "USDC",
+    },
+    "brake": True,
+}
+# deepseek-v4.1-flash-1017 wrote computed_total as a JSON number in all four live reviews.
+LIVE_REVIEW = (
+    '{"brake": true, "reasons": [{"reason": "LOOKALIKE_PAYEE", "detail": "Payee account is a hyphenated '
+    'near-copy of the sender\'s trusted northwindpaper.testnet account."}, {"reason": "DETAILS_CHANGED", '
+    '"detail": "Message claims a new wallet address instead of the previously trusted account."}, '
+    '{"reason": "AMOUNT_MISMATCH", "detail": "Line items sum to 1,150.00 while the stated total is 1,250.00."}, '
+    '{"reason": "NEW_ACCOUNT", "detail": "Payee account is only about 26 hours old with 2 transactions."}], '
+    '"amount_check": {"line_items": ["600.00", "350.00", "200.00"], "stated_total": "1,250.00", '
+    '"computed_total": 1150.0, "currency": "USDC"}, "confidence": "high", "summary": "New lookalike payee claims '
+    "to replace a trusted supplier's wallet, and the invoice total does not match its line items.\"}"
+)
+LEGIT_INVOICE = (
+    "Forwarded from Northwind Paper Co.:\nHello from Northwind Paper Co. Invoice NP-2301 for October: 40 reams "
+    "copy paper 600.00; 25 boxes envelopes 350.00; delivery 200.00. Total due: 1,150.00 USDC. Thank you, Accounts team"
+)
+
+
+def answer(content: Any, cost: str, provider: str = "deepinfra") -> dict[str, Any]:
+    return {
+        "headers": {"otari-provider": provider},
+        "content": content,
+        "usage": {"prompt_tokens": 2600, "completion_tokens": 290, "total_tokens": 2890, "cost_usd": cost},
+    }
+
+
+async def test_a_reviewer_total_written_as_a_number_still_counts(tmp_path: Path) -> None:
+    steps = {
+        "investigator": investigator_answer(LIVE_INVESTIGATOR),
+        "reviewer": {"response": answer(LIVE_REVIEW, "0.010219")},
+    }
+    risk, _ = make_risk("livereview", fixtures_dir=scenario_dir(tmp_path, "livereview", steps))
+    ctx = PaymentContext(forwarded_text=INVOICE, trusted_payees=["northwindpaper.testnet"])
+    verdict = await risk.assess(make_hold("northwind-paper.testnet", 1250), ctx)
+
+    reviewer = next(s for s in verdict.steps if s.step == "reviewer")
+    assert reviewer.error is None and reviewer.cost_usd == pytest.approx(0.010219)
+    found = {f.reason for f in by(verdict, "reviewer")}
+    assert {Reason.AMOUNT_MISMATCH, Reason.LOOKALIKE_PAYEE, Reason.SECOND_OPINION} <= found
+    (mismatch,) = [f for f in by(verdict, "reviewer") if f.reason == Reason.AMOUNT_MISMATCH]
+    assert mismatch.detail == "line items add up to 1150.00 but the stated total is 1250.00 (off by 100.00)"
+
+
+async def test_a_legitimate_invoice_is_not_failed_closed_and_every_review_stays_on_record(tmp_path: Path) -> None:
+    """Live 2026-10-31: gpt-oss-120b failed, deepseek investigated, and both reviews broke the contract."""
+    clean = {
+        "findings": [],
+        "computations": [
+            {
+                "label": "invoice_sum",
+                "code": "items=[600.00,350.00,200.00]\nprint(sum(items))",
+                "result": "1150.0",
+            }
+        ],
+        "amount_check": {
+            "line_items": ["600.00", "350.00", "200.00"],
+            "stated_total": "1,150.00",
+            "computed_total": "1150.0",
+            "currency": "USDC",
+        },
+        "brake": False,
+        "summary": "Line items add up to the stated total, the payee account is two years old with no reports.",
+    }
+    deepseek = (
+        '{"brake": false, "reasons": [], "amount_check": {"line_items": ["600.00", "350.00", "200.00"], '
+        '"stated_total": "1,150.00", "computed_total": 1150.0, "currency": "USDC"}, "confidence": "low", '
+        '"summary": "Invoice line items sum to the stated 1,150 total; payee is an established account."}'
+    )
+    glm = (
+        '{"brake": false, "reasons": [], "amount_check": {"line_items": ["600.00", "350.00", "200.00"], '
+        '"stated_total": "1,150.00", "computed_total": 1150, "currency": "USDC"}, "confidence": medium, '
+        '"summary": "Message matches hold details; payee is a two-year-old active account with no scam indicators."}'
+    )
+    failed = {"status": 502, "body": {"detail": "The provider failed the request with HTTP 500"}}
+    steps = {
+        "investigator": {"by_model": {INVESTIGATOR_MODEL: failed, "*": answer(clean, "0.010279")}},
+        "reviewer": {"by_model": {REVIEWER_MODEL: answer(deepseek, "0.010091"), VISION_MODEL: answer(glm, "0.010413")}},
+    }
+    risk, transport = make_risk("legit", fixtures_dir=scenario_dir(tmp_path, "legit", steps))
+    verdict = await risk.assess(make_hold("northwindpaper.testnet", 1150), PaymentContext(forwarded_text=LEGIT_INVOICE))
+
+    assert not verdict.brake and verdict.hold_for_ms == 0 and verdict.findings == []
+    assert not verdict.summary.startswith("fail-closed")
+    assert [r.model for r in transport.requests if r.step == "reviewer"] == [REVIEWER_MODEL, VISION_MODEL]
+    reviews = [s for s in verdict.steps if s.step == "reviewer"]
+    assert [(s.model, s.cost_usd, s.error) for s in reviews] == [
+        (REVIEWER_MODEL, pytest.approx(0.010091), None),
+        (VISION_MODEL, pytest.approx(0.010413), None),
+    ]
+    investigator = next(s for s in verdict.steps if s.step == "investigator")
+    assert investigator.model == REVIEWER_MODEL and investigator.fallback is True
+
+
+TRIAGE_CLEAN = {
+    "categories": ["invoice"],
+    "urgency": False,
+    "impersonation": False,
+    "secret_request": False,
+    "details_changed": False,
+    "injection_suspected": False,
+    "impossible_returns": False,
+    "money_claims": [],
+    "risk": "low",
+    "summary": "An invoice from a supplier.",
+}
+
+
+def gateway_with_turns(investigator: dict[str, Any], turns: int) -> httpx.MockTransport:
+    """The hosted gateway as the live run saw it: each round of tools starts a new completion id."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if not body.get("stream"):
+            message = {"role": "assistant", "content": json.dumps(TRIAGE_CLEAN)}
+            completion = {"id": "t", "object": "chat.completion", "created": 1, "model": body["model"]}
+            choices = [{"index": 0, "message": message, "finish_reason": "stop"}]
+            return httpx.Response(200, json={**completion, "choices": choices, "usage": {"cost_usd": "0.000060"}})
+        content = investigator if body["metadata"]["step"] == "investigator" else {"brake": False, "reasons": []}
+        events = []
+        for turn in range(1, turns + 1):
+            last = turn == turns
+            delta = {"role": "assistant", "content": json.dumps(content) if last else ""}
+            choice = {"index": 0, "delta": delta, "finish_reason": "stop" if last else None}
+            events.append(
+                {
+                    "id": f"chatcmpl-{turn}",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": body["model"],
+                    "choices": [choice],
+                }
+            )
+        text = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=text.encode())
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(("turns", "source"), [(1, "investigator"), (2, "code_execution")])
+async def test_the_code_execution_tag_needs_a_sandbox_run_the_stream_shows(turns: int, source: str) -> None:
+    content = {
+        "findings": [
+            {"reason": "AMOUNT_MISMATCH", "tool": "code_execution", "detail": "sum", "computation": "sum_invoice"}
+        ],
+        "computations": [{"label": "sum_invoice", "code": "print(600.00 + 350.00 + 200.00)", "result": "1150.0"}],
+        "amount_check": LIVE_INVESTIGATOR["amount_check"],
+        "brake": True,
+    }
+    http = httpx.AsyncClient(transport=gateway_with_turns(content, turns))
+    client = OtariClient(SETTINGS, http=http, api_key="otk_v1_us_test")
+    risk = P.OtariRisk(SETTINGS, client, Intel(), Rules(), None, None)  # as on 127.0.0.1: no MCP server
+    verdict = await risk.assess(make_hold("northwind-paper.testnet", 50), PaymentContext(forwarded_text=INVOICE))
+    (mismatch,) = [f for f in verdict.findings if f.reason == Reason.AMOUNT_MISMATCH and f.source != "reviewer"]
+    assert mismatch.source == source  # HoldUp's own sum confirms the mismatch either way
+    investigator = next(s for s in verdict.steps if s.step == "investigator")
+    ran = [c for c in investigator.tool_calls if c["name"] == "otari_code_execution"]
+    assert ran == ([{"name": "otari_code_execution", "status": "inferred", "rounds": 1}] if turns == 2 else [])
+
+
+async def test_a_stalled_investigator_ends_at_the_check_deadline_and_triage_still_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled stream used to get 150 s per model, so two stalls ran out the engine's five minutes."""
+    monkeypatch.setattr(P, "CHECK_BUDGET_S", 0.5)
+
+    async def keepalives() -> AsyncIterator[bytes]:
+        while True:
+            await asyncio.sleep(0.05)
+            yield b": keepalive\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body.get("stream"):
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=keepalives())
+        urgent = {**TRIAGE_CLEAN, "categories": ["personal"], "urgency": True, "risk": "medium"}
+        message = {"role": "assistant", "content": json.dumps(urgent)}
+        completion = {"id": "t", "object": "chat.completion", "created": 1, "model": body["model"]}
+        choices = [{"index": 0, "message": message, "finish_reason": "stop"}]
+        return httpx.Response(200, json={**completion, "choices": choices, "usage": {"cost_usd": "0.000060"}})
+
+    transport = httpx.MockTransport(handler)
+    client = OtariClient(SETTINGS, http=httpx.AsyncClient(transport=transport), api_key="otk_v1_us_test")
+    risk = P.OtariRisk(SETTINGS, client, Intel(), Rules(), None, None)
+    started = time.monotonic()
+    verdict = await asyncio.wait_for(
+        risk.assess(make_hold("ravi.testnet", 5), PaymentContext(forwarded_text=DINNER)), 10
+    )
+    assert time.monotonic() - started < 3
+    investigator = next(s for s in verdict.steps if s.step == "investigator")
+    assert investigator.error == "timeout"
+    assert verdict.brake and [f.reason for f in verdict.findings] == [Reason.URGENCY]  # triage's finding stands
 
 
 def risk_over(transport: ReplayTransport, intel: Intel | None = None) -> P.OtariRisk:
@@ -546,6 +883,7 @@ def test_per_user_keys_come_from_the_resolver_or_the_env_pool(monkeypatch: pytes
         (["600.00", "350.00", "200.00"], "1,250.00", "1250", None),  # the model's own sum is wrong
         (["600.00", "350.00", "300.00"], "1,250.00", "1250", None),  # 300.00 is not in the message
         (["600.00", "350.00", "200.00"], "1,150.00", "1150", None),  # 1,150.00 is not the stated total
+        (["600.0", "350.0", "200.0"], "1250", "1150.0", (1150, 1250)),  # numbers as a tool loop writes them
         ([], "1,250.00", "0", None),
     ],
 )
@@ -564,6 +902,24 @@ def test_amount_checks_are_redone_on_numbers_from_the_message(
 def test_numbers_must_appear_as_whole_amounts() -> None:
     assert P._appears("50", "send 50 now") and not P._appears("50", "send 1150 now")
     assert P._appears("1,250.00", "Total 1250.00") and not P._appears("12", "12.50")
+    assert P._appears("1150.0", "Total due: 1,150.00 USDC") and not P._appears("1150.0", "Total due: 1,150.50")
+    assert P._appears("-50.00", "loyalty discount -50.00") and P._appears("-50.00", "loyalty discount 50.00")
+
+
+def test_discount_lines_and_float_totals_still_confirm_a_mismatch() -> None:
+    discount = "Copy paper 600.00; envelopes 350.00; loyalty discount -50.00. Total due: 1,000.00 USDC"
+    check = AmountCheck(line_items=["600.00", "350.00", "-50.00"], stated_total="1,000.00", computed_total="900.0")
+    mismatch = P.verify_amount_check(check, discount)
+    assert mismatch is not None and (mismatch.items_total, mismatch.stated_total) == (900, 1000)
+    assert P.verify_amount_check(check, discount.replace("-50.00", "50.00")) == mismatch  # the word says minus
+    # Python prints sum([19.99, 5.01, 0.1]) as 25.099999999999998.
+    order = "Cable 19.99, adapter 5.01, sticker 0.10. Total 26.10 USDC"
+    noisy = AmountCheck(line_items=["19.99", "5.01", "0.10"], stated_total="26.10", computed_total="25.099999999999998")
+    mismatch = P.verify_amount_check(noisy, order)
+    assert mismatch is not None
+    assert mismatch.detail == "line items add up to 25.10 but the stated total is 26.10 (off by 1.00)"
+    wrong = AmountCheck(line_items=["19.99", "5.01", "0.10"], stated_total="26.10", computed_total="25.2")
+    assert P.verify_amount_check(wrong, order) is None  # the model's own sum is wrong
 
 
 def test_text_cleaning_links_and_markers() -> None:

@@ -88,6 +88,11 @@ make test            # the Python tests; `make test-contract` runs the Rust test
 make bench-rules     # ScamBench (labelled payments) on the rules layer, dev split: bench/results-rules.md
 ```
 
+`OTARI_MODE=live OTARI_API_KEY=... .venv/bin/python -m holdup demo --offline` runs the same in-memory
+story with the AI checks on the hosted gateway (about 0.05 USD, a few minutes). Without
+`OTARI_MODE=live` the offline story replays its recorded answers even when a key is set, and
+`make demo-offline` and `make attack` always replay them.
+
 The story ([docs/demo-offline.txt](docs/demo-offline.txt)): Priya forwards a fictional "CoinHaven
 Support" DM and pays the wallet it names; the rules brake the payment within seconds, the full check
 adds a phishing page, public warnings and a two-hour-old payee, and Priya cancels. Dana's supplier

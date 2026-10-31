@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import holdup.demo
+from holdup.chain.fake import FakeVault, SimClock
 from holdup.cli import Console, main
 from holdup.demo import Transcript, TranscriptNotifier, offline_demo_runtime, run_offline_attack, run_offline_demo
-from holdup.models import HoldStatus, Reason
+from holdup.models import Finding, Hold, HoldStatus, PaymentContext, Reason, Verdict
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -140,10 +144,77 @@ def test_cli_commands_offline(capsys) -> None:  # type: ignore[no-untyped-def]
     assert main(["keeper", "--offline"]) == 2
 
 
+def test_the_offline_story_asks_otari_live_only_when_otari_mode_says_so(monkeypatch, capsys) -> None:  # type: ignore[no-untyped-def]
+    """Live 2026-10-31: OTARI_MODE=live holdup demo --offline replayed the recordings and spent nothing."""
+    stories: list[tuple[str, Any]] = []
+
+    async def live_story(runtime: Any, transcript: Any, notifier: Any) -> None:
+        stories.append(("live", runtime))
+
+    async def recorded_story(*, rules_only: bool = False) -> None:
+        stories.append(("recorded", rules_only))
+
+    monkeypatch.setattr(holdup.demo, "run_demo", live_story)
+    monkeypatch.setattr(holdup.demo, "run_offline_demo", recorded_story)
+    for name in ("HOLDUP_NETWORK", "PUBLIC_BASE_URL", "TELEGRAM_BOT_TOKEN", "OTARI_USER_KEYS", "OTARI_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OTARI_API_KEY", "otk_v1_us_test")
+    monkeypatch.setenv("OTARI_MODE", "live")
+    assert main(["demo", "--offline"]) == 0
+    [(kind, runtime)] = stories
+    assert kind == "live" and runtime.settings.otari_mode == "live" and runtime.checks.endswith("(live)")
+    assert runtime.otari is not None and not runtime.otari.offline  # requests go to the gateway
+    assert isinstance(runtime.vault, FakeVault) and isinstance(runtime.clock, SimClock)
+
+    stories.clear()
+    monkeypatch.delenv("OTARI_MODE")  # a key alone leaves make demo-offline on its recorded answers
+    assert main(["demo", "--offline"]) == 0
+    assert stories == [("recorded", False)] and "OTARI_MODE=live" in capsys.readouterr().err
+    stories.clear()
+    monkeypatch.setenv("OTARI_MODE", "off")
+    assert main(["demo", "--offline"]) == 0
+    assert stories == [("recorded", True)]
+
+    monkeypatch.setenv("OTARI_MODE", "live")
+    monkeypatch.delenv("OTARI_API_KEY")
+    with pytest.raises(SystemExit) as stopped:
+        main(["demo", "--offline"])
+    assert stopped.value.code == 2 and "OTARI_API_KEY" in capsys.readouterr().err
+
+
+async def test_a_dinner_braked_because_the_check_failed_names_the_real_cause() -> None:
+    """Live 2026-10-31: the clean check outlasted the 20 s hold, and the story blamed the payee's age."""
+    from holdup.demo import _everyday, _story
+
+    transcript = Transcript(None)
+    notifier = TranscriptNotifier(transcript)
+    runtime = offline_demo_runtime(notifier)
+
+    class Unfinished:
+        async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict:
+            finding = Finding(Reason.AI_UNAVAILABLE, "the investigator step could not run (timeout)", "investigator")
+            return Verdict(hold.id, True, 3_600_000, [finding])
+
+    runtime.engine.full_risk = Unfinished()
+    story, _ = await _story(runtime, transcript, notifier)
+    await story.join("demo:priya", "Priya")
+    await _everyday(story)
+    text = transcript.text
+    assert "The AI check could not clear this payment within its 20 s hold" in text
+    assert "was created with the demo deployment" not in text
+
+
 def test_python_dash_m_holdup_demo_offline() -> None:
+    # A server environment may export OTARI_MODE=live and a key; this test must stay offline and free.
+    env = {name: value for name, value in os.environ.items() if name not in ("OTARI_MODE", "OTARI_API_KEY")}
     completed = subprocess.run(
         [sys.executable, "-m", "holdup", "demo", "--offline"],
-        cwd=REPO, capture_output=True, text=True, timeout=60, check=False,
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
     assert completed.returncode == 0, completed.stderr
     assert "Every transaction id above is simulated" in completed.stdout

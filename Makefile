@@ -21,6 +21,8 @@ SANDBOX_CREDENTIALS ?= .holdup/sandbox-credentials.json
 BENCH_ARGS ?= $(if $(OTARI_API_KEY),,--replay)
 
 net_flag = $(if $(filter offline,$(NETWORK)),--offline,--network $(NETWORK))
+# Offline, the stories replay their recorded AI answers even when OTARI_MODE=live is exported.
+story_env = $(if $(filter offline,$(NETWORK)),OTARI_MODE=replay )
 
 # The toolchain pinned in contracts/rust-toolchain.toml, or `stable` when it is that exact
 # version and the pinned one is not installed, so rustup never downloads a second copy.
@@ -59,7 +61,7 @@ sandbox-test: ## contract and chain tests on a running NEAR sandbox (needs NEAR_
 
 demo-offline: ## the scripted story in memory with recorded AI answers; saved to docs/demo-offline.txt
 	@mkdir -p docs
-	$(HOLDUP) demo --offline | tee docs/demo-offline.txt
+	OTARI_MODE=replay $(HOLDUP) demo --offline | tee docs/demo-offline.txt
 
 demo: ## the same story on NEAR testnet: real transactions, real waits (needs `make deploy NETWORK=testnet`)
 	@echo "make demo signs real transactions on NEAR testnet. It reads .holdup/credentials.json from"
@@ -86,7 +88,7 @@ prove: ## try forbidden actions with the oracle and user keys; every one must be
 	$(HOLDUP) prove $(net_flag)
 
 attack: ## three attacks (injected message, oracle key, compromised server) and why they fail
-	$(HOLDUP) attack $(net_flag)
+	$(story_env)$(HOLDUP) attack $(net_flag)
 
 verify-deploy: ## code hash and access keys of the deployment (offline: a clearly labelled sample)
 	$(HOLDUP) verify-deploy $(net_flag)

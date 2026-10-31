@@ -1,11 +1,13 @@
 """The JSON objects that each Otari step must answer with.
 
 Validation is forgiving where a model is merely untidy (unknown fields are
-ignored, labels are normalised, long strings are cut, list items with an
-unknown reason are dropped) and strict where it matters: a field that is
-missing or of the wrong type fails the step, and a failed step keeps the brake
-on. ``strict_schema`` turns a contract into the strict JSON schema sent as
-``response_format`` to steps that run without tools.
+ignored, a number is accepted where text is expected, labels are normalised,
+long strings are cut, list items with an unknown reason are dropped) and strict
+where it matters: a field that is missing or of the wrong type fails the step,
+and a failed step keeps the brake on. Steps that use tools cannot send a
+schema, and their models write totals as JSON numbers (``"computed_total":
+1150.0``). ``strict_schema`` turns a contract into the strict JSON schema sent
+as ``response_format`` to steps that run without tools.
 """
 
 from __future__ import annotations
@@ -139,7 +141,7 @@ Level = Annotated[Literal["low", "medium", "high"], BeforeValidator(_lower)]
 
 
 class Contract(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", coerce_numbers_to_str=True)
 
 
 # ----------------------------------------------------------------------

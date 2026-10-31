@@ -189,12 +189,13 @@ async def test_a_check_slower_than_the_hold_keeps_the_brake_on(clock, setup) -> 
 
     class Slow:
         async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict:
+            clock.advance(20_000)  # the hold's time passes on the vault's clock while the check runs
             await asyncio.sleep(0.2)
             return replace(brake(Reason.URGENCY, 24 * HOUR, "triage"), hold_id=hold.id)
 
     settings = offline_settings()
     engine = Engine(settings, vault, Scripted(CLEAN), Slow(), store, notifier, clock=clock)
-    engine.deadline_margin_ms = 19_950  # with a 20 s hold, the guard fires after 0.05 s
+    engine.deadline_margin_ms = 19_950  # with a 20 s hold, the guard looks after 0.05 s
     await engine.start("tg:1", "Priya")
     outcome = await engine.pay("tg:1", PAYEE, settings.husd_token or "", HUSD)
     await engine.wait_idle()
@@ -204,6 +205,51 @@ async def test_a_check_slower_than_the_hold_keeps_the_brake_on(clock, setup) -> 
     assert fresh is not None and fresh.release_at_ms == clock() + 24 * HOUR
     assert fresh.reason_bits == Reason.AI_UNAVAILABLE | Reason.URGENCY
     assert await engine.tick() == 0  # the slow check finished, so there is nothing to retry
+
+
+async def test_a_check_slower_than_the_hold_in_real_time_only_is_not_braked(clock, setup) -> None:  # type: ignore[no-untyped-def]
+    """The offline demo with live AI: simulated time stands still while a 17 s check runs."""
+    vault, store, notifier = setup
+
+    class Slow:
+        async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict:
+            await asyncio.sleep(0.2)
+            return replace(CLEAN, hold_id=hold.id)
+
+    settings = offline_settings()
+    engine = Engine(settings, vault, Scripted(CLEAN), Slow(), store, notifier, clock=clock)
+    engine.deadline_margin_ms = 19_950  # with a 20 s hold, the guard looks after 0.05 s
+    await engine.start("tg:1", "Priya")
+    outcome = await engine.pay("tg:1", PAYEE, settings.husd_token or "", HUSD)
+    await engine.wait_idle()
+    assert not any("taking longer than the hold" in text for _, text in notifier.sent)
+    fresh = await vault.get_hold(outcome.hold.id)  # type: ignore[union-attr]
+    assert fresh is not None and fresh.extensions == 0 and fresh.reason_bits == 0
+    assert fresh.release_at_ms == outcome.hold.release_at_ms  # type: ignore[union-attr]
+    clock.advance(21_000)
+    released = await engine.make_keeper().run_once()
+    assert released and (await vault.get_hold(fresh.id)).status == HoldStatus.RELEASED  # type: ignore[union-attr]
+
+
+async def test_on_a_real_network_a_wall_clock_step_does_not_delay_the_guard(clock, setup) -> None:  # type: ignore[no-untyped-def]
+    """The hold runs out on chain time, so the guard waits in real time even if the server's clock steps back."""
+    vault, store, notifier = setup
+    wall = SimClock(clock())
+
+    class Slow:
+        async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict:
+            wall.advance(-60_000)
+            await asyncio.sleep(0.3)
+            return replace(CLEAN, hold_id=hold.id)
+
+    settings = offline_settings()
+    engine = Engine(settings, vault, Scripted(CLEAN), Slow(), store, notifier, clock=wall)
+    engine.simulated = False  # as on testnet: the vault keeps chain time, the engine reads the wall clock
+    engine.deadline_margin_ms = 19_950  # with a 20 s hold, the guard looks after 0.05 s
+    await engine.start("tg:1", "Priya")
+    await engine.pay("tg:1", PAYEE, settings.husd_token or "", HUSD)
+    await asyncio.wait_for(engine.wait_idle(), 10)
+    assert any("taking longer than the hold" in text for _, text in notifier.sent)
 
 
 async def test_a_cancelled_payment_is_left_alone(clock, setup) -> None:  # type: ignore[no-untyped-def]

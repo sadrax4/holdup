@@ -106,17 +106,27 @@ def _explain_missing(settings: Settings, command: str) -> int:
 
 
 def _run_story(args: argparse.Namespace, offline_story: Callable[..., Any], story: Callable[..., Any]) -> int:
+    from .chain.fake import SimClock
     from .demo import Transcript, TranscriptNotifier
 
     settings = _settings_for(args)
-    if _offline(settings):
-        asyncio.run(offline_story(rules_only=args.rules_only))
+    mode = os.environ.get("OTARI_MODE")
+    offline = _offline(settings)
+    if offline and (args.rules_only or mode != "live"):
+        # The recorded story (make demo-offline): the same answers every run, whatever key is set.
+        if settings.otari_api_key and not mode and not args.rules_only:
+            print(
+                "holdup: the offline story replays recorded AI answers; set OTARI_MODE=live to ask Otari "
+                "with OTARI_API_KEY instead.",
+                file=sys.stderr,
+            )
+        asyncio.run(offline_story(rules_only=args.rules_only or mode == "off"))
         return 0
-    if code := _explain_missing(settings, args.command):
+    if not offline and (code := _explain_missing(settings, args.command)):
         return code
     if args.rules_only:
         settings.otari_mode = "off"
-    elif not settings.otari_api_key and not os.environ.get("OTARI_MODE"):
+    elif not settings.otari_api_key and not mode:
         # Without a key the story replays its recorded AI answers, one scenario per demo payee
         # (a real network otherwise runs the rules alone).
         settings.otari_mode = "replay"
@@ -125,7 +135,9 @@ def _run_story(args: argparse.Namespace, offline_story: Callable[..., Any], stor
         transcript = Transcript()
         notifier = TranscriptNotifier(transcript)
         # The story chooses the recorded answers for its own payees, so replay is allowed here.
-        runtime = _runtime(settings, notifier=notifier, web=False, allow_replay=True)
+        # Offline with OTARI_MODE=live, the vault and its time stay in memory and only the checks are live.
+        clock = SimClock() if offline else None
+        runtime = _runtime(settings, notifier=notifier, clock=clock, web=False, allow_replay=True)
         try:
             await story(runtime, transcript, notifier)
         finally:

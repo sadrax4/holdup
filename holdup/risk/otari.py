@@ -11,7 +11,9 @@ with what HoldUp needs from it:
   gateway tool calls and the guardrail verdict;
 * refusals become typed exceptions, mapped on the stable ``Otari-Error-Code``;
 * calls that use gateway tools are streamed, because the hosted CDN cuts
-  non-streamed responses after about 60 s (otari issue #2692);
+  non-streamed responses after about 60 s (otari issue #2692), and every
+  attempt has a wall-clock limit, because the gateway keeps a stalled stream
+  open with keepalive comments;
 * a request that the CDN firewall rejects with an HTML 403 is retried once with
   look-alike quote characters (otari issue #2704);
 * when every offering of a model failed, the call moves on to the next model
@@ -20,6 +22,7 @@ with what HoldUp needs from it:
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -71,12 +74,22 @@ REASONING_EFFORT_MODELS = frozenset({TRIAGE_MODEL, INVESTIGATOR_MODEL})
 """Models whose offerings accept ``reasoning_effort``. The safeguard model is served
 on Bedrock, where the gateway refuses the field with a 400 (observed 2026-10-31)."""
 
+RESPONSE_FORMAT_REFUSED = frozenset({INJECTION_GUARD_MODEL})
+"""Models whose offerings refuse ``response_format``: on Bedrock the gateway answers 400
+"'response_format' is not supported for bedrock" (observed 2026-10-31), so the answer is
+read from plain text instead of costing a refused request on every call."""
+
 WEB_SEARCH = "otari_web_search"
 WEB_FETCH = "otari_web_fetch"
 CODE_EXECUTION = "otari_code_execution"
 
 PLAIN_TIMEOUT_S = 60.0
-TOOL_LOOP_TIMEOUT_S = 180.0
+"""Wall-clock limit of one attempt without tools."""
+TOOL_LOOP_TIMEOUT_S = 150.0
+"""Wall-clock limit of one streamed attempt. A stalled provider keeps the stream open with
+keepalive comments, which reset any read timeout (one stall lasted 209 s before it failed);
+normal tool loops took 13-74 s, and the limit leaves a fallback model time to answer within
+the engine's five minutes."""
 
 
 def family(model: str) -> str:
@@ -339,6 +352,8 @@ _PASS_WORDS = frozenset({"pass", "passed", "valid", "true", "ok"})
 _FAIL_WORDS = frozenset({"fail", "failed", "flagged", "invalid", "false", "blocked"})
 _LOOKALIKES = str.maketrans({"\u0060": "\u02cb", "'": "\u2019", '"': "\u201d"})
 _FENCE = "\u0060" * 3
+_JSON_TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[A-Za-z_]\w*|.', re.DOTALL)
+_LITERALS = {"true": "true", "false": "false", "null": "null", "True": "true", "False": "false", "None": "null"}
 
 
 def waf_safe(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
@@ -364,8 +379,22 @@ def waf_safe(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _quote_bare_words(text: str) -> str:
+    """``text`` with the bare words outside its strings quoted, as in ``"confidence": medium``.
+
+    ``true``, ``false`` and ``null`` stay literals, also when written the Python way.
+    """
+    out = []
+    for match in _JSON_TOKEN.finditer(text):
+        token = match.group(0)
+        if token[0].isalpha() or token[0] == "_":
+            token = _LITERALS.get(token) or json.dumps(token)
+        out.append(token)
+    return "".join(out)
+
+
 def extract_json(text: str) -> Any:
-    """The JSON object in a model answer, tolerating code fences and stray prose."""
+    """The JSON object in a model answer, tolerating code fences, stray prose and unquoted words."""
     text = text.strip()
     if text.startswith(_FENCE):
         text = text.split("\n", 1)[1] if "\n" in text else ""
@@ -376,7 +405,12 @@ def extract_json(text: str) -> Any:
         pass
     start, end = text.find("{"), text.rfind("}")
     if 0 <= start < end:
-        return json.loads(text[start : end + 1])
+        candidate = text[start : end + 1]
+        try:
+            return json.loads(candidate)
+        except ValueError:
+            # Steps with tools send no schema, and a model may then leave an enum word unquoted.
+            return json.loads(_quote_bare_words(candidate))
     raise ValueError("no JSON object in the answer")
 
 
@@ -458,6 +492,8 @@ class _Reply:
     tool_calls: list[dict[str, Any]]
     usage: dict[str, Any]
     headers: Mapping[str, str]
+    rounds: int = 0  # rounds of gateway tools: every model turn after the first
+    reported_rounds: int = 0  # rounds in which the gateway reported a web search or fetch
 
 
 def _usage(usage: Any) -> dict[str, Any]:
@@ -484,26 +520,43 @@ async def _read_stream(raw: Any) -> _Reply:
     entries on chunks of their own, once when a call starts and once when it
     ends; the ended entry replaces the started one (api-reference: Web tool
     calls on Chat Completions). Usage, with ``cost_usd``, rides the last chunk.
+    Each model turn opens with a gateway chunk under a completion id of its
+    own, so the turns show how many rounds of tools ran, including sandbox
+    runs, which the gateway does not report
+    (fixtures/otari/recorded/tools-codeexec-chat-stream.json). The chunks a
+    provider streamed carry its ``service_tier``, and glm-5.3-flash keeps its
+    own completion ids on them, so only chunks without one open a turn.
     """
     parts: list[str] = []
     calls: dict[str, dict[str, Any]] = {}
     usage: dict[str, Any] = {}
     finish: str | None = None
-    async for chunk in raw.parse():
-        extra = chunk.model_extra or {}
-        for call in extra.get("otari_tool_calls") or []:
-            if isinstance(call, dict):
-                calls[str(call.get("id") or len(calls))] = call
-        for choice in chunk.choices or []:
-            if choice.delta is not None and choice.delta.content:
-                parts.append(choice.delta.content)
-            if choice.finish_reason:
-                finish = choice.finish_reason
-        if chunk.usage is not None:
-            usage = _usage(chunk.usage)
+    turns: list[str] = []
+    reporting: set[str] = set()
+    stream = raw.parse()
+    try:
+        async for chunk in stream:
+            if chunk.service_tier is None and chunk.id not in turns:
+                turns.append(chunk.id)
+            extra = chunk.model_extra or {}
+            for call in extra.get("otari_tool_calls") or []:
+                if isinstance(call, dict):
+                    calls[str(call.get("id") or len(calls))] = call
+                    reporting.add(turns[-1] if turns else chunk.id)
+            for choice in chunk.choices or []:
+                if choice.delta is not None and choice.delta.content:
+                    parts.append(choice.delta.content)
+                if choice.finish_reason:
+                    finish = choice.finish_reason
+            if chunk.usage is not None:
+                usage = _usage(chunk.usage)
+    finally:
+        await stream.close()  # also when the attempt ran out of time
     if finish is None:
         raise OtariUnavailable("the stream ended before the answer finished", code="provider_stream_interrupted")
-    return _Reply("".join(parts), finish, list(calls.values()), usage, raw.headers)
+    rounds = max(len(turns) - 1, 0)
+    reported = len(reporting & set(turns[:-1]))
+    return _Reply("".join(parts), finish, list(calls.values()), usage, raw.headers, rounds, reported)
 
 
 def _refused_optional_field(exc: OtariError, params: Mapping[str, Any]) -> str | None:
@@ -596,17 +649,22 @@ class OtariClient:
         fallbacks: Sequence[str] = (),
         prompt_sha256: str | None = None,
         stream: bool | None = None,
+        deadline: float | None = None,
     ) -> tuple[Any, StepRecord]:
         """Run one completion; returns ``(value, StepRecord)``.
 
         ``value`` is an instance of ``output`` when given (validated JSON),
         otherwise the answer text. Errors are raised as ``OtariError``
-        subclasses carrying the step record in ``record``.
+        subclasses carrying the step record in ``record``. ``deadline``, a
+        ``time.monotonic()`` value, ends the call: each attempt gets at most
+        the time left, and none starts after it.
         """
         started = time.monotonic()
         streaming = bool(tools or mcp_servers) if stream is None else stream
         record = StepRecord(step=step, model=model, attempts=0, prompt_sha256=prompt_sha256)
         chain = [model, *(m for m in fallbacks if m != model)]
+        # Sandbox runs are the one gateway tool that the stream does not report.
+        sandbox = any(t.get("type") == CODE_EXECUTION for t in tools or []) and not mcp_servers
         for index, candidate in enumerate(chain):
             params = self._params(
                 candidate,
@@ -621,7 +679,7 @@ class OtariClient:
                 max_tool_iterations=max_tool_iterations,
             )
             try:
-                reply = await self._attempt(params, streaming)
+                reply = await self._attempt(params, streaming, deadline)
             except OtariError as exc:
                 record.attempts = (record.attempts or 0) + 1
                 record.request_id = exc.request_id or record.request_id
@@ -636,7 +694,7 @@ class OtariClient:
                     record.guardrail = exc.verdict()
                 exc.record = record
                 raise
-            self._fill(record, reply, candidate, fell_back=index > 0, started=started)
+            self._fill(record, reply, candidate, fell_back=index > 0, started=started, sandbox=sandbox)
             try:
                 return self._value(reply, output), record
             except BadModelOutput as exc:
@@ -668,7 +726,7 @@ class OtariClient:
             params["reasoning_effort"] = reasoning_effort
         if tools:
             params["tools"] = tools
-        elif output is not None and not mcp_servers:
+        elif output is not None and not mcp_servers and model not in RESPONSE_FORMAT_REFUSED:
             # Structured output only without tools: a schema-constrained decoder
             # could not emit the tool calls of a gateway tool loop.
             params["response_format"] = response_format(output, output.__name__)
@@ -685,12 +743,12 @@ class OtariClient:
             params["extra_body"] = extra
         return params
 
-    async def _attempt(self, params: dict[str, Any], streaming: bool) -> _Reply:
+    async def _attempt(self, params: dict[str, Any], streaming: bool, deadline: float | None) -> _Reply:
         """One model, with at most one firewall retry and one retry per optional field it refused."""
         waf_retried = False
         while True:
             try:
-                return await self._send(params, streaming)
+                return await self._send(params, streaming, deadline)
             except WafBlocked:
                 if waf_retried:
                     raise
@@ -704,22 +762,31 @@ class OtariClient:
                 log.info("%s refused %s; retrying without it", params["model"], optional)
                 params = {k: v for k, v in params.items() if k != optional}
 
-    async def _send(self, params: dict[str, Any], streaming: bool) -> _Reply:
+    async def _send(self, params: dict[str, Any], streaming: bool, deadline: float | None) -> _Reply:
         body = dict(params)
         extra_body = body.pop("extra_body", None)
         create = self._sdk.chat.completions.with_raw_response.create
+        limit = TOOL_LOOP_TIMEOUT_S if streaming else PLAIN_TIMEOUT_S
+        if deadline is not None:
+            limit = min(limit, deadline - time.monotonic())
+            if limit <= 0:
+                raise OtariUnavailable("the check has no time left for another request", code="timeout")
         try:
-            if streaming:
-                raw = await create(
-                    **body,
-                    stream=True,
-                    stream_options={"include_usage": True},
-                    extra_body=extra_body,
-                    timeout=TOOL_LOOP_TIMEOUT_S,
-                )
-                return await _read_stream(raw)
-            raw = await create(**body, extra_body=extra_body, timeout=PLAIN_TIMEOUT_S)
-            return _read_completion(raw)
+            # The SDK timeout applies per read, and keepalive comments reset it; this one ends the attempt.
+            async with asyncio.timeout(limit):
+                if streaming:
+                    raw = await create(
+                        **body,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                        extra_body=extra_body,
+                        timeout=limit,
+                    )
+                    return await _read_stream(raw)
+                raw = await create(**body, extra_body=extra_body, timeout=limit)
+                return _read_completion(raw)
+        except TimeoutError as exc:
+            raise OtariUnavailable(f"no complete answer within {limit:.0f} s", code="timeout") from exc
         except openai.APIStatusError as exc:
             raise error_from_response(exc.status_code, exc.response.headers, exc.response.content) from exc
         except openai.APITimeoutError as exc:
@@ -732,7 +799,7 @@ class OtariClient:
             raise OtariUnavailable("the connection to the gateway broke", code="connection") from exc
 
     @staticmethod
-    def _fill(record: StepRecord, reply: _Reply, model: str, *, fell_back: bool, started: float) -> None:
+    def _fill(record: StepRecord, reply: _Reply, model: str, *, fell_back: bool, started: float, sandbox: bool) -> None:
         headers = reply.headers
         try:
             attempts = int(headers.get("otari-attempt-count") or 1)
@@ -747,6 +814,10 @@ class OtariClient:
         record.cost_usd = _cost(reply.usage)
         record.latency_ms = round((time.monotonic() - started) * 1000)
         record.tool_calls = [_tool_call(call) for call in reply.tool_calls]
+        unreported = reply.rounds - reply.reported_rounds
+        if sandbox and unreported > 0:
+            # Rounds of tools in which the gateway reported no call were sandbox runs.
+            record.tool_calls.append({"name": CODE_EXECUTION, "status": "inferred", "rounds": unreported})
         record.guardrail = guardrail_verdict(parse_guardrails_header(headers.get("otari-guardrails")))
 
     @staticmethod

@@ -501,12 +501,10 @@ class Engine:
         try:
             # If the check would outlast the hold, keep the brake on while it finishes.
             guard_after = await self._seconds_before_release(hold)
-            if guard_after < self.full_timeout_s:
-                done, _ = await asyncio.wait({task}, timeout=max(guard_after, 0.0))
-                if not done:
-                    await self._fail_closed(
-                        user_key, hold, ctx, "it is still running", fast=fast, verdict=None, slow=True
-                    )
+            if guard_after < self.full_timeout_s and not await self._done_before(task, guard_after, started):
+                await self._fail_closed(
+                    user_key, hold, ctx, "it is still running", fast=fast, verdict=None, slow=True
+                )
             remaining = self.full_timeout_s - (loop.time() - started)
             verdict = await asyncio.wait_for(task, max(remaining, 0.0))
         except TimeoutError:
@@ -519,6 +517,26 @@ class Engine:
         if failures:
             return verdict, failures[0].detail or "the AI service is unavailable"
         return verdict, None
+
+    async def _done_before(self, task: asyncio.Future[Verdict], seconds: float, started: float) -> bool:
+        """Whether ``task`` finishes before ``seconds`` pass on the vault's clock.
+
+        On a real network that is real time, counted on the loop's monotonic clock, which a wall
+        clock step cannot move. The offline vault runs on the engine's clock; a simulated one stands
+        still while a check runs, so there the check is bounded only by the full timeout.
+        """
+        if not self.simulated:
+            done, _ = await asyncio.wait({task}, timeout=max(seconds, 0.0))
+            return bool(done)
+        loop = asyncio.get_running_loop()
+        deadline_ms = self.clock() + seconds * 1000
+        while True:
+            left = min((deadline_ms - self.clock()) / 1000, self.full_timeout_s - (loop.time() - started))
+            if left <= 0:
+                return task.done()
+            done, _ = await asyncio.wait({task}, timeout=left)
+            if done:
+                return True
 
     async def _seconds_before_release(self, hold: Hold) -> float:
         current = await self.vault.get_hold(hold.id) or hold
