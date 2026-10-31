@@ -14,11 +14,12 @@ import json
 import logging
 import os
 import re
+import secrets
 import sys
 from collections.abc import Callable, Sequence
 from typing import Any
 
-from .config import Settings, load_settings
+from .config import OFFLINE_SECRET, Settings, load_settings
 from .messages import error_text, fmt_amount, fmt_utc
 from .models import PaymentContext, parse_amount, reasons_from_bits
 
@@ -281,7 +282,7 @@ class Console:
             elif word == "holds":
                 now = await self.runtime.vault.now_ms()
                 for hold in await self.engine.holds(self.user):
-                    reasons = ",".join(r.name for r in reasons_from_bits(hold.reason_bits))
+                    reasons = ",".join(r.name or str(int(r)) for r in reasons_from_bits(hold.reason_bits))
                     self.out(f"#{hold.id} {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee}: "
                              f"{hold.status.value}, release {fmt_utc(hold.release_at_ms, now)} {reasons}")
             elif word == "cancel":
@@ -413,6 +414,10 @@ def cmd_serve(args: argparse.Namespace) -> int:
     settings = _settings_for(args)
     if not _offline(settings) and (code := _explain_missing(settings, "serve")):
         return code
+    if settings.secret == OFFLINE_SECRET:
+        # The offline world starts from scratch on every restart anyway, so a server that may be
+        # reachable by others signs its cookies, export links and hold tokens with a fresh secret.
+        settings.secret = secrets.token_urlsafe(32)
     runtime = build_runtime(settings)
     where = "offline, in-memory vault" if _offline(settings) else settings.network
     bot = "on" if runtime.bot is not None else "off (TELEGRAM_BOT_TOKEN is not set)"

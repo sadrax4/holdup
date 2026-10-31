@@ -216,7 +216,7 @@ def fallback_evidence(
         }
         for s in verdict.steps
     ]
-    doc = {
+    doc: dict[str, Any] = {
         "v": 1,
         "hold": hold.id,
         "vault": vault_id,

@@ -295,7 +295,9 @@ class PaymentContext:
 class Finding:
     reason: Reason
     detail: str
-    source: str  # feature that found it, e.g. "rules", "triage", "mcp", "web_fetch", "web_search", "code_execution", "guardrail", "vision", "reviewer"
+    # What found it: "rules", "triage", "vision", "mcp", "web_fetch", "web_search", "code_execution",
+    # "guardrail", "reviewer" or "fail_closed".
+    source: str
     model: str | None = None
     citations: list[str] = field(default_factory=list)
 

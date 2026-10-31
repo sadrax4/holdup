@@ -21,8 +21,7 @@ from holdup.chain.verify import (
     verify_deploy,
     verify_fake,
 )
-from holdup.config import Settings
-from holdup.config import offline_settings
+from holdup.config import Settings, offline_settings
 from holdup.runtime import offline_vault
 
 VAULT = "vault.holdup.testnet"

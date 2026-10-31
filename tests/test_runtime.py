@@ -115,11 +115,13 @@ def test_a_bot_token_adds_the_telegram_channel() -> None:
 async def test_a_network_runtime_uses_the_chain_and_a_database(tmp_path: Path) -> None:
     env = {"HOLDUP_NETWORK": "testnet", "HOLDUP_SECRET": "s" * 32, "HOLDUP_DB": str(tmp_path / "holdup.sqlite3")}
     settings = load_settings(env=env, credentials_path=str(tmp_path / "none.json"))
-    runtime = build_runtime(settings, web=False)  # builds clients only; nothing is sent
+    runtime = build_runtime(settings)  # builds clients and the web app only; nothing is sent
     try:
         assert isinstance(runtime.vault, NearVault) and runtime.fake is None
         assert runtime.store.path == str(tmp_path / "holdup.sqlite3")
         assert runtime.full_risk is not None and runtime.otari.offline  # no key: recorded responses
+        assert runtime.app is not None and runtime.notifier.route("web") is runtime.console
+        assert runtime.engine.clock is runtime.clock and not runtime.engine.simulated
     finally:
         await runtime.aclose()
 

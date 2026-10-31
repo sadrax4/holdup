@@ -30,8 +30,8 @@ from .chain.fake import FakeVault, wall_clock_ms
 from .chain.verify import expected_code_hash
 from .config import NETWORKS, OFFLINE_SECRET, OTARI_MODES, Settings
 from .engine import Engine
-from .interfaces import Notifier
 from .intel import PayeeIntel, load_payee_fixtures
+from .interfaces import Notifier
 from .risk.rules import RulesRisk
 from .store import Store
 

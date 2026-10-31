@@ -16,6 +16,7 @@ same rejections nearcore gives for restricted keys.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import time
@@ -1105,9 +1106,7 @@ class FakeVault:
                     self.treasury_id,
                     "ft_transfer_call",
                     {"receiver_id": self.vault_id, "amount": str(amount), "msg": msg},
-                    lambda token=token, amount=amount, msg=msg: self.model.ft_on_transfer(
-                        token, self.treasury_id, amount, msg
-                    ),
+                    functools.partial(self.model.ft_on_transfer, token, self.treasury_id, amount, msg),
                     receiver=token,
                 )
             )

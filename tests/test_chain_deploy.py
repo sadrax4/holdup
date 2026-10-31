@@ -142,7 +142,9 @@ def test_credentials_file_is_private(tmp_path: Path) -> None:
     assert "vault_private_key" not in saved  # the vault key is deleted, never saved
 
 
-async def test_a_deployment_never_keeps_the_public_offline_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_deployment_never_keeps_the_public_offline_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def no_network(plan: Any, near: Any, root_signer: Any) -> list[tuple[str, str]]:
         return [(tx.label, "hash") for tx in plan.txs]
 

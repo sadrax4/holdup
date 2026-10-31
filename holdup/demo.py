@@ -258,7 +258,7 @@ class Story:
     async def show_hold(self, hold_id: int) -> Hold:
         hold = await self.runtime.vault.get_hold(hold_id)
         assert hold is not None
-        reasons = ", ".join(r.name for r in reasons_from_bits(hold.reason_bits)) or "none"
+        reasons = ", ".join(r.name or str(int(r)) for r in reasons_from_bits(hold.reason_bits)) or "none"
         now = await self.runtime.vault.now_ms()
         if hold.active:
             when = f"releases {fmt_utc(hold.release_at_ms, now)}"
@@ -509,7 +509,8 @@ async def run_attack(runtime: Runtime, transcript: Transcript, notifier: Transcr
         f"from Priya's account to {attacker},"
     )
     story.say("bypassing HoldUp's checks entirely.")
-    forged = await runtime.vault.send(priya, attacker, story.stable.asset_id, parse_amount("500", story.stable.decimals))
+    amount = parse_amount("500", story.stable.decimals)
+    forged = await runtime.vault.send(priya, attacker, story.stable.asset_id, amount)
     story.holds["forged"] = forged.hold.id
     now = await runtime.vault.now_ms()
     story.say(

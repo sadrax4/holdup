@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeGuard
 
 from near import is_valid_account_id
 
@@ -100,7 +100,7 @@ def _iso(ms: int | None) -> str:
     return datetime.fromtimestamp(ms / 1000, UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def _flags(verdict: Verdict | None) -> bool:
+def _flags(verdict: Verdict | None) -> TypeGuard[Verdict]:
     return verdict is not None and verdict.brake and verdict.reason_bits != 0
 
 
@@ -838,7 +838,7 @@ class Engine:
                     hold.status.value,
                     "yes" if hold.instant else "no",
                     "yes" if hold.flagged else "no",
-                    ";".join(r.name for r in reasons_from_bits(hold.reason_bits)),
+                    ";".join(r.name or str(int(r)) for r in reasons_from_bits(hold.reason_bits)),
                     _iso(hold.release_at_ms),
                     _iso(hold.settled_ms),
                     hold.cancelled_by or "",
@@ -932,7 +932,7 @@ def verdict_to_dict(verdict: Verdict, kind: str) -> dict[str, Any]:
 
 def finding_from_dict(data: dict[str, Any]) -> Finding:
     name = data.get("reason")
-    reason = Reason[name] if name in Reason.__members__ else Reason(int(data.get("bit", 0)))
+    reason = Reason[str(name)] if name in Reason.__members__ else Reason(int(data.get("bit", 0)))
     return Finding(
         reason=reason,
         detail=data.get("detail") or "",

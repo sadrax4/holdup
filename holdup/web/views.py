@@ -105,6 +105,8 @@ class StepRow:
     request_id: str
     prompt: str
     error: str
+    blocked: bool = False  # a block-mode guardrail refused the text: the check worked, nothing failed
+    served_model: str = ""  # the provider's own name for the model, when the gateway reported it
 
 
 # ----------------------------------------------------------------------
@@ -408,6 +410,8 @@ def step_rows(steps: Iterable[StepRecord]) -> list[StepRow]:
                 request_id=step.request_id or "",
                 prompt=(step.prompt_sha256 or "")[:16],
                 error=step.error or "",
+                blocked=step.error == "guardrail_violation",
+                served_model=step.served_model or "",
             )
         )
     return rows

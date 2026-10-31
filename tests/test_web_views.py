@@ -215,3 +215,12 @@ def test_mcp_call_text() -> None:
         views.mcp_call_text({"tool": "payee_profile", "args": {"account_id": "x.testnet"}})
         == "payee_profile(x.testnet)"
     )
+
+
+def test_a_guardrail_block_is_shown_as_blocked_not_failed() -> None:
+    gate = StepRecord("gate", "openai/gpt-oss-20b", attempts=1, error="guardrail_violation")
+    broken = StepRecord("reviewer", "deepseek/deepseek-v4.1-flash-1017", error="all_candidates_failed")
+    served = StepRecord("triage", "openai/gpt-oss-20b", "deepinfra", served_model="openai/gpt-oss-20b-fp8")
+    rows = views.step_rows([gate, broken, served])
+    assert (rows[0].blocked, rows[1].blocked) == (True, False)
+    assert rows[1].error == "all_candidates_failed" and rows[2].served_model == "openai/gpt-oss-20b-fp8"

@@ -35,10 +35,12 @@
         <span class="step-name">{{ step.step }}</span>
         {% if step.model %}<span class="mono break">{{ step.model }}</span>{% endif %}
         {% if step.fallback == "yes" %}<span class="badge tone-held badge-small">fallback</span>{% endif %}
-        {% if step.error %}<span class="badge tone-bad badge-small">failed</span>{% endif %}
+        {% if step.blocked %}<span class="badge tone-brake badge-small">blocked the text</span>
+        {% elif step.error %}<span class="badge tone-bad badge-small">failed</span>{% endif %}
       </div>
       <dl class="kv kv-compact">
         {% if step.provider %}<dt>Provider</dt><dd>{{ step.provider }}</dd>{% endif %}
+        {% if step.served_model %}<dt>Served as</dt><dd class="mono break">{{ step.served_model }}</dd>{% endif %}
         {% if step.fallback %}<dt>Fallback</dt><dd>{{ step.fallback }}</dd>{% endif %}
         {% if step.attempts %}<dt>Attempts</dt><dd>{{ step.attempts }}</dd>{% endif %}
         {% if step.latency %}<dt>Latency</dt><dd>{{ step.latency }}</dd>{% endif %}
@@ -47,7 +49,9 @@
         {% if step.guardrail %}<dt>Guardrail</dt><dd>{{ step.guardrail }}</dd>{% endif %}
         {% if step.request_id %}<dt>Request id</dt><dd class="mono break">{{ step.request_id }}</dd>{% endif %}
         {% if step.prompt %}<dt>Prompt sha256</dt><dd class="mono">{{ step.prompt }}</dd>{% endif %}
-        {% if step.error %}<dt>Error</dt><dd>{{ step.error }}</dd>{% endif %}
+        {% if step.blocked %}<dt>Outcome</dt><dd>The guardrail blocked the text, so the later steps only saw
+          facts HoldUp extracted from it ({{ step.error }})</dd>
+        {% elif step.error %}<dt>Error</dt><dd>{{ step.error }}</dd>{% endif %}
       </dl>
     </li>
     {% endfor %}

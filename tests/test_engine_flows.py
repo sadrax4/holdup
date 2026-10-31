@@ -14,7 +14,7 @@ import pytest
 from holdup.chain import errors as E
 from holdup.chain.errors import VaultError
 from holdup.chain.fake import FakeVault, SimClock
-from holdup.config import Settings
+from holdup.config import Settings, offline_settings
 from holdup.engine import CONTEXT_TTL_MS, Engine
 from holdup.models import (
     NEAR,
@@ -26,9 +26,8 @@ from holdup.models import (
     StepRecord,
     Verdict,
 )
-from holdup.store import Store
-from holdup.config import offline_settings
 from holdup.runtime import offline_vault
+from holdup.store import Store
 
 HOUR = 3_600_000
 HUSD = 10**6

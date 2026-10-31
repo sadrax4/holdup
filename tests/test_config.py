@@ -54,7 +54,9 @@ def test_network_defaults(tmp_path: Path) -> None:
     testnet = load(tmp_path, HOLDUP_NETWORK="testnet", HOLDUP_HUSD_TOKEN="husd.me.testnet")
     assert testnet.root_account == "holdup.testnet" and testnet.rpc_url == "https://rpc.testnet.near.org"
     assert testnet.demo_funds == {NEAR: 2 * 10**24, "husd.me.testnet": 2_000 * 10**6}
-    chosen = load_settings(env={"HOLDUP_NETWORK": "testnet"}, credentials_path=str(tmp_path / "none"), network="sandbox")
+    chosen = load_settings(
+        env={"HOLDUP_NETWORK": "testnet"}, credentials_path=str(tmp_path / "none"), network="sandbox"
+    )
     assert chosen.network == "sandbox"
 
 

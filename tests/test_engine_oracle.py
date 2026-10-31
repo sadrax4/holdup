@@ -12,12 +12,12 @@ from holdup.chain import errors as E
 from holdup.chain.errors import VaultError
 from holdup.chain.fake import FakeVault, SimClock
 from holdup.chain.keys import derive_user
+from holdup.config import offline_settings
 from holdup.models import NEAR, Finding, Hold, HoldStatus, Reason, StepRecord, Verdict
+from holdup.runtime import offline_vault
 from holdup.store import Store
 from holdup.workers.keeper import Keeper
 from holdup.workers.oracle import Oracle, fallback_evidence
-from holdup.config import offline_settings
-from holdup.runtime import offline_vault
 
 HOUR = 3_600_000
 MAX_HOLD = 72 * HOUR
