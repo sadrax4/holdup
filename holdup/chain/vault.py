@@ -4,7 +4,8 @@ Who signs what:
 
 - user calls: the user's derived key, a function-call key on the vault for
   ``send``, ``cancel``, ``guardian_cancel``, ``add_trusted``,
-  ``remove_trusted`` and ``set_guardian`` (zero deposit);
+  ``remove_trusted``, ``set_guardian`` and ``veto_guardian_change`` (zero
+  deposit);
 - ``extend_hold``: the oracle's only key;
 - ``release``: the keeper's only key;
 - onboarding: the treasury (the root account), which creates the user's
@@ -57,6 +58,7 @@ GAS = {
     "add_trusted": Gas.tgas(30),
     "remove_trusted": Gas.tgas(30),
     "set_guardian": Gas.tgas(30),
+    "veto_guardian_change": Gas.tgas(30),
     "extend_hold": Gas.tgas(30),
     "release": Gas.tgas(100),  # payout promise plus the on_payout callback
     "deposit_near_for": Gas.tgas(30),
@@ -296,6 +298,9 @@ class NearVault:
 
     async def set_guardian(self, user: UserAccount, guardian: str | None) -> TxResult:
         return await self._call(self._user_signer(user), "set_guardian", {"guardian": guardian})
+
+    async def veto_guardian_change(self, guardian: UserAccount, owner: str) -> TxResult:
+        return await self._call(self._user_signer(guardian), "veto_guardian_change", {"owner": owner})
 
     # ------------------------------------------------------------------
     # oracle, keeper and treasury calls

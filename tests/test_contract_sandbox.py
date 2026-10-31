@@ -74,6 +74,10 @@ class World:
     def hold(self, hold_id: int) -> dict[str, Any]:
         return self.view("get_hold", {"hold_id": str(hold_id)})
 
+    def hold_fee(self) -> int:
+        """yoctoNEAR every hold costs its sender."""
+        return int(self.view("get_config")["hold_storage_fee"])
+
     def near_balance(self, account_id: str) -> int:
         return int(self.view("get_balance", {"account_id": account_id})["near"])
 
@@ -232,6 +236,7 @@ def test_vault_is_keyless_and_runs_the_published_code(world: World) -> None:
     assert client.account(world.token).code_hash == published_code_hash("demo_token.wasm")
     config = world.view("get_config")
     assert config.pop("version") == "1.0.0"
+    assert (config.pop("hold_storage_fee"), config.pop("entry_storage_fee")) == (str(15 * 10**21), str(10**21))
     assert config["oracles"] == [world.oracle.account_id]
     with pytest.raises(near.ContractPanicError, match="already been initialized"):
         world.mallory.call(world.vault, "new", {"config": config | {"oracles": [world.mallory.account_id]}})
@@ -279,9 +284,10 @@ def test_held_payment_is_braked_by_the_oracle_and_cancelled(world: World) -> Non
         world.mallory.call(vault, "cancel", {"hold_id": hold_id})
     cancelled = alice.call(vault, "cancel", {"hold_id": hold_id})
     assert cancelled.json_value()["status"] == "cancelled"
-    assert world.near_balance(alice.account_id) == before
+    # The amount comes back; the hold's storage fee stays with the vault.
+    assert world.near_balance(alice.account_id) == before - world.hold_fee()
     stats = world.view("get_payee_stats", {"account_id": world.shop})
-    assert stats["cancelled_after_flag"] >= 1
+    assert stats["cancelled_after_flag"] >= 1 and stats["last_report_ms"] is not None
 
 
 def test_due_near_payment_reaches_an_outside_account(world: World) -> None:
@@ -306,7 +312,7 @@ def test_failed_payout_returns_the_money_to_the_sender(world: World) -> None:
     assert world.release(int(hold["id"])) is None  # the transfer to a missing account fails
     settled = world.hold(int(hold["id"]))
     assert settled["status"] == "failed"
-    assert world.near_balance(world.alice.account_id) == before
+    assert world.near_balance(world.alice.account_id) == before - world.hold_fee()
 
 
 def test_guardian_cancels_for_the_sender(world: World) -> None:
@@ -317,6 +323,14 @@ def test_guardian_cancels_for_the_sender(world: World) -> None:
         world.mallory.call(world.vault, "guardian_cancel", {"hold_id": hold["id"]})
     cancelled = carol.call(world.vault, "guardian_cancel", {"hold_id": hold["id"]}).json_value()
     assert (cancelled["status"], cancelled["cancelled_by"]) == ("cancelled", carol.account_id)
+
+    # A removal signed with Alice's key waits, and Carol vetoes it.
+    pending = alice.call(world.vault, "set_guardian", {"guardian": None}).json_value()
+    assert pending["guardian"] == carol.account_id and pending["pending_guardian"]["guardian"] is None
+    with pytest.raises(near.ContractPanicError, match="E_NOT_GUARDIAN"):
+        world.mallory.call(world.vault, "veto_guardian_change", {"owner": alice.account_id})
+    kept = carol.call(world.vault, "veto_guardian_change", {"owner": alice.account_id}).json_value()
+    assert (kept["guardian"], kept["pending_guardian"]) == (carol.account_id, None)
 
 
 def test_trusted_vault_user_is_paid_instantly_inside_the_vault(world: World) -> None:

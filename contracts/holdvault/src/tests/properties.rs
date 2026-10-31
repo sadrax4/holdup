@@ -194,8 +194,14 @@ impl World {
             }
             91..=93 => {
                 let owner = self.rng.pick(&self.everyone);
-                let guardian = if self.rng.chance(20) { None } else { Some(self.rng.pick(&self.everyone)) };
-                let _ = self.sim.set_guardian(&owner, guardian.as_ref());
+                if self.rng.chance(25) {
+                    let guardian = self.rng.pick(&self.everyone);
+                    let _ = self.sim.veto(&guardian, &owner);
+                } else {
+                    let guardian =
+                        if self.rng.chance(20) { None } else { Some(self.rng.pick(&self.everyone)) };
+                    let _ = self.sim.set_guardian(&owner, guardian.as_ref());
+                }
             }
             _ => {
                 let wait = match self.rng.below(4) {

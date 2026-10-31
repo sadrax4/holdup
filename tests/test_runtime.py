@@ -119,7 +119,8 @@ async def test_a_network_runtime_uses_the_chain_and_a_database(tmp_path: Path) -
     try:
         assert isinstance(runtime.vault, NearVault) and runtime.fake is None
         assert runtime.store.path == str(tmp_path / "holdup.sqlite3")
-        assert runtime.full_risk is not None and runtime.otari.offline  # no key: recorded responses
+        # No key on a real network: the rules alone, never recorded answers about real payees.
+        assert settings.otari_mode == "off" and runtime.full_risk is None
         assert runtime.app is not None and runtime.notifier.route("web") is runtime.console
         assert runtime.engine.clock is runtime.clock and not runtime.engine.simulated
     finally:
@@ -134,10 +135,47 @@ def test_a_real_network_needs_its_own_secret(tmp_path: Path, secret: str) -> Non
         build_runtime(settings, web=False)
 
 
-def test_scenario_resolver() -> None:
+def facts(payee: str, message: str = "") -> dict[str, object]:
+    """A request body as the pipeline builds it: payment facts, then the forwarded text."""
+    content = f"PAYMENT FACTS (looked up by HoldUp)\n- payee account: {payee}\n- amount: 60 HUSD\n\n{message}"
+    return {"messages": [{"role": "system", "content": "rules"}, {"role": "user", "content": content}]}
+
+
+def test_scenario_resolver_goes_by_the_payee() -> None:
     resolver = ScenarioResolver()
-    assert resolver({"messages": [{"content": "CoinHaven Support says"}]}) == "hero"
-    assert resolver("Northwind Paper Co. invoice") == "invoice"
-    assert resolver(7) == "benign"
+    assert resolver("triage", facts("safe-wallet-77.testnet")) == "hero"
+    assert resolver("investigator", facts("safe-wallet-77.holdup.testnet")) == "hero"
+    assert resolver("triage", facts("northwind-paper.testnet")) == "invoice"
+    assert resolver("triage", facts("ravi.testnet")) == "benign"
+    assert resolver("triage", {"messages": [{"content": [{"type": "text", "text": "- payee account: northwind-paper.x"}]}]}) == "invoice"
+    assert resolver("triage", None) == "benign"
     resolver.current = "budget_exceeded"
-    assert resolver("CoinHaven") == "budget_exceeded"
+    assert resolver("triage", facts("ravi.testnet")) == "budget_exceeded"
+
+
+def test_a_message_that_mentions_northwind_does_not_replay_the_invoice() -> None:
+    """The review's case: paying a friend after a message about the Northwind order pulled in the
+    invoice recording, and its findings about a different payee were attached to the payment."""
+    resolver = ScenarioResolver()
+    message = "Hi, it's Ravi. I picked up the Northwind paper order for the office today. CoinHaven too."
+    assert resolver("investigator", facts("ravi.testnet", message)) == "benign"
+
+
+@pytest.mark.parametrize("network", ["testnet", "sandbox"])
+def test_recorded_answers_are_refused_on_a_real_network(tmp_path: Path, network: str) -> None:
+    env = {"HOLDUP_NETWORK": network, "HOLDUP_SECRET": "s" * 32, "HOLDUP_DB": str(tmp_path / "db.sqlite3"),
+           "OTARI_MODE": "replay"}
+    settings = load_settings(env=env, credentials_path=str(tmp_path / "none.json"))
+    with pytest.raises(ValueError, match="OTARI_MODE=replay"):
+        build_runtime(settings, web=False)
+
+
+async def test_the_scripted_story_may_replay_on_a_real_network(tmp_path: Path) -> None:
+    env = {"HOLDUP_NETWORK": "testnet", "HOLDUP_SECRET": "s" * 32, "HOLDUP_DB": str(tmp_path / "db.sqlite3"),
+           "OTARI_MODE": "replay"}
+    settings = load_settings(env=env, credentials_path=str(tmp_path / "none.json"))
+    runtime = build_runtime(settings, web=False, allow_replay=True)
+    try:
+        assert runtime.otari.offline and runtime.resolver is not None
+    finally:
+        await runtime.aclose()

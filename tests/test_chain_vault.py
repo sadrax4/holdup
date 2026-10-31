@@ -212,6 +212,22 @@ async def test_send_is_signed_by_the_user_key_and_parses_the_hold(node: FakeNode
     assert PublicKey.parse(USER.public_key).verify(signed.signature.data, digest)
 
 
+async def test_a_guardian_veto_is_signed_by_the_guardians_key(node: FakeNode, vault: NearVault) -> None:
+    guardian = derive_user("secret", "tg:2", "holdup.testnet")
+    vetoed = event_log("guardian_change_vetoed", {"owner": USER.account_id, "guardian": guardian.account_id,
+                                                   "vetoed": None})
+    node.outcomes.append(lambda tx, h: outcome(tx, h, success({}), [receipt("R1", VAULT, success({}), [vetoed])]))
+    result = await vault.veto_guardian_change(guardian, USER.account_id)
+    assert [e["event"] for e in result.events] == ["guardian_change_vetoed"]
+    signed = node.sent[0]
+    assert (signed.transaction.signer_id, signed.transaction.receiver_id) == (guardian.account_id, VAULT)
+    call = only_call(signed)
+    assert (call.method_name, call.deposit, json.loads(call.args)) == (
+        "veto_guardian_change", 0, {"owner": USER.account_id}
+    )
+    assert "veto_guardian_change" in USER_METHODS  # every user key may call it, as a guardian
+
+
 async def test_a_contract_panic_becomes_a_vault_error_with_its_code(node: FakeNode, vault: NearVault) -> None:
     failure = panic("Smart contract panicked: E_ONLY_LONGER: a hold can only be made longer")
     node.outcomes.append(lambda tx, h: outcome(tx, h, failure, [receipt("R1", VAULT, failure)]))

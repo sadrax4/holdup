@@ -13,7 +13,7 @@ from hypothesis import strategies as st
 from holdup.chain import errors as E
 from holdup.chain.errors import VaultError
 from holdup.chain.events import events_from_logs, first_item
-from holdup.chain.fake import FakeVault, HoldVaultModel, SimClock
+from holdup.chain.fake import ENTRY_STORAGE_FEE, HOLD_STORAGE_FEE, FakeVault, HoldVaultModel, SimClock
 from holdup.chain.keys import USER_METHODS, derive_user
 from holdup.models import NEAR, Hold, HoldStatus, VaultConfig
 
@@ -183,7 +183,7 @@ def test_a_payment_to_a_new_payee_is_held(vault: HoldVaultModel, clock: SimClock
     assert created == {
         "hold_id": "0", "sender": ALICE, "payee": SHOP, "asset": TOKEN, "amount": str(50 * HUSD),
         "created_ms": str(clock()), "release_at_ms": str(clock() + HOLD_MS), "instant": False,
-        "memo_hash": "ab" * 32,
+        "memo_hash": "ab" * 32, "storage_fee": str(HOLD_STORAGE_FEE),
     }
 
 
@@ -206,7 +206,7 @@ def test_only_the_sender_cancels_and_only_once(vault: HoldVaultModel, clock: Sim
     assert code_of(lambda: vault.cancel(ALICE, 99)) == E.E_HOLD_NOT_FOUND
     view = vault.cancel(ALICE, hold.id)
     assert (view["status"], view["cancelled_by"], view["settled_ms"]) == ("cancelled", ALICE, str(clock()))
-    assert balance(vault, ALICE) == 20 * YOCTO
+    assert balance(vault, ALICE) == 20 * YOCTO - HOLD_STORAGE_FEE  # the storage fee stays with the vault
     assert code_of(lambda: vault.cancel(ALICE, hold.id)) == E.E_HOLD_NOT_ACTIVE
     stats = vault.get_payee_stats(SHOP)
     assert (stats["cancelled"], stats["cancelled_after_flag"]) == (1, 0)
@@ -220,6 +220,8 @@ def test_cancelling_after_a_flag_counts_as_a_report(vault: HoldVaultModel, clock
     vault.cancel(ALICE, hold.id)
     stats = vault.get_payee_stats(SHOP)
     assert (stats["flagged"], stats["cancelled_after_flag"], stats["last_flag_ms"]) == (1, 1, str(clock()))
+    assert stats["last_report_ms"] == str(clock())
+    assert first_item(vault.take_events(), "hold_cancelled")["report"] is True  # type: ignore[index]
 
 
 def test_only_the_effective_guardian_can_cancel_for_the_sender(vault: HoldVaultModel) -> None:
@@ -304,7 +306,7 @@ def test_external_near_payout_leaves_the_vault(vault: HoldVaultModel, clock: Sim
     clock.advance(HOLD_MS)
     vault.release("keeper.testnet", hold.id)
     assert vault.world.near[SHOP] == 3 * YOCTO
-    assert vault.near_liabilities == liabilities - 2 * YOCTO
+    assert vault.near_liabilities == liabilities - 2 * YOCTO - HOLD_STORAGE_FEE
     assert vault.account_balance == account - 2 * YOCTO
     assert first_item(vault.take_events(), "hold_released")["internal"] is False  # type: ignore[index]
 
@@ -317,9 +319,9 @@ def test_failed_payouts_refund_the_sender(vault: HoldVaultModel, clock: SimClock
     clock.advance(HOLD_MS)
     assert vault.release("k.testnet", near_hold.id)["status"] == "failed"
     assert vault.release("k.testnet", token_hold.id)["status"] == "failed"
-    assert balance(vault, ALICE) == 20 * YOCTO
+    assert balance(vault, ALICE) == 20 * YOCTO - 2 * HOLD_STORAGE_FEE
     assert balance(vault, ALICE, TOKEN) == 1_000 * HUSD
-    assert vault.near_liabilities == liabilities
+    assert vault.near_liabilities == liabilities - 2 * HOLD_STORAGE_FEE
     failed = [e["data"][0] for e in vault.take_events() if e["event"] == "hold_failed"]
     assert [f["refunded_to"] for f in failed] == [ALICE, ALICE]
     assert vault.get_payee_stats(SHOP)["released"] == 0
@@ -440,6 +442,102 @@ def test_a_newer_guardian_change_replaces_the_pending_one(vault: HoldVaultModel,
     assert code_of(lambda: vault.set_guardian("mallory.testnet", GUARD)) == E.E_NOT_REGISTERED
 
 
+def test_the_guardian_in_charge_can_veto_a_pending_change(vault: HoldVaultModel, clock: SimClock) -> None:
+    """A removal signed with the owner's (possibly stolen) key waits, and the guardian stops it."""
+    assert code_of(lambda: vault.veto_guardian_change(GUARD, ALICE)) == E.E_NOT_GUARDIAN
+    assert code_of(lambda: vault.veto_guardian_change(GUARD, "mallory.testnet")) == E.E_NOT_REGISTERED
+    vault.set_guardian(ALICE, GUARD)
+    assert code_of(lambda: vault.veto_guardian_change(GUARD, ALICE)) == E.E_BAD_GUARDIAN  # nothing pending
+    vault.set_guardian(ALICE, None)
+    for caller in (ALICE, BOB, ORACLE):
+        assert code_of(lambda caller=caller: vault.veto_guardian_change(caller, ALICE)) == E.E_NOT_GUARDIAN
+    vault.take_events()
+    view = vault.veto_guardian_change(GUARD, ALICE)
+    assert (view["guardian"], view["pending_guardian"]) == (GUARD, None)
+    assert first_item(vault.take_events(), "guardian_change_vetoed") == {"owner": ALICE, "guardian": GUARD, "vetoed": None}
+    clock.advance(30_000)
+    hold = held(vault)
+    vault.guardian_cancel(GUARD, hold.id)  # still in charge after the delay
+
+    # A change that is already due cannot be vetoed any more.
+    vault.set_guardian(ALICE, BOB)
+    clock.advance(30_000)
+    assert code_of(lambda: vault.veto_guardian_change(GUARD, ALICE)) == E.E_NOT_GUARDIAN
+    assert code_of(lambda: vault.veto_guardian_change(BOB, ALICE)) == E.E_BAD_GUARDIAN
+
+
+# ----------------------------------------------------------------------
+# storage fees and reports
+# ----------------------------------------------------------------------
+
+
+def test_every_hold_pays_the_storage_fee_in_near(vault: HoldVaultModel, clock: SimClock) -> None:
+    liabilities = vault.near_liabilities
+    near_hold = held(vault, amount=YOCTO)
+    vault.cancel(ALICE, near_hold.id)
+    vault.send(ALICE, SHOP, TOKEN, 5 * HUSD)
+    assert balance(vault, ALICE) == 20 * YOCTO - 2 * HOLD_STORAGE_FEE
+    assert vault.near_liabilities == liabilities - 2 * HOLD_STORAGE_FEE
+    # The whole NEAR balance can go out except the fee; with no NEAR left, no token either.
+    assert code_of(lambda: held(vault, amount=20 * YOCTO - 2 * HOLD_STORAGE_FEE)) == E.E_INSUFFICIENT_BALANCE
+    held(vault, amount=20 * YOCTO - 3 * HOLD_STORAGE_FEE)
+    assert balance(vault, ALICE) == 0
+    assert code_of(lambda: vault.send(ALICE, SHOP, TOKEN, 1)) == E.E_INSUFFICIENT_BALANCE
+
+
+def test_new_trusted_payees_and_guardian_changes_pay_the_entry_fee(vault: HoldVaultModel) -> None:
+    vault.add_trusted(ALICE, SHOP)
+    vault.add_trusted(ALICE, SHOP)  # re-adding stores nothing and is free
+    vault.set_guardian(ALICE, GUARD)
+    vault.set_guardian(ALICE, None)
+    events = vault.take_events()
+    assert [e["data"][0]["storage_fee"] for e in events if e["event"] == "trust_added"] == [str(ENTRY_STORAGE_FEE), "0"]
+    assert balance(vault, ALICE) == 20 * YOCTO - 3 * ENTRY_STORAGE_FEE
+    vault.deposit_near_for("poor.testnet", "poor.testnet", FEE)
+    assert code_of(lambda: vault.add_trusted("poor.testnet", SHOP)) == E.E_INSUFFICIENT_BALANCE
+    assert code_of(lambda: vault.set_guardian("poor.testnet", GUARD)) == E.E_INSUFFICIENT_BALANCE
+    assert code_of(lambda: vault.set_guardian("poor.testnet", "poor.testnet")) == E.E_BAD_GUARDIAN
+
+
+def test_each_sender_reports_a_payee_once(vault: HoldVaultModel, clock: SimClock) -> None:
+    """One sender flagging and cancelling twice is one report, not two (review finding)."""
+    for _ in range(2):
+        hold = held(vault, amount=1)
+        vault.extend_hold(ORACLE, hold.id, hold.release_at_ms + HOUR, 1, "{}")
+        clock.advance(1_000)
+        vault.cancel(ALICE, hold.id)
+    first_report = clock() - 1_000
+    stats = vault.get_payee_stats(SHOP)
+    assert (stats["cancelled"], stats["cancelled_after_flag"], stats["last_report_ms"]) == (2, 1, str(first_report))
+    reports = [e["data"][0]["report"] for e in vault.take_events() if e["event"] == "hold_cancelled"]
+    assert reports == [True, False]
+
+    hold = held(vault, sender=BOB, amount=1)
+    vault.extend_hold(ORACLE, hold.id, hold.release_at_ms + HOUR, 1, "{}")
+    vault.cancel(BOB, hold.id)
+    stats = vault.get_payee_stats(SHOP)
+    assert (stats["cancelled_after_flag"], stats["last_report_ms"]) == (2, str(clock()))
+    # A flag on a later payment moves last_flag_ms, never last_report_ms.
+    clock.advance(HOUR)
+    hold = held(vault, sender=GUARD, amount=1)
+    vault.extend_hold(ORACLE, hold.id, hold.release_at_ms + HOUR, 1, "{}")
+    stats = vault.get_payee_stats(SHOP)
+    assert stats["last_flag_ms"] == str(clock()) and stats["last_report_ms"] == str(clock() - HOUR)
+
+
+def test_the_memo_limit_counts_utf8_bytes(vault: HoldVaultModel) -> None:
+    """The contract measures memo_hash with String::len(), in bytes (review finding)."""
+    assert code_of(lambda: vault.send(ALICE, SHOP, NEAR, 1, "\u00e9" * 40)) == E.E_MEMO_TOO_LONG
+    assert vault.send(ALICE, SHOP, NEAR, 1, "\u00e9" * 32)["hold"]["memo_hash"] == "\u00e9" * 32
+
+
+def test_duplicate_credit_to_is_rejected(vault: HoldVaultModel) -> None:
+    """serde refuses a duplicate key; json.loads alone would credit the last one (review finding)."""
+    msg = f'{{"credit_to":"nobody.testnet","credit_to":"{BOB}"}}'
+    assert code_of(lambda: vault.ft_on_transfer(TOKEN, "treasury.testnet", 5, msg)) == E.E_BAD_MSG
+    assert balance(vault, BOB, TOKEN) == 1_000 * HUSD
+
+
 # ----------------------------------------------------------------------
 # views
 # ----------------------------------------------------------------------
@@ -473,9 +571,13 @@ def test_views_for_unknown_accounts(vault: HoldVaultModel) -> None:
     assert vault.get_balance("x.testnet") == {"near": "0", "tokens": {TOKEN: "0"}}
     assert vault.get_user("x.testnet") is None
     assert vault.is_registered("x.testnet") is False
-    assert vault.get_payee_stats("x.testnet")["last_flag_ms"] is None
+    stats = vault.get_payee_stats("x.testnet")
+    assert stats["last_flag_ms"] is None and stats["last_report_ms"] is None
     config = vault.get_config()
     assert config["version"] == "1.0.0" and config["max_active_holds"] == 3
+    assert (config["hold_storage_fee"], config["entry_storage_fee"]) == (str(15 * 10**21), str(10**21))
+    parsed = VaultConfig.from_view(config)
+    assert (parsed.hold_storage_fee, parsed.entry_storage_fee) == (HOLD_STORAGE_FEE, ENTRY_STORAGE_FEE)
 
 
 # ----------------------------------------------------------------------
@@ -491,7 +593,7 @@ def test_registration_fails_when_the_reserve_cannot_cover_storage(clock: SimCloc
 
 def test_the_last_user_can_take_everything_out(vault: HoldVaultModel, clock: SimClock) -> None:
     for account in (ALICE, BOB, GUARD):
-        hold = held(vault, sender=account, amount=20 * YOCTO)
+        hold = held(vault, sender=account, amount=20 * YOCTO - HOLD_STORAGE_FEE)
         clock.advance(HOLD_MS)
         vault.release("k.testnet", hold.id)
     solvency = {k: int(v) for k, v in vault.get_solvency().items()}
@@ -523,6 +625,7 @@ def test_release_time_only_grows_and_money_is_conserved(ops: list[tuple[str, int
         vault.deposit_near_for(account, account, FEE + 20 * YOCTO)
     vault.world.create(SHOP, near=0, created_ms=clock())
     deposited = vault.near_liabilities
+    reserve = vault.account_balance - deposited
     seen: dict[int, int] = {}
     for op, index, size in ops:
         sender = (ALICE, BOB)[index % 2]
@@ -555,7 +658,11 @@ def test_release_time_only_grows_and_money_is_conserved(ops: list[tuple[str, int
         in_holds = sum(h.amount for h in vault.holds.values() if h.status in (HoldStatus.HELD, HoldStatus.RELEASING))
         balances = sum(u.balances[NEAR] for u in vault.users.values())
         assert vault.near_liabilities == balances + in_holds
-        assert balances + in_holds + vault.world.near[SHOP] == deposited
+        fees = vault.account_balance - reserve - vault.near_liabilities  # storage fees the vault kept
+        assert fees == HOLD_STORAGE_FEE * len(vault.holds) + ENTRY_STORAGE_FEE * sum(
+            len(u.trusted) for u in vault.users.values()
+        )
+        assert balances + in_holds + fees + vault.world.near[SHOP] == deposited
 
 
 # ----------------------------------------------------------------------
@@ -583,6 +690,16 @@ async def test_adapter_returns_transactions_with_parsed_events() -> None:
         await fake.extend_hold(sent.hold.id, sent.hold.release_at_ms, 1, "{}")
     assert info.value.code == E.E_ONLY_LONGER
     assert info.value.tx_hash and not fake.transactions[-1].ok
+
+    guardian = derive_user("secret", "tg:2", "holdup.testnet")
+    await fake.onboard_user(guardian, {NEAR: YOCTO})
+    await fake.set_guardian(user, guardian.account_id)
+    await fake.set_guardian(user, None)
+    vetoed = await fake.veto_guardian_change(guardian, user.account_id)
+    assert first_item(vetoed.events, "guardian_change_vetoed") == {
+        "owner": user.account_id, "guardian": guardian.account_id, "vetoed": None
+    }
+    assert (await fake.get_user(user.account_id)).guardian == guardian.account_id  # type: ignore[union-attr]
 
 
 async def test_adapter_keys_match_the_deployment_policy() -> None:

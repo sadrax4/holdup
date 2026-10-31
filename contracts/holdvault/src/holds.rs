@@ -11,12 +11,13 @@ use crate::events;
 use crate::hold::{Hold, HoldStatus, HoldView, SendView};
 use crate::user::DAY_MS;
 use crate::{
-    hold_storage_reserve, payout_deposit, settlement_reserve_for, HoldVault, HoldVaultExt, FT_STORAGE_DEPOSIT,
+    hold_storage_reserve, payout_deposit, settlement_reserve_for, HoldVault, HoldVaultExt,
+    FT_STORAGE_DEPOSIT, HOLD_STORAGE_FEE,
 };
 
 /// Maximum size of the evidence JSON passed to `extend_hold`.
 pub const MAX_EVIDENCE_BYTES: usize = 4096;
-/// Maximum length of `memo_hash` in `send`.
+/// Maximum length of `memo_hash` in `send`, in bytes.
 pub const MAX_MEMO_HASH_LEN: usize = 64;
 
 /// Gas for NEP-145 `storage_deposit` on the token before a token payout.
@@ -28,7 +29,8 @@ pub const GAS_FOR_ON_PAYOUT: Gas = Gas::from_tgas(20);
 
 #[near]
 impl HoldVault {
-    /// Moves `amount` from the caller's vault balance into a new hold for `payee`.
+    /// Moves `amount` from the caller's vault balance into a new hold for `payee`, and
+    /// `HOLD_STORAGE_FEE` from their NEAR balance to the vault for the hold's storage.
     ///
     /// A trusted payee (past its trust delay) is paid at once while the sender's instant usage
     /// for this asset stays within today's cap; any other payment waits `new_payee_hold_ms`.
@@ -53,10 +55,13 @@ impl HoldVault {
             Error::SelfPayment,
             "cannot pay yourself or the vault",
         );
+        let fee = HOLD_STORAGE_FEE.as_yoctonear();
+        let near_needed = if asset == Asset::Near { amount.checked_add(fee) } else { Some(fee) };
         ensure(
-            user.balance(&asset) >= amount,
+            user.balance(&asset) >= amount
+                && near_needed.is_some_and(|needed| user.balance(&Asset::Near) >= needed),
             Error::InsufficientBalance,
-            "balance is lower than the amount",
+            "balance is lower than the amount plus the hold storage fee in NEAR",
         );
         ensure(
             user.active_holds.len() < self.config.max_active_holds as usize,
@@ -67,7 +72,7 @@ impl HoldVault {
             ensure(
                 memo_hash.len() <= MAX_MEMO_HASH_LEN,
                 Error::MemoTooLong,
-                "memo_hash is limited to 64 characters",
+                "memo_hash is limited to 64 bytes",
             );
         }
 
@@ -99,6 +104,7 @@ impl HoldVault {
 
         // NEAR moves from the sender's balance into the hold: both count as liabilities.
         user.debit(&asset, amount);
+        self.take_storage_fee(&mut user, HOLD_STORAGE_FEE, "a hold");
         self.sent_holds.insert((sender.clone(), user.holds_sent), id);
         user.holds_sent = user.holds_sent.safe_add(1);
         if instant {
@@ -113,7 +119,7 @@ impl HoldVault {
         self.settlement_reserve = self.settlement_reserve.safe_add(settlement_reserve_for(&asset));
         self.holds.insert(id, hold.clone());
         self.assert_solvent();
-        events::hold_created(&hold);
+        events::hold_created(&hold, fee);
 
         if instant {
             if let Some(payout) = self.pay_out(id) {
@@ -266,17 +272,21 @@ impl HoldVault {
         sender.credit(&hold.asset, hold.amount);
         self.users.insert(hold.sender.clone(), sender);
 
+        let now_ms = env::block_timestamp_ms();
         hold.status = HoldStatus::Cancelled;
         hold.cancelled_by = Some(caller);
-        hold.settled_ms = Some(env::block_timestamp_ms());
+        hold.settled_ms = Some(now_ms);
         self.unreserve(settlement_reserve_for(&hold.asset));
-        let flagged = hold.flagged;
+        // A cancel after a warning is a report against the payee, but each sender counts once
+        // per payee: cancelling more flagged payments to it adds nothing.
+        let report = hold.flagged && self.reporters.insert((hold.payee.clone(), hold.sender.clone()));
         let stats = self.payee_stats_mut(&hold.payee);
         stats.cancelled = stats.cancelled.safe_add(1);
-        if flagged {
+        if report {
             stats.cancelled_after_flag = stats.cancelled_after_flag.safe_add(1);
+            stats.last_report_ms = Some(now_ms);
         }
-        events::hold_cancelled(&hold, by);
+        events::hold_cancelled(&hold, by, report);
         let view = HoldView::from(&hold);
         self.holds.insert(hold.id, hold);
         view

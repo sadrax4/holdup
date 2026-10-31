@@ -16,6 +16,7 @@ fn new_fixes_the_configuration() {
     assert_eq!(view.instant_caps[husd().as_str()], U128(100 * HUSD));
     assert_eq!(view.max_active_holds, 10);
     assert_eq!(view.registration_fee, U128(REGISTRATION_FEE));
+    assert_eq!((view.hold_storage_fee, view.entry_storage_fee), (U128(HOLD_FEE), U128(ENTRY_FEE)));
 }
 
 #[test]

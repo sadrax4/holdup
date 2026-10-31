@@ -40,7 +40,17 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..config import Settings
-from ..models import NEAR, Finding, Hold, PaymentContext, Reason, StepRecord, Verdict, format_amount
+from ..models import (
+    MAX_IMAGE_BYTES,
+    NEAR,
+    Finding,
+    Hold,
+    PaymentContext,
+    Reason,
+    StepRecord,
+    Verdict,
+    format_amount,
+)
 from . import prompts
 from .budgets import KeyPool
 from .otari import (
@@ -93,7 +103,6 @@ REPLAY_BASE_URL = "https://replay.holdup.invalid"
 """Where the recorded exchanges say the MCP server and guardrail lived; replayed requests never leave the process."""
 
 MAX_TEXT_CHARS = 6_000
-MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_LINKS = 5
 REVIEW_STABLE_UNITS = 100
 REVIEW_NEAR = 10
@@ -163,7 +172,7 @@ _PAYEE_LABELS = {
     "tx_count": "transactions seen",
     "holds": "payments to it that HoldUp held",
     "released": "of those, released",
-    "cancelled_after_flag": "reports: payments cancelled after a HoldUp warning",
+    "cancelled_after_flag": "reports: senders who cancelled a payment after a HoldUp warning",
 }
 _URL = re.compile(r"https?://[^\s<>()\[\]{}\"'\u0060]+", re.IGNORECASE)
 _FORWARDED_FROM = re.compile(r"\A\s*forwarded from ([^\n]{1,80}?):[ \t]*(?:\n|\Z)", re.IGNORECASE)
@@ -924,7 +933,11 @@ class OtariRisk:
             if call.get("name") == WEB_FETCH and call.get("status") == "completed" and call.get("url")
         }
         computed = {c.label for c in result.computations if c.result}
-        mcp_ran = "mcp" in available and (self.mcp_log is None or bool(self.mcp_log(case.hold.id)))
+        # Only a call our MCP server answered counts: a refused one returned no data to cite.
+        mcp_ran = "mcp" in available and (
+            self.mcp_log is None
+            or any("refused" not in (call.get("args") or {}) for call in self.mcp_log(case.hold.id))
+        )
         message_links = {_url_key(u) for u in case.links}
 
         def attribute(tool: str, citations: list[str], computation: str) -> tuple[str, list[str]]:
@@ -989,11 +1002,9 @@ class OtariRisk:
         others_flagged = bool(rules.findings) or any(o.findings for o in outcomes if o.step != "reviewer")
         if reviewer is not None and reviewer.findings and others_flagged:
             model = reviewer.record.model if reviewer.record else None
-            ai.append(
-                Finding(
-                    Reason.SECOND_OPINION, "an independent reviewer model also flagged this payment", "reviewer", model
-                )
-            )
+            # The label already says what this is; the detail says how the reviewer worked.
+            detail = "it reviewed the payment without seeing the other steps' conclusions"
+            ai.append(Finding(Reason.SECOND_OPINION, detail, "reviewer", model))
         findings = merge_findings([*rules.findings, *ai])
         if not ai and any(o.failure is not None for o in outcomes):
             return self._fail_closed(case, outcomes, findings, steps, rules.hold_for_ms)

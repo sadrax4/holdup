@@ -6,6 +6,7 @@ mod cancelling;
 mod config;
 mod deposits;
 mod extending;
+mod fees;
 mod guardians;
 mod properties;
 mod releasing;
@@ -46,6 +47,9 @@ pub const REGISTRATION_FEE: u128 = 10 * MILLINEAR;
 pub const CODE_STORAGE_BYTES: u64 = 250_000;
 /// NEAR the deployer leaves in the vault on top of the code's storage.
 pub const DEFAULT_RESERVE: u128 = 5 * NEAR;
+/// What every hold costs its sender, and every new trusted payee or guardian change its owner.
+pub const HOLD_FEE: u128 = crate::HOLD_STORAGE_FEE.as_yoctonear();
+pub const ENTRY_FEE: u128 = crate::ENTRY_STORAGE_FEE.as_yoctonear();
 
 pub fn account(name: &str) -> AccountId {
     name.parse().unwrap()
@@ -396,6 +400,11 @@ impl Sim {
     ) -> Result<UserView, String> {
         let guardian = guardian.cloned();
         self.call(owner, 0, |v| v.set_guardian(guardian))
+    }
+
+    pub fn veto(&mut self, guardian: &AccountId, owner: &AccountId) -> Result<UserView, String> {
+        let owner = owner.clone();
+        self.call(guardian, 0, |v| v.veto_guardian_change(owner))
     }
 
     // ---------------------------------------------------------------- views

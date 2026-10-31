@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import reason_list, tags, tx_link, copy_block %}
+{% from "_macros.html" import reason_list, tags, tx_link, copy_block, replay_notice %}
 {% set h = view.hold %}
 {% block title %}Payment #{{ h.id }}: {{ view.status }} - HoldUp{% endblock %}
 {% block description %}{{ view.headline }}: {{ view.status }}.{% endblock %}
@@ -14,6 +14,7 @@
     </div>
     <p class="muted">From <span class="mono break">{{ h.sender }}</span>{% if view.account_urls.get(h.sender) %} &middot; <a href="{{ view.account_urls[h.sender] }}" rel="noopener noreferrer" target="_blank">explorer</a>{% endif %}</p>
   </header>
+  {{ replay_notice() }}
 
   <section class="card release tone-{{ view.tone }}">
     {% if h.active %}

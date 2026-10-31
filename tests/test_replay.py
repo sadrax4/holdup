@@ -148,15 +148,35 @@ async def test_other_routes_are_not_recorded() -> None:
         await client.rest("GET", "/models")
 
 
-async def test_the_demo_resolver_picks_scenarios_from_the_message() -> None:
+async def test_the_demo_resolver_picks_scenarios_from_the_payee() -> None:
     resolver = ScenarioResolver()
     transport = ReplayTransport(resolver)
-    await post(transport, body("triage", "Forwarded from CoinHaven Support: move your funds"))
-    await post(transport, body("triage", "Hello from Northwind Paper Co."))
-    await post(transport, body("triage", "dinner"))
+    await post(transport, body("triage", "- payee account: safe-wallet-77.testnet\nForwarded from CoinHaven Support"))
+    await post(transport, body("triage", "- payee account: northwind-paper.testnet\nHello from Northwind Paper Co."))
+    await post(transport, body("triage", "- payee account: ravi.testnet\nThe Northwind order, and CoinHaven"))
     resolver.current = "injection-only"
-    await post(transport, body("triage", "Forwarded from CoinHaven Support"))
+    await post(transport, body("triage", "- payee account: ravi.testnet"))
     assert [r.scenario for r in transport.requests] == ["hero", "invoice", "benign", "injection-only"]
+
+
+async def test_replayed_answers_say_they_are_recorded() -> None:
+    transport = ReplayTransport("hero")
+    response = await post(transport, body("triage"))
+    assert response.headers["otari-provider"] == "deepinfra (recorded)"
+    client = replay_client(Settings(), "hero")
+    _, record = await client.chat("triage", "openai/gpt-oss-20b", [{"role": "user", "content": "hi"}])
+    assert record.provider == "deepinfra (recorded)"
+
+
+async def test_recorded_citations_point_at_the_link_in_the_message() -> None:
+    """The hero recording cited http://127.0.0.1:8000 whatever the message linked (review finding)."""
+    transport = ReplayTransport("hero", base_url="https://holdup.example")
+    facts = "- links in the message: https://fixtures.example/fixtures/coinhaven/verify, https://b.example/x"
+    linked = await post(transport, body("investigator", facts))
+    assert "https://fixtures.example/fixtures/coinhaven/verify" in linked.text
+    assert "127.0.0.1" not in linked.text and "{base_url}" not in linked.text
+    unlinked = await post(transport, body("investigator", "- links in the message: none"))
+    assert "https://holdup.example/fixtures/coinhaven/verify" in unlinked.text
 
 
 def test_a_fixture_without_the_synthetic_flag_is_rejected(tmp_path: Path) -> None:

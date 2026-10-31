@@ -21,6 +21,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from near import is_valid_account_id
+
 from ..chain.errors import VaultError
 from ..config import Settings
 from ..messages import error_text, fmt_utc
@@ -391,6 +393,11 @@ class Dialog:
             return [Reply("OK, nothing was sent.")]
         if action == "sample":
             return await self._use_sample(user_key, arg)
+        if action == "gveto":  # the guardian in charge keeps an owner's guardian change from happening
+            if not is_valid_account_id(arg):
+                return [Reply("That button is no longer valid.")]
+            await self.engine.veto_guardian_change(user_key, arg)
+            return []
         hold_id = _hold_id(arg)
         if hold_id is None or action not in ("cancel", "gcancel", "why"):
             return [Reply("That button is no longer valid.")]

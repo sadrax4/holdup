@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 
 from .bot.texts import why_text
 from .chain import links
+from .chain.events import first_item
 from .chain.fake import SimClock
 from .chain.profiles import DEMO_PAYEES
 from .chain.prove import prove, prove_fake
@@ -30,6 +31,7 @@ from .config import Settings, offline_settings
 from .engine import Engine
 from .messages import finding_tag, fmt_amount, fmt_duration, fmt_utc
 from .models import (
+    NEAR,
     AssetInfo,
     Hold,
     PaymentContext,
@@ -327,7 +329,8 @@ def _intro(story: Story, title: str, note: str) -> None:
     story.say(
         f"Vault {settings.vault_account}: no access keys, no upgrade path. New payees wait "
         f"{fmt_duration(config.new_payee_hold_ms)}; the oracle can only add time, up to "
-        f"{fmt_duration(config.max_hold_ms)} in total."
+        f"{fmt_duration(config.max_hold_ms)} in total. Each payment pays the vault a "
+        f"{fmt_amount(settings, NEAR, config.hold_storage_fee)} storage fee for the record it keeps."
     )
     story.say(f"Checks: {story.runtime.checks}.")
     if note:
@@ -343,7 +346,7 @@ async def _hero(story: Story) -> None:
     await story.engine.accept_guardian("demo:sam", code)
 
     wallet = story.payee("safe-wallet-77")
-    url = f"{story.settings.public_base_url or 'http://127.0.0.1:8000'}/fixtures/coinhaven/verify"
+    url = f"{story.settings.fixture_base()}/fixtures/coinhaven/verify"
     await story.forward("demo:priya", HERO_DM.format(payee=wallet, url=url), sender="CoinHaven Support")
     outcome = await story.pay("demo:priya", wallet, "50", "hero")
     if outcome.hold is None:
@@ -354,10 +357,11 @@ async def _hero(story: Story) -> None:
     story.say('Priya taps "Cancel & refund".')
     await story.engine.cancel("demo:priya", outcome.hold.id)
     balance = await story.engine.balance("demo:priya")
+    fee = fmt_amount(story.settings, NEAR, story.config.hold_storage_fee)
     story.say(
-        "  chain: Priya's HoldUp balance is back to "
+        f"  chain: the 50 {story.stable.symbol} are back; Priya's HoldUp balance is "
         + ", ".join(fmt_amount(story.settings, a, v) for a, v in balance.items())
-        + "."
+        + f" (the payment's {fee} storage fee stays with the vault)."
     )
     stats = await story.runtime.vault.get_payee_stats(wallet)
     story.say(f"  chain: {wallet} now has {stats.cancelled_after_flag} report(s): a cancel after a warning.")
@@ -399,8 +403,18 @@ async def _everyday(story: Story) -> None:
     story.holds["benign"] = dinner.hold.id
     hold = await story.runtime.vault.get_hold(dinner.hold.id)
     assert hold is not None
+    if hold.extensions:
+        # On a live network the story's payees are only as old as the deployment, so the checks
+        # may brake this payment (a brand-new account, say). Waiting that out would take an hour.
+        await story.show_hold(hold.id)
+        story.say(
+            f"  {ravi} was created with the demo deployment, so the checks braked this ordinary payment "
+            "(reasons above) instead of letting it through. For a payee with a history it releases after "
+            f"{fmt_duration(story.config.new_payee_hold_ms)}; the story moves on rather than wait."
+        )
+        return
     now = await story.runtime.vault.now_ms()
-    await story.wait(max(hold.release_at_ms - now, 0) + SECOND_MS)
+    await story.wait(min(max(hold.release_at_ms - now, 0), story.config.new_payee_hold_ms) + SECOND_MS)
     await story.show_hold(dinner.hold.id)
 
 
@@ -518,6 +532,20 @@ async def run_attack(runtime: Runtime, transcript: Transcript, notifier: Transcr
         f"({story.tx(forged.tx.tx_hash)}): {attacker} is not a trusted payee."
     )
     story.say("  Trusting the attacker first would not help: trust waits, and instant payments are capped per day.")
+    removal = await runtime.vault.set_guardian(priya, None)
+    pending = first_item(removal.events, "guardian_changed") or {}
+    effective = int(pending.get("effective_ms", now))
+    story.say(
+        "  Removing Sam first would not help either. The attacker signs that too, but a guardian change "
+        f"waits until {fmt_utc(effective, now)} ({story.tx(removal.tx_hash)}), and until then Sam is in charge:"
+    )
+    sam = story.engine.account_for("demo:sam")
+    vetoed = await runtime.vault.veto_guardian_change(sam, priya.account_id)
+    story.say(f"  chain: Sam vetoes the removal ({story.tx(vetoed.tx_hash)}) and stays Priya's guardian.")
+    story.say(
+        "  (A guardian meant to stop a compromised server should sign with their own NEAR wallet: a key "
+        "the server derives, as for HoldUp users, would be the attacker's too.)"
+    )
     story.say("Sam, Priya's guardian, sees the hold and cancels it.")
     await story.engine.guardian_cancel("demo:sam", forged.hold.id)
     balance = await story.engine.balance("demo:priya")

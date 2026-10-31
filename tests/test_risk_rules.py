@@ -144,25 +144,36 @@ async def test_details_never_quote_the_message(rules: RulesRisk, vault: TinyVaul
 
 async def test_a_reported_payee_is_held_for_a_day(rules: RulesRisk, vault: TinyVault) -> None:
     vault.stats["ravi.testnet"] = PayeeStats(
-        holds=3, flagged=2, cancelled=2, cancelled_after_flag=2, last_flag_ms=NOW - HOUR_MS
+        holds=3, flagged=2, cancelled=2, cancelled_after_flag=2, last_flag_ms=NOW - HOUR_MS,
+        last_report_ms=NOW - HOUR_MS,
     )
     verdict = await rules.assess(hold_to("ravi.testnet"), PaymentContext())
     assert reasons(verdict) == {"PAYEE_REPORTED"}
     assert verdict.hold_for_ms == 24 * HOUR_MS
-    assert verdict.findings[0].detail == "2 earlier senders cancelled after a warning; latest warning about 1 h ago"
+    assert verdict.findings[0].detail == "2 earlier senders cancelled after a warning; latest report about 1 h ago"
 
 
 @pytest.mark.parametrize(
-    ("reports", "flag_age_ms", "braked"),
+    ("reports", "report_age_ms", "braked"),
     [(1, HOUR_MS, False), (2, 29 * DAY_MS, True), (2, 31 * DAY_MS, False), (5, None, False)],
 )
-async def test_reports_need_two_cancels_and_a_recent_flag(
-    reports: int, flag_age_ms: int | None, braked: bool, rules: RulesRisk, vault: TinyVault
+async def test_reports_need_two_senders_and_a_recent_report(
+    reports: int, report_age_ms: int | None, braked: bool, rules: RulesRisk, vault: TinyVault
 ) -> None:
-    last_flag = None if flag_age_ms is None else NOW - flag_age_ms
-    vault.stats["ravi.testnet"] = PayeeStats(cancelled_after_flag=reports, last_flag_ms=last_flag)
+    last_report = None if report_age_ms is None else NOW - report_age_ms
+    vault.stats["ravi.testnet"] = PayeeStats(cancelled_after_flag=reports, last_report_ms=last_report)
     verdict = await rules.assess(hold_to("ravi.testnet"), PaymentContext())
     assert ("PAYEE_REPORTED" in reasons(verdict)) is braked
+
+
+async def test_a_fresh_flag_does_not_make_old_reports_recent(rules: RulesRisk, vault: TinyVault) -> None:
+    # Two reports a year ago, then an honest payment to the payee was flagged today and released.
+    vault.stats["ravi.testnet"] = PayeeStats(
+        holds=3, flagged=3, cancelled=2, cancelled_after_flag=2, released=1,
+        last_flag_ms=NOW - HOUR_MS, last_report_ms=NOW - 365 * DAY_MS,
+    )
+    verdict = await rules.assess(hold_to("ravi.testnet"), PaymentContext())
+    assert "PAYEE_REPORTED" not in reasons(verdict)
 
 
 def test_payee_findings_from_a_profile() -> None:

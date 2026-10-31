@@ -199,15 +199,19 @@ def test_step_rows_and_totals() -> None:
     }
 
 
-def test_stat_tiles_show_known_counters_then_the_rest() -> None:
+def test_stat_tiles_show_only_explained_counters() -> None:
     tiles = views.stat_tiles(
-        {"holds": 4, "cancels_after_flag": 2, "ai_cost_usd": 0.01234, "new_metric": 7, "label": "x"}
+        {"holds": 4, "cancels_after_flag": 2, "ai_cost_usd": 0.01234, "new_metric": 7, "label": "x",
+         "ai_steps": 3, "users": 17, "cancels": 0, "payout_failures": 0}
     )
     assert tiles[0] == ("4", "Payments", "created through the vault")
     assert ("2", "Cancelled after a warning", "counted on-chain against the payee") in tiles
     assert ("$0.0123", "Total AI cost", "as reported by the gateway") in tiles
-    assert ("7", "New metric", "") in tiles
-    assert all(title != "Label" for _, title, _ in tiles)
+    assert ("3", "AI steps", "model calls across all checks") in tiles
+    assert ("17", "Users", "accounts opened") in tiles
+    # Raw keys no longer become tiles like "Ai steps" with no explanation (review finding).
+    assert all(note for _, _, note in tiles)
+    assert all(title not in ("New metric", "Label", "Ai steps") for _, title, _ in tiles)
 
 
 def test_mcp_call_text() -> None:
@@ -215,6 +219,9 @@ def test_mcp_call_text() -> None:
         views.mcp_call_text({"tool": "payee_profile", "args": {"account_id": "x.testnet"}})
         == "payee_profile(x.testnet)"
     )
+    # Stored arguments are key-sorted, so the refusal used to land in the middle of them.
+    refused = {"tool": "fetch_page", "args": {"refused": "not fetched: port 8024 is not read", "url": "http://h:8024/x"}}
+    assert views.mcp_call_text(refused) == "fetch_page(http://h:8024/x) - refused: not fetched: port 8024 is not read"
 
 
 def test_a_guardrail_block_is_shown_as_blocked_not_failed() -> None:

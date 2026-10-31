@@ -238,7 +238,8 @@ def brake_not_recorded(settings: Settings, hold: Hold, findings: Iterable[Findin
     lines = [
         f"Warning signs on your payment of {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee}:",
         *reason_lines(findings),
-        f"We could not add time on-chain, so it may still release at {fmt_utc(hold.release_at_ms)}.",
+        "We could not add time on-chain yet. We keep trying, and HoldUp will not release it meanwhile,",
+        f"but anyone can release it once its time comes at {fmt_utc(hold.release_at_ms)}.",
         "Cancel now if you are not sure.",
     ]
     return "\n".join(lines)
@@ -353,7 +354,26 @@ def guardian_trust_notice(owner_name: str, payee: str, effective_ms: int, *, now
 def guardian_change_notice(owner_name: str, new_guardian: str, effective_ms: int, *, now_ms: int) -> str:
     return (
         f"{owner_name} asked to make {new_guardian} their guardian instead of you, from "
-        f"{fmt_utc(effective_ms, now_ms)}. Until then you stay in charge. If that looks wrong, check with {owner_name}."
+        f"{fmt_utc(effective_ms, now_ms)}. Until then you stay in charge. If that looks wrong, check with "
+        f"{owner_name}; you can also keep the change from happening."
+    )
+
+
+def guardian_change_buttons(owner_account: str) -> Buttons:
+    """A veto button for the guardian in charge (Telegram allows 64 bytes of callback data)."""
+    data = f"gveto:{owner_account}"
+    return [[("Keep me as guardian", data)]] if len(data.encode()) <= 64 else []
+
+
+def guardian_change_stopped(owner_name: str, *, tx_text: str = "") -> str:
+    line = f"Done: you stay {owner_name}'s guardian; the change they asked for was dropped."
+    return _with_footer([line], tx_text=tx_text)
+
+
+def guardian_change_vetoed(guardian_name: str) -> str:
+    return (
+        f"Your guardian {guardian_name} stopped the guardian change on your account and stays your guardian. "
+        "If you did ask for the change, talk to them."
     )
 
 
@@ -376,7 +396,10 @@ _ERRORS = {
     E.E_HOLD_NOT_FOUND: "There is no payment with that number.",
     E.E_HOLD_NOT_ACTIVE: "That payment is no longer on hold (already released or cancelled).",
     E.E_NOT_DUE: "That payment is still on hold.",
-    E.E_INSUFFICIENT_BALANCE: "Not enough balance for this payment. Nothing was sent.",
+    E.E_INSUFFICIENT_BALANCE: (
+        "Not enough balance. Payments, new trusted payees and guardian changes also pay a small storage "
+        "fee from your NEAR balance. Nothing was sent."
+    ),
     E.E_UNKNOWN_ASSET: "That token is not supported. Nothing was sent.",
     E.E_ZERO_AMOUNT: "The amount must be more than zero.",
     E.E_SELF_PAYMENT: "You cannot pay or trust your own account.",

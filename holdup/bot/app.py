@@ -39,14 +39,14 @@ from telegram.ext import (
 from telegram.request import BaseRequest
 
 from ..config import Settings
+from ..models import MAX_IMAGE_BYTES
 from .dialog import Dialog, Reply
 from .notify import keyboard, send_text, telegram_user_key
 
 log = logging.getLogger(__name__)
 
 CONCURRENT_UPDATES = 16
-MAX_IMAGE_BYTES = 5 * 1024 * 1024
-IMAGE_TOO_LARGE = "That image is too large to check (5 MB at most)."
+IMAGE_TOO_LARGE = f"That image is too large to check ({MAX_IMAGE_BYTES // (1024 * 1024)} MB at most)."
 ONE_SHOT_BUTTONS = ("confirm:", "drop:", "sample:")
 _SECRET_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,256}")
 

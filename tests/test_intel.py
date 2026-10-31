@@ -80,7 +80,7 @@ def vault() -> TinyVault:
 
 async def test_fixture_profiles_are_measured_from_the_vault_clock(vault: TinyVault) -> None:
     vault.stats["safe-wallet-77.testnet"] = PayeeStats(holds=1, flagged=1, cancelled=1, cancelled_after_flag=1,
-                                                       last_flag_ms=NOW - HOUR)
+                                                       last_flag_ms=NOW - HOUR, last_report_ms=NOW - HOUR)
     intel = PayeeIntel(Settings(network="offline"), vault, fixtures=load_payee_fixtures())
     profile = await intel.profile("safe-wallet-77.testnet")
     assert profile == {
@@ -92,7 +92,7 @@ async def test_fixture_profiles_are_measured_from_the_vault_clock(vault: TinyVau
         "distinct_inbound_senders_24h": 14,
         "tx_count": 31,
         "reputation": {"holds": 1, "flagged": 1, "cancelled": 1, "cancelled_after_flag": 1, "released": 0,
-                       "last_flag_ms": NOW - HOUR},
+                       "last_flag_ms": NOW - HOUR, "last_report_ms": NOW - HOUR},
         "source": "fixture+vault",
         "unavailable": [],
     }

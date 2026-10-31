@@ -170,9 +170,10 @@ class PayeeStats:
     holds: int = 0
     flagged: int = 0
     cancelled: int = 0
-    cancelled_after_flag: int = 0
+    cancelled_after_flag: int = 0  # reports: senders who cancelled after a flag, each counted once
     released: int = 0
-    last_flag_ms: int | None = None
+    last_flag_ms: int | None = None  # when a hold to this payee was last flagged
+    last_report_ms: int | None = None  # when the latest report was counted
 
     @classmethod
     def from_view(cls, v: dict[str, Any] | None) -> PayeeStats:
@@ -185,6 +186,7 @@ class PayeeStats:
             cancelled_after_flag=int(v.get("cancelled_after_flag", 0)),
             released=int(v.get("released", 0)),
             last_flag_ms=_int(v.get("last_flag_ms")),
+            last_report_ms=_int(v.get("last_report_ms")),
         )
 
 
@@ -232,6 +234,9 @@ class VaultConfig:
     max_active_holds: int
     registration_fee: int
     version: str = ""
+    # Constants of the contract code, reported by get_config; not part of the `new` arguments.
+    hold_storage_fee: int = 0  # yoctoNEAR a sender pays from their NEAR balance for each hold
+    entry_storage_fee: int = 0  # yoctoNEAR for each new trusted payee and each guardian change
 
     @classmethod
     def from_view(cls, v: dict[str, Any]) -> VaultConfig:
@@ -246,6 +251,8 @@ class VaultConfig:
             max_active_holds=int(v["max_active_holds"]),
             registration_fee=int(v["registration_fee"]),
             version=v.get("version", ""),
+            hold_storage_fee=int(v.get("hold_storage_fee", 0)),
+            entry_storage_fee=int(v.get("entry_storage_fee", 0)),
         )
 
 
@@ -278,6 +285,10 @@ class UserAccount:
 # ---------------------------------------------------------------------------
 # Risk assessment
 # ---------------------------------------------------------------------------
+
+
+MAX_IMAGE_BYTES = 4 * 1024 * 1024
+"""Largest image the checks look at; the channels refuse bigger ones up front."""
 
 
 @dataclass

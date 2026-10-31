@@ -52,7 +52,7 @@ fn instant_payment_to_an_outside_account_pays_out() {
     assert!(hold.instant);
     assert_eq!(hold.status, HoldStatus::Releasing);
     assert_eq!(function_calls(sim.receipts()), vec![(vault(), "on_payout".to_owned())]);
-    assert_eq!(sim.near_liabilities(), 18 * NEAR);
+    assert_eq!(sim.near_liabilities(), 18 * NEAR - ENTRY_FEE - HOLD_FEE);
     sim.assert_solvent();
     sim.on_payout(hold.id.0, ok()).unwrap();
     assert_eq!(sim.status(hold.id.0), HoldStatus::Released);

@@ -25,6 +25,14 @@ def test_offline_samples_use_the_demo_token_and_this_server() -> None:
     assert benign is not None and not benign.scam and benign.command == "send 12.5 HUSD to ravi.testnet"
 
 
+def test_sample_links_use_the_training_page_host_when_one_is_set() -> None:
+    """FIXTURE_BASE_URL was documented but unused: the phishing sample linked to the bot's own host."""
+    settings = make_settings(public_base_url="https://holdup.example", fixture_base_url="https://fixtures.example")
+    hero = find_sample(load_samples(settings), "hero")
+    assert hero is not None and "https://fixtures.example/fixtures/coinhaven/verify" in hero.text
+    assert "holdup.example" not in hero.text
+
+
 def test_on_a_network_the_demo_payees_live_under_the_root() -> None:
     settings = make_settings(network="testnet", root_account="holdup.testnet")
     hero = find_sample(load_samples(settings), "hero")

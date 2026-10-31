@@ -13,6 +13,7 @@ from typing import Any
 from ..config import Settings
 from ..messages import fmt_amount, fmt_utc, reason_lines, short_model
 from ..models import Hold, HoldStatus, StepRecord, WhyView, reasons_from_bits
+from ..risk.reasons import SHORT_LABELS
 from .samples import Sample
 
 CURRENCY_HINT = "send 10 {symbol} to friend.testnet"
@@ -150,9 +151,7 @@ def holds_text(settings: Settings, holds: Sequence[Hold], now_ms: int, symbol: s
     lines = ["Your recent payments:"]
     for hold in holds:
         status, _ = hold_status(hold, now_ms)
-        reasons = ", ".join(
-            (r.name or str(int(r))).replace("_", " ").lower() for r in reasons_from_bits(hold.reason_bits)
-        )
+        reasons = ", ".join(SHORT_LABELS.get(r, r.name or str(int(r))) for r in reasons_from_bits(hold.reason_bits))
         suffix = f" ({reasons})" if reasons else ""
         lines.append(f"#{hold.id} {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee} - {status}{suffix}")
     return "\n".join(lines)

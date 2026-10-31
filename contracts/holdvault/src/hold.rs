@@ -99,9 +99,14 @@ pub struct PayeeStats {
     pub holds: u32,
     pub flagged: u32,
     pub cancelled: u32,
+    /// Reports: senders who cancelled a payment to this payee after an oracle flagged it,
+    /// each sender counted once.
     pub cancelled_after_flag: u32,
     pub released: u32,
+    /// When a hold to this payee was last flagged.
     pub last_flag_ms: Option<u64>,
+    /// When the latest report was counted.
+    pub last_report_ms: Option<u64>,
 }
 
 #[near(serializers = [json])]
@@ -113,6 +118,7 @@ pub struct PayeeStatsView {
     pub cancelled_after_flag: u32,
     pub released: u32,
     pub last_flag_ms: Option<U64>,
+    pub last_report_ms: Option<U64>,
 }
 
 impl From<&PayeeStats> for PayeeStatsView {
@@ -124,6 +130,7 @@ impl From<&PayeeStats> for PayeeStatsView {
             cancelled_after_flag: stats.cancelled_after_flag,
             released: stats.released,
             last_flag_ms: stats.last_flag_ms.map(U64),
+            last_report_ms: stats.last_report_ms.map(U64),
         }
     }
 }

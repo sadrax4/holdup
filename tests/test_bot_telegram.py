@@ -20,6 +20,7 @@ from test_bot_fakes import (
 )
 
 from holdup.bot.app import BOT_COMMANDS, build_bot, channel_of, configure_webhook
+from holdup.models import MAX_IMAGE_BYTES
 
 PHOTO = b"\xff\xd8\xff\xe0fake-jpeg"
 
@@ -129,6 +130,15 @@ async def test_a_huge_photo_is_refused_before_downloading(bot: Bot) -> None:
     assert bot.engine.called("remember_context") == []
     assert "too large" in bot.telegram.texts()[-1]
     assert not any(name == "getFile" for name, _ in bot.telegram.calls)
+
+
+async def test_the_bot_refuses_any_image_the_checks_would_ignore(bot: Bot) -> None:
+    """A 4.5 MB screenshot used to be accepted and then silently skipped by the AI check."""
+    size = MAX_IMAGE_BYTES + MAX_IMAGE_BYTES // 8
+    photo = [{"file_id": "ph-big", "file_unique_id": "b", "width": 4000, "height": 3000, "file_size": size}]
+    await bot.feed(message_update(None, photo=photo))
+    assert bot.engine.called("remember_context") == []
+    assert bot.telegram.texts()[-1] == "That image is too large to check (4 MB at most)."
 
 
 async def test_an_unreadable_forwarded_image_is_reported(bot: Bot) -> None:

@@ -131,6 +131,14 @@ async def test_refusals_send_nothing(world: World, husd: str) -> None:
     assert not [tx for tx in world.vault.transactions if tx.method == "send"]
     assert "nobody-here.testnet does not exist" in (await engine.pay("tg:1", "nobody-here.testnet", husd, 1)).message
 
+    # Every payment also pays the hold storage fee in NEAR: the whole NEAR balance cannot go out.
+    fee = (await world.vault.get_config()).hold_storage_fee
+    assert fee > 0
+    whole = await engine.pay("tg:1", WALLET, NEAR, 2 * 10**24)
+    assert whole.refused == E.E_INSUFFICIENT_BALANCE and "storage fee" in whole.message
+    assert not [tx for tx in world.vault.transactions if tx.method == "send"]
+    assert (await engine.pay("tg:1", WALLET, NEAR, 2 * 10**24 - fee)).hold is not None
+
 
 async def test_a_held_payment_is_announced_and_checked_in_the_background(world: World, husd: str) -> None:
     fast = StubRisk(CLEAN)
@@ -182,6 +190,7 @@ async def test_provisional_brake_then_the_full_verdict(world: World, husd: str) 
     assert kinds == ["provisional", "final"]
     stats = await engine.stats()
     assert (stats["provisional_brakes"], stats["brakes"], stats["ai_checks"]) == (1, 1, 1)
+    assert stats["braked_holds"] == 1  # one payment, braked twice
     assert stats["ai_cost_usd"] == pytest.approx(0.0012)
 
 
@@ -433,6 +442,20 @@ async def test_the_guardian_hears_about_new_trust_and_guardian_changes(world: Wo
     await engine.accept_guardian("tg:3", await engine.guardian_invite("tg:1"))
     assert world.notifier.texts("tg:2")[-1].startswith("Priya asked to make Leo their guardian instead of you")
     assert world.notifier.texts("tg:3")[-1].startswith("You are Priya's guardian from 09:00:30 UTC.")
-    view = await world.vault.get_user(engine.account_for("tg:1").account_id)
+    priya = engine.account_for("tg:1").account_id
+    view = await world.vault.get_user(priya)
     assert view is not None and view.guardian == engine.account_for("tg:2").account_id
     assert view.pending_guardian == engine.account_for("tg:3").account_id
+
+    # Sam can keep the change from happening, straight from the notice.
+    assert world.notifier.buttons("tg:2")[-1] == [[("Keep me as guardian", f"gveto:{priya}")]]
+    await engine.veto_guardian_change("tg:2", priya)
+    assert world.notifier.texts("tg:2")[-1].startswith("Done: you stay Priya's guardian")
+    assert world.notifier.texts("tg:1")[-1].startswith("Your guardian Sam stopped the guardian change")
+    world.clock.advance(60_000)
+    view = await world.vault.get_user(priya)
+    assert view is not None and view.guardian == engine.account_for("tg:2").account_id
+    assert not view.pending_guardian_set
+    with pytest.raises(VaultError) as refused:
+        await engine.veto_guardian_change("tg:3", priya)
+    assert refused.value.code == E.E_NOT_GUARDIAN

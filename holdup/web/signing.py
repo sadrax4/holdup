@@ -2,9 +2,11 @@
 
 Export links name the payer's vault account (public on-chain anyway), an
 expiry and an HMAC, so they cannot be forged or used after they expire, and
-they reveal no chat id or cookie. A console identity is a random token kept
-in an HttpOnly cookie; the user key the engine sees is a keyed hash of it,
-so nothing stored server-side can be replayed as the cookie.
+they reveal no chat id or cookie. A console identity is a random nonce plus
+its HMAC, kept in an HttpOnly cookie: only this server can mint one, so a
+client cannot invent identities (each of which would open a funded account).
+The user key the engine sees is a keyed hash of the nonce, so nothing stored
+server-side can be replayed as the cookie.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import secrets
 EXPORT_TTL_MS = 15 * 60_000
 CONSOLE_COOKIE = "holdup_console"
 CONSOLE_PREFIX = "web"
-_TOKEN = re.compile(r"[A-Za-z0-9_-]{24,64}")
+_NONCE = re.compile(r"[A-Za-z0-9_-]{32}")  # secrets.token_urlsafe(24)
 _SIGNATURE_BYTES = 16
 
 
@@ -60,23 +62,31 @@ def read_export_token(secret: str, token: str, now_ms: int) -> str | None:
         return None
 
 
-def new_console_token() -> str:
-    return secrets.token_urlsafe(24)
+def new_console_token(secret: str) -> str:
+    """``<nonce>.<mac>``: a random nonce signed by this server."""
+    nonce = secrets.token_urlsafe(24)
+    return f"{nonce}.{_cookie_mac(secret, nonce)}"
 
 
 def new_console_identity(secret: str) -> tuple[str, str]:
     """A fresh cookie token and the user key it stands for."""
-    token = new_console_token()
-    return token, _console_key(secret, token)
+    token = new_console_token(secret)
+    return token, _console_key(secret, token.rpartition(".")[0])
 
 
 def console_user_key(secret: str, token: str | None) -> str | None:
-    """``web:<keyed hash>`` for a well-formed cookie token, else None."""
-    if not token or not _TOKEN.fullmatch(token):
+    """``web:<keyed hash>`` for a cookie token this server issued, else None."""
+    nonce, _, mac = (token or "").rpartition(".")
+    if not _NONCE.fullmatch(nonce) or not hmac.compare_digest(mac.encode(), _cookie_mac(secret, nonce).encode()):
         return None
-    return _console_key(secret, token)
+    return _console_key(secret, nonce)
 
 
-def _console_key(secret: str, token: str) -> str:
-    digest = hmac.new(_key(secret, "console"), token.encode(), hashlib.sha256).hexdigest()[:24]
+def _console_key(secret: str, nonce: str) -> str:
+    digest = hmac.new(_key(secret, "console"), nonce.encode(), hashlib.sha256).hexdigest()[:24]
     return f"{CONSOLE_PREFIX}:{digest}"
+
+
+def _cookie_mac(secret: str, nonce: str) -> str:
+    digest = hmac.new(_key(secret, "console-cookie"), nonce.encode(), hashlib.sha256).digest()
+    return _b64(digest[:_SIGNATURE_BYTES])

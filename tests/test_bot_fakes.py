@@ -47,6 +47,7 @@ ENGINE_API = (
     "untrust",
     "guardian_invite",
     "accept_guardian",
+    "veto_guardian_change",
     "holds",
     "why",
     "export_csv",
@@ -109,8 +110,9 @@ class FakeEngine:
     name to an exception that method raises.
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, store: Any = None) -> None:
         self.settings = settings or make_settings()
+        self.store = store  # like the real engine, start() records users here when given
         self.notifier: Any = RecordingNotifier()
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.fail: dict[str, BaseException] = {}
@@ -128,6 +130,7 @@ class FakeEngine:
             "instant": 2,
             "provisional_brakes": 4,
             "brakes": 5,
+            "braked_holds": 6,
             "fail_closed": 1,
             "cancels": 4,
             "guardian_cancels": 1,
@@ -163,6 +166,8 @@ class FakeEngine:
         created = user_key not in self.users
         account = replace(self.account_for(user_key), display_name=display_name)
         self.users[user_key] = account
+        if self.store is not None:
+            self.store.upsert_user(user_key, account.account_id, chat_ref, display_name)
         return account, created
 
     async def balance(self, user_key: str) -> dict[str, int]:
@@ -216,6 +221,10 @@ class FakeEngine:
         if code != self.invite_code:
             raise VaultError(E.INVALID_INVITE, "unknown invite")
         return TxResult("tx-guardian")
+
+    async def veto_guardian_change(self, guardian_user_key: str, owner_account: str) -> TxResult:
+        self._record("veto_guardian_change", guardian_user_key, owner_account)
+        return TxResult("tx-veto")
 
     async def holds(self, user_key: str, limit: int = 20) -> list[Hold]:
         self._record("holds", user_key, limit)

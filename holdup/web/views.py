@@ -429,9 +429,13 @@ def step_totals(steps: Sequence[StepRecord]) -> dict[str, Any]:
 
 
 def mcp_call_text(call: Mapping[str, Any]) -> str:
+    """``tool(arg, ...)``, and for a call the server refused, why after it."""
     args = call.get("args") or {}
-    shown = ", ".join(str(v) for v in args.values()) if isinstance(args, Mapping) else str(args)
-    return f"{call.get('tool', '?')}({shown})"
+    if not isinstance(args, Mapping):
+        return f"{call.get('tool', '?')}({args})"
+    shown = ", ".join(str(value) for key, value in args.items() if key != "refused")
+    text = f"{call.get('tool', '?')}({shown})"
+    return f"{text} - refused: {args['refused']}" if "refused" in args else text
 
 
 # ----------------------------------------------------------------------
@@ -440,29 +444,28 @@ def mcp_call_text(call: Mapping[str, Any]) -> str:
 
 STAT_TILES: tuple[tuple[str, str, str], ...] = (
     ("holds", "Payments", "created through the vault"),
+    ("braked_holds", "Braked payments", "held longer at least once, each counted once"),
     ("brakes", "Brakes", "from the full check"),
     ("provisional_brakes", "Quick brakes", "rules flagged within seconds"),
     ("cancels_after_flag", "Cancelled after a warning", "counted on-chain against the payee"),
+    ("cancels", "Cancels", "by senders"),
     ("guardian_cancels", "Guardian cancels", "stopped by someone the sender chose"),
     ("releases", "Released", "paid out when the wait ended"),
+    ("payout_failures", "Payout failures", "refunded to the sender"),
     ("instant", "Instant", "to trusted payees within the daily cap"),
     ("fail_closed", "Fail-closed", "held longer because a check failed"),
     ("ai_checks", "AI checks", "full pipeline runs"),
+    ("ai_steps", "AI steps", "model calls across all checks"),
     ("fallbacks", "Fallbacks observed", "steps answered by a fallback model"),
+    ("users", "Users", "accounts opened"),
 )
 
 
 def stat_tiles(stats: Mapping[str, Any]) -> list[tuple[str, str, str]]:
-    """(value, title, note) for the known counters, then any others."""
+    """(value, title, note) for the counters the page explains; other keys are only in /stats.json."""
     tiles = [(str(stats[key]), title, note) for key, title, note in STAT_TILES if key in stats]
     if "ai_cost_usd" in stats:
         tiles.append((f"${float(stats['ai_cost_usd'] or 0):.4f}", "Total AI cost", "as reported by the gateway"))
-    known = {key for key, _, _ in STAT_TILES} | {"ai_cost_usd"}
-    tiles += [
-        (str(v), k.replace("_", " ").capitalize(), "")
-        for k, v in stats.items()
-        if k not in known and isinstance(v, int | float)
-    ]
     return tiles
 
 

@@ -100,6 +100,7 @@ def make_templates(settings: Settings) -> Jinja2Templates:
         asset_version=_asset_version(),
         network_label=network_label(settings),
         network=settings.network,
+        ai_replay=settings.otari_mode == "replay",
         base_url=settings.public_base_url,
         version=__version__,
     )
@@ -222,7 +223,13 @@ def create_app(
 
     site = Site(settings, engine, vault, store, templates, secret=secret, telegram_username=telegram_username)
     console = Console(
-        settings, engine, attach_console(engine), templates, secret=secret, telegram_username=telegram_username
+        settings,
+        engine,
+        attach_console(engine),
+        templates,
+        secret=secret,
+        store=store,
+        telegram_username=telegram_username,
     )
 
     @asynccontextmanager

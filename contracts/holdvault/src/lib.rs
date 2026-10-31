@@ -20,7 +20,8 @@ mod views;
 mod tests;
 
 use near_sdk::json_types::{U128, U64};
-use near_sdk::store::{IterableSet, LookupMap};
+use near_sdk::store::key::Sha256;
+use near_sdk::store::{IterableSet, LookupMap, LookupSet};
 use near_sdk::{env, near, AccountId, BorshStorageKey, NearToken, PanicOnDefault};
 
 pub use crate::asset::{Asset, NEAR_ASSET_ID};
@@ -43,8 +44,21 @@ pub const VERSION: &str = "1.0.0";
 pub const FT_STORAGE_DEPOSIT: NearToken = NearToken::from_yoctonear(1_250_000_000_000_000_000_000);
 
 /// Upper bound on the storage a hold can still add after `send`: `evidence_hash` (32 bytes),
-/// `settled_ms` (8), `cancelled_by` (4 + 64) and the payee's `last_flag_ms` (8).
-pub const HOLD_SETTLEMENT_BYTES: u64 = 32 + 8 + 4 + 64 + 8;
+/// `settled_ms` (8), `cancelled_by` (4 + 64), the payee's `last_flag_ms` and `last_report_ms`
+/// (8 each) and a new entry in `reporters` (a 32-byte key plus the 40 bytes nearcore counts for
+/// every storage record).
+pub const HOLD_SETTLEMENT_BYTES: u64 = 32 + 8 + 4 + 64 + 8 + 8 + (32 + 40);
+
+/// What a sender pays from their NEAR vault balance for each hold. The vault keeps it: a hold and
+/// its history entry stay in storage for good (up to about 830 bytes with 64-character account
+/// ids, counting what settling adds, and up to about 940 while the hold is open), and a token
+/// payout to an outside account attaches `FT_STORAGE_DEPOSIT`. Without it, a stream of tiny
+/// payments, cancelled or not, would use up the reserve every user depends on.
+pub const HOLD_STORAGE_FEE: NearToken = NearToken::from_millinear(15);
+
+/// What a user pays from their NEAR vault balance for a new trusted payee or a guardian change:
+/// each one stores at most 78 bytes.
+pub const ENTRY_STORAGE_FEE: NearToken = NearToken::from_millinear(1);
 
 #[derive(BorshStorageKey)]
 #[near]
@@ -54,6 +68,7 @@ enum StorageKey {
     SentHolds,
     ActiveHolds,
     PayeeStats,
+    Reporters,
 }
 
 #[near(contract_state)]
@@ -67,6 +82,9 @@ pub struct HoldVault {
     /// Ids of every hold with status `held`.
     active_holds: IterableSet<u64>,
     payee_stats: LookupMap<AccountId, PayeeStats>,
+    /// `(payee, sender)` for every sender who cancelled a flagged payment to the payee: one
+    /// sender counts once per payee in `cancelled_after_flag`, however often they cancel.
+    reporters: LookupSet<(AccountId, AccountId), Sha256>,
     next_hold_id: u64,
     /// yoctoNEAR owed to users: their NEAR balances plus NEAR in held holds.
     near_liabilities: u128,
@@ -110,6 +128,7 @@ impl HoldVault {
             sent_holds: LookupMap::new(StorageKey::SentHolds),
             active_holds: IterableSet::new(StorageKey::ActiveHolds),
             payee_stats: LookupMap::new(StorageKey::PayeeStats),
+            reporters: LookupSet::with_hasher(StorageKey::Reporters),
             next_hold_id: 0,
             near_liabilities: 0,
             settlement_reserve: 0,
@@ -138,6 +157,19 @@ impl HoldVault {
 
     fn unreserve(&mut self, amount: u128) {
         self.settlement_reserve = self.settlement_reserve.safe_sub(amount);
+    }
+
+    /// Moves a storage fee from `user`'s NEAR balance to the vault's own reserve. It stops being
+    /// owed to anyone, so it leaves `near_liabilities` while staying in the account balance.
+    fn take_storage_fee(&mut self, user: &mut User, fee: NearToken, what: &str) {
+        let fee = fee.as_yoctonear();
+        ensure(
+            user.balance(&Asset::Near) >= fee,
+            Error::InsufficientBalance,
+            &format!("{what} needs {fee} yoctoNEAR of vault balance for its storage"),
+        );
+        user.debit(&Asset::Near, fee);
+        self.near_liabilities = self.near_liabilities.safe_sub(fee);
     }
 
     /// Writes cached collection entries so `env::storage_usage()` reflects this call's changes.

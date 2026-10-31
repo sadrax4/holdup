@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -15,7 +16,7 @@ from holdup.chain.fake import FakeVault
 from holdup.store import Store
 from holdup.web.app import create_app
 from holdup.web.console import ConsoleNotifier, attach_console, find_console, tone_for
-from holdup.web.signing import CONSOLE_COOKIE
+from holdup.web.signing import CONSOLE_COOKIE, new_console_identity
 
 
 @dataclass
@@ -47,8 +48,8 @@ class Console:
 @pytest.fixture
 def console() -> Iterator[Console]:
     settings = make_settings()
-    engine = FakeEngine(settings)
     store = Store(":memory:")
+    engine = FakeEngine(settings, store=store)
     app = create_app(settings, engine, FakeVault.from_settings(settings), store)
     with TestClient(app) as client:
         yield Console(client, engine, store)
@@ -178,6 +179,34 @@ def test_new_identities_are_rate_limited_per_client(console: Console) -> None:
     refused = console.client.post("/console/api/start", json={})
     assert refused.status_code == 429
     assert "too many new console accounts" in refused.json()["error"]
+
+
+def test_made_up_cookies_cannot_open_accounts(console: Console) -> None:
+    """The review's attack: a fresh self-made cookie per request skipped the limits and funded a new account."""
+    for _ in range(5):
+        console.client.cookies.clear()
+        console.start()
+    started = len(console.engine.called("start"))
+    for n in range(12):
+        console.client.cookies.clear()
+        console.client.cookies.set(CONSOLE_COOKIE, secrets.token_urlsafe(24 + n))
+        assert console.client.post("/console/api/start", json={}).status_code == 429
+        assert console.client.post("/console/api/send", json={"text": "/balance"}).status_code == 401
+        assert console.client.post("/console/api/action", json={"data": "why:1"}).status_code == 401
+        assert console.client.get("/console/api/state").json()["started"] is False
+    assert len(console.engine.called("start")) == started
+
+
+def test_a_signed_cookie_works_only_for_an_account_that_was_opened(console: Console) -> None:
+    token, key = new_console_identity("test-secret")  # make_settings() signs with this secret
+    console.client.cookies.set(CONSOLE_COOKIE, token)
+    assert console.client.post("/console/api/send", json={"text": "/balance"}).status_code == 401
+    assert console.engine.calls == []
+    # /start opens it without minting another identity.
+    response = console.client.post("/console/api/start", json={})
+    assert response.status_code == 200 and "set-cookie" not in response.headers
+    assert console.engine.called("start")[0][0] == key
+    assert console.client.post("/console/api/send", json={"text": "/balance"}).status_code == 200
 
 
 def test_cross_site_posts_are_refused(console: Console) -> None:

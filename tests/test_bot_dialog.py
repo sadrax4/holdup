@@ -265,6 +265,13 @@ async def test_cancel_and_guardian_cancel_buttons(dialog: Dialog, engine: FakeEn
     assert engine.called("guardian_cancel") == [(OTHER, 7)]
 
 
+async def test_the_guardian_keeps_their_role_with_a_button(dialog: Dialog, engine: FakeEngine) -> None:
+    assert await dialog.button(OTHER, "gveto:uabcdefghij.holdup.testnet") == []
+    assert engine.called("veto_guardian_change") == [(OTHER, "uabcdefghij.holdup.testnet")]
+    [reply] = await dialog.button(OTHER, "gveto:Not An Account")
+    assert reply.text == "That button is no longer valid."
+
+
 async def test_vault_errors_become_plain_sentences(dialog: Dialog, engine: FakeEngine) -> None:
     engine.fail["cancel"] = VaultError(E.E_NOT_SENDER, "caller is not the sender")
     [reply] = await dialog.button(OTHER, "cancel:7")
@@ -340,7 +347,7 @@ async def test_holds_offers_buttons_for_held_payments_only(dialog: Dialog, engin
     ]
     [reply] = await dialog.command(USER, "holds")
     assert "#9 50 HUSD to safe-wallet-77.testnet - brakes on, held until" in reply.text
-    assert "(new account)" in reply.text
+    assert "(new payee account)" in reply.text  # the friendly label, not the enum name
     assert "#8 50 HUSD to ravi.testnet - released to the payee" in reply.text
     assert reply.buttons == [[("Cancel #9", "cancel:9"), ("Why? #9", "why:9")]]
 

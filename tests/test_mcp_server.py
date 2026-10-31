@@ -52,7 +52,7 @@ class TinyVault:
             )
         }
         self.stats = {"safe-wallet-77.testnet": PayeeStats(holds=3, flagged=3, cancelled=2, cancelled_after_flag=2,
-                                                          last_flag_ms=NOW - HOUR)}
+                                                          last_flag_ms=NOW - HOUR, last_report_ms=NOW - HOUR)}
 
     async def get_hold(self, hold_id: int) -> Hold | None:
         return self.holds.get(hold_id)
@@ -166,7 +166,15 @@ async def test_payee_reputation_counts_reports() -> None:
         result = await call(world, 5, "payee_reputation", account_id="safe-wallet-77.testnet")
     record = result.structured_content
     assert (record["reports"], record["recent_reports"], record["holds"]) == (2, True, 3)
-    assert "cancelled after a HoldUp warning" in record["meaning"]
+    assert "each sender once" in record["meaning"]
+
+
+async def test_old_reports_are_not_recent_after_a_fresh_flag() -> None:
+    async with served() as world:
+        stats = world.vault.stats["safe-wallet-77.testnet"]
+        stats.last_flag_ms, stats.last_report_ms = NOW - HOUR, NOW - 365 * 24 * HOUR
+        result = await call(world, 5, "payee_reputation", account_id="safe-wallet-77.testnet")
+    assert (result.structured_content["reports"], result.structured_content["recent_reports"]) == (2, False)
 
 
 async def test_sender_history_summarizes_earlier_payments() -> None:

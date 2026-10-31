@@ -1,11 +1,12 @@
 """The web console: a chat page that drives the same engine as the Telegram bot.
 
-Each browser gets a random identity in an HttpOnly cookie, and the engine
-sees it as ``web:<keyed hash>``. Everything said in a console conversation
-(the person's messages, replies and the engine's notifications) is kept in
-memory by :class:`ConsoleNotifier`; the page posts actions and polls for new
-messages. Creating identities, which funds a demo account, is rate-limited
-per client address and globally.
+Each browser gets a random identity signed by the server in an HttpOnly
+cookie, and the engine sees it as ``web:<keyed hash>``. Everything said in a
+console conversation (the person's messages, replies and the engine's
+notifications) is kept in memory by :class:`ConsoleNotifier`; the page posts
+actions and polls for new messages. Only ``/console/api/start`` creates
+identities, which fund a demo account, and it is rate-limited per client
+address and globally; the other routes serve only accounts the store knows.
 """
 
 from __future__ import annotations
@@ -233,6 +234,7 @@ class Console:
         templates: Jinja2Templates,
         *,
         secret: str,
+        store: Any = None,
         telegram_username: Callable[[], str] = lambda: "",
         clock: Callable[[], int] | None = None,
     ) -> None:
@@ -241,6 +243,7 @@ class Console:
         self.notifier = notifier
         self.templates = templates
         self.secret = secret
+        self.store = store  # users the engine has started; None trusts any signed cookie
         self.telegram_username = telegram_username
         self.clock = clock or _wall_ms
         self.dialog = Dialog(
@@ -272,7 +275,11 @@ class Console:
     # ------------------------------------------------------------------
 
     def user_key(self, request: Request) -> str | None:
-        return console_user_key(self.secret, request.cookies.get(CONSOLE_COOKIE))
+        """The console user of a request: a cookie this server signed, for an account it has started."""
+        key = console_user_key(self.secret, request.cookies.get(CONSOLE_COOKIE))
+        if key is None or (self.store is not None and self.store.get_user(key) is None):
+            return None
+        return key
 
     def _require(self, request: Request) -> str:
         self._check_origin(request)
@@ -368,7 +375,8 @@ class Console:
 
     async def start(self, request: Request, body: StartBody) -> JSONResponse:
         self._check_origin(request)
-        key = self.user_key(request)
+        # A signed cookie was minted here, under the limits below; it may still need its account.
+        key = console_user_key(self.secret, request.cookies.get(CONSOLE_COOKIE))
         token = None
         if key is None:
             client = request.client.host if request.client else "unknown"

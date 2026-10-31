@@ -64,7 +64,8 @@ pub fn deposit(account_id: &AccountId, asset: &Asset, amount: u128, balance: u12
     );
 }
 
-pub fn hold_created(hold: &Hold) {
+/// `storage_fee` is the yoctoNEAR the sender paid the vault for the hold's storage.
+pub fn hold_created(hold: &Hold, storage_fee: u128) {
     hold_event(
         "hold_created",
         hold,
@@ -73,6 +74,7 @@ pub fn hold_created(hold: &Hold) {
             "release_at_ms": U64(hold.release_at_ms),
             "instant": hold.instant,
             "memo_hash": hold.memo_hash,
+            "storage_fee": U128(storage_fee),
         }),
     );
 }
@@ -92,12 +94,13 @@ pub fn hold_extended(hold: &Hold, previous_release_at_ms: u64) {
     );
 }
 
-/// `by` is `"sender"` or `"guardian"`.
-pub fn hold_cancelled(hold: &Hold, by: &str) {
+/// `by` is `"sender"` or `"guardian"`; `report` is whether the cancel counted as a new report
+/// against the payee (the hold was flagged and its sender had not reported the payee before).
+pub fn hold_cancelled(hold: &Hold, by: &str, report: bool) {
     hold_event(
         "hold_cancelled",
         hold,
-        json!({ "by": by, "cancelled_by": hold.cancelled_by, "flagged": hold.flagged }),
+        json!({ "by": by, "cancelled_by": hold.cancelled_by, "flagged": hold.flagged, "report": report }),
     );
 }
 
@@ -111,17 +114,42 @@ pub fn hold_failed(hold: &Hold) {
     hold_event("hold_failed", hold, json!({ "refunded_to": hold.sender }));
 }
 
-pub fn trust_added(owner: &AccountId, payee: &AccountId, effective_ms: u64) {
-    emit("trust_added", json!({ "owner": owner, "payee": payee, "effective_ms": U64(effective_ms) }));
+/// `storage_fee` is 0 when the payee was already trusted.
+pub fn trust_added(owner: &AccountId, payee: &AccountId, effective_ms: u64, storage_fee: u128) {
+    emit(
+        "trust_added",
+        json!({
+            "owner": owner,
+            "payee": payee,
+            "effective_ms": U64(effective_ms),
+            "storage_fee": U128(storage_fee),
+        }),
+    );
 }
 
 pub fn trust_removed(owner: &AccountId, payee: &AccountId) {
     emit("trust_removed", json!({ "owner": owner, "payee": payee }));
 }
 
-pub fn guardian_changed(owner: &AccountId, guardian: Option<&AccountId>, effective_ms: u64) {
+pub fn guardian_changed(
+    owner: &AccountId,
+    guardian: Option<&AccountId>,
+    effective_ms: u64,
+    storage_fee: u128,
+) {
     emit(
         "guardian_changed",
-        json!({ "owner": owner, "guardian": guardian, "effective_ms": U64(effective_ms) }),
+        json!({
+            "owner": owner,
+            "guardian": guardian,
+            "effective_ms": U64(effective_ms),
+            "storage_fee": U128(storage_fee),
+        }),
     );
+}
+
+/// The guardian in charge dropped a pending change; `vetoed` is the guardian it would have set
+/// (null for a removal).
+pub fn guardian_change_vetoed(owner: &AccountId, guardian: &AccountId, vetoed: Option<&AccountId>) {
+    emit("guardian_change_vetoed", json!({ "owner": owner, "guardian": guardian, "vetoed": vetoed }));
 }

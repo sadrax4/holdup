@@ -31,7 +31,7 @@ fn every_configured_oracle_can_extend() {
     input.oracles = oracles.clone();
     let mut sim = Sim::try_init(input, DEFAULT_RESERVE).unwrap();
     sim.register(&alice(), NEAR);
-    sim.send(&alice(), &shop(), "near", NEAR).unwrap();
+    sim.send(&alice(), &shop(), "near", NEAR / 2).unwrap();
     for (i, oracle) in oracles.iter().enumerate() {
         let release_at_ms = START_MS + HOUR_MS * (i as u64 + 1);
         assert_eq!(sim.extend(oracle, 0, release_at_ms, 1, "{}").unwrap().release_at_ms, U64(release_at_ms));
@@ -77,8 +77,8 @@ fn extension_records_reasons_and_the_evidence_hash() {
     assert_eq!((stats.flagged, stats.last_flag_ms), (1, Some(U64(START_MS + MINUTE_MS))));
 
     // Extending never moves money.
-    assert_eq!(sim.near_of(&alice()), 15 * NEAR);
-    assert_eq!(sim.near_liabilities(), 20 * NEAR);
+    assert_eq!(sim.near_of(&alice()), 15 * NEAR - HOLD_FEE);
+    assert_eq!(sim.near_liabilities(), 20 * NEAR - HOLD_FEE);
     sim.assert_solvent();
 }
 

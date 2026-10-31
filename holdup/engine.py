@@ -8,6 +8,8 @@ A payment to a payee the sender has not trusted yet becomes a hold:
 3. The full check runs (the Otari pipeline when configured) and its verdict
    goes through the oracle. If the check fails or is too slow, the hold is
    extended fail-closed, one hour per failure up to six hours, and retried.
+   If an extension itself fails (the RPC node is down, say), it is retried on
+   every keeper tick and the keeper does not release that hold meanwhile.
 4. The keeper releases the payment when its time comes, unless the sender or
    their guardian cancelled it first.
 """
@@ -19,10 +21,11 @@ import csv
 import hashlib
 import hmac
 import io
+import itertools
 import logging
 import time
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import UTC, datetime
 from typing import Any, TypeGuard
 
@@ -37,6 +40,7 @@ from .chain.keys import derive_user
 from .config import OFFLINE_SECRET, Settings
 from .interfaces import Notifier, RiskPort, VaultPort
 from .models import (
+    NEAR,
     Finding,
     Hold,
     HoldStatus,
@@ -108,6 +112,11 @@ def _is_failure(finding: Finding) -> bool:
     return finding.reason in FAILURE_REASONS
 
 
+def _adds_nothing(fast: Verdict | None, full: Verdict) -> bool:
+    """The full check found only what the quick brake already put on chain, and asks no longer."""
+    return _flags(fast) and full.reason_bits & ~fast.reason_bits == 0 and full.hold_for_ms <= PROVISIONAL_HOLD_MS
+
+
 def _keep_rules_decision(fast: Verdict | None, full: Verdict | None) -> Verdict | None:
     """The AI step can add to a deterministic rules brake, never weaken it.
 
@@ -160,6 +169,22 @@ class _Remembered:
     expires_ms: int
 
 
+_brake_numbers = itertools.count()
+
+
+@dataclass
+class _Brake:
+    """A braking verdict on its way to the chain. Kept while its transaction keeps failing."""
+
+    user_key: str
+    hold: Hold
+    verdict: Verdict
+    kind: str  # "provisional", "final" or "fail_closed"
+    release_at_ms: int | None = None  # an absolute target instead of now + verdict.hold_for_ms
+    running: bool = False
+    number: int = field(default_factory=lambda: next(_brake_numbers))  # later verdicts win
+
+
 class Engine:
     """The one API the bot, the web console, the CLI and the demo use."""
 
@@ -196,6 +221,10 @@ class Engine:
         self._contexts: dict[str, _Remembered] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._retries: dict[int, _Retry] = {}
+        # Brakes whose extend_hold failed, by hold id: retried on every tick, and the keeper does
+        # not release these holds. Anyone else can still call release once a hold is due, so the
+        # retries race the clock; they start within seconds of the payment.
+        self._pending_brakes: dict[int, _Brake] = {}
         self._alerted: dict[int, int] = {}  # hold id -> reason bits the guardian heard about
         self._start_locks: dict[str, asyncio.Lock] = {}
 
@@ -333,7 +362,10 @@ class Engine:
             return self._refused(E.E_NOT_REGISTERED)
         if not await self.vault.account_exists(payee):
             return self._refused(E.UNKNOWN_PAYEE, payee=payee)
-        if (await self.vault.get_balance(user.account_id)).get(asset_id, 0) < amount:
+        balances = await self.vault.get_balance(user.account_id)
+        # Every hold also pays the vault's storage fee from the sender's NEAR balance.
+        near_needed = (await self.vault.get_config()).hold_storage_fee + (amount if asset_id == NEAR else 0)
+        if balances.get(asset_id, 0) < amount or balances.get(NEAR, 0) < near_needed:
             return self._refused(E.E_INSUFFICIENT_BALANCE)
         now = await self.vault.now_ms()
         trusted = [t.payee for t in view.trusted if t.effective_ms <= now]
@@ -387,7 +419,7 @@ class Engine:
                 await self._fail_closed(user_key, hold, ctx, failure, fast=fast, verdict=verdict)
             else:
                 self._retries.pop(hold.id, None)
-                await self._finish(user_key, hold, _keep_rules_decision(fast, verdict))
+                await self._finish(user_key, hold, _keep_rules_decision(fast, verdict), fast)
         except Exception:
             log.exception("checks for hold %s crashed", hold.id)
             try:
@@ -439,13 +471,18 @@ class Engine:
         now = await self.vault.now_ms()
         return (current.release_at_ms - now - self.deadline_margin_ms) / 1000
 
-    async def _finish(self, user_key: str, hold: Hold, verdict: Verdict | None) -> None:
+    async def _finish(
+        self, user_key: str, hold: Hold, verdict: Verdict | None, fast: Verdict | None = None
+    ) -> None:
         if verdict is None:
             return
-        if _flags(verdict):
+        if _flags(verdict) and not _adds_nothing(fast, verdict):
             await self._apply_verdict(user_key, hold, verdict, "final")
             return
+        # Clean, or nothing beyond the quick brake: no second extension and no second "Brakes on".
         self._save_verdict(hold.id, verdict, "final")
+        if hold.id in self._pending_brakes:
+            return  # the quick brake has not reached the chain yet; its own message follows when it does
         current = await self.vault.get_hold(hold.id)
         if current is None or not current.active:
             return
@@ -459,18 +496,27 @@ class Engine:
         self, user_key: str, hold: Hold, verdict: Verdict, kind: str
     ) -> OracleResult | None:
         self._save_verdict(hold.id, verdict, kind)
+        return await self._brake(_Brake(user_key, hold, verdict, kind))
+
+    async def _brake(self, brake: _Brake) -> OracleResult | None:
+        """Put a brake on chain and tell the sender and their guardian.
+
+        If the transaction fails, the brake is kept for ``tick`` to retry instead of letting
+        the payment release at its old time.
+        """
+        hold, verdict = brake.hold, brake.verdict
         try:
-            result = await self.oracle.apply(hold, verdict)
+            result = await self.oracle.apply(hold, verdict, release_at_ms=brake.release_at_ms)
         except VaultError as exc:
-            log.warning("could not extend hold %s: %s", hold.id, exc)
-            self.store.log_event("brake_failed", {"hold_id": hold.id, "code": exc.code})
-            text = messages.brake_not_recorded(self.settings, hold, verdict.findings)
-            await self._notify(user_key, text, messages.sender_buttons(hold.id))
+            await self._keep_brake(brake, exc)
             return None
+        self._brake_done(brake)
         if result.skipped in ("inactive", "missing"):
             return result
+        if not result.extended and not verdict.reason_bits & ~result.reason_bits:
+            return result  # already held at least this long, for these reasons: nothing new to say
         now = await self.vault.now_ms()
-        render = messages.provisional_brake if kind == "provisional" else messages.brake
+        render = messages.provisional_brake if brake.kind == "provisional" else messages.brake
         text = render(
             self.settings,
             hold,
@@ -480,13 +526,36 @@ class Engine:
             tx_text=self._tx_text(result.tx),
             page=self._page(hold.id),
         )
-        await self._notify(user_key, text, messages.sender_buttons(hold.id))
-        self.store.log_event(
-            "brake_provisional" if kind == "provisional" else "brake",
-            {"hold_id": hold.id, "reason_bits": verdict.reason_bits, "release_at_ms": result.release_at_ms},
-        )
-        await self._alert_guardian(user_key, hold, verdict, result.release_at_ms, now)
+        await self._notify(brake.user_key, text, messages.sender_buttons(hold.id))
+        if result.extended:
+            event = {"provisional": "brake_provisional", "fail_closed": "fail_closed"}.get(brake.kind, "brake")
+            self.store.log_event(
+                event,
+                {"hold_id": hold.id, "reason_bits": verdict.reason_bits, "release_at_ms": result.release_at_ms},
+            )
+        await self._alert_guardian(brake.user_key, hold, verdict, result.release_at_ms, now)
         return result
+
+    async def _keep_brake(self, brake: _Brake, exc: VaultError) -> None:
+        """Remember a brake whose transaction failed; warn the sender the first time."""
+        log.warning("could not extend hold %s: %s", brake.hold.id, exc)
+        self.store.log_event("brake_failed", {"hold_id": brake.hold.id, "code": exc.code})
+        pending = self._pending_brakes.get(brake.hold.id)
+        if pending is None or pending.number <= brake.number:  # never replace a newer verdict
+            self._pending_brakes[brake.hold.id] = brake
+        if pending is None:
+            text = messages.brake_not_recorded(self.settings, brake.hold, brake.verdict.findings)
+            await self._notify(brake.user_key, text, messages.sender_buttons(brake.hold.id))
+
+    def _brake_done(self, brake: _Brake) -> None:
+        """``brake`` reached the chain (or no longer matters): stop retrying it and anything older."""
+        pending = self._pending_brakes.get(brake.hold.id)
+        if pending is not None and pending.number <= brake.number:
+            del self._pending_brakes[brake.hold.id]
+
+    def brake_pending(self, hold: Hold) -> bool:
+        """Whether a brake for ``hold`` failed to reach the chain and is being retried."""
+        return hold.id in self._pending_brakes
 
     async def _fail_closed(
         self,
@@ -500,6 +569,7 @@ class Engine:
         slow: bool = False,
     ) -> None:
         """Keep the brake on when a check fails: +1 h per failure, at most 6 h in total."""
+        brake: _Brake | None = None
         try:
             current = await self.vault.get_hold(hold.id)
             if current is None or not current.active:
@@ -535,7 +605,9 @@ class Engine:
                 summary=f"fail-closed: {detail}",
             )
             self._save_verdict(hold.id, closed, "fail_closed")
+            brake = _Brake(user_key, current, closed, "fail_closed", release_at_ms=target)
             result = await self.oracle.apply(current, closed, release_at_ms=target)
+            self._brake_done(brake)
             if result.skipped in ("inactive", "missing"):
                 self._retries.pop(hold.id, None)
                 return
@@ -567,19 +639,54 @@ class Engine:
                 state.next_retry_ms = self.clock() + delay
             await self._notify(user_key, text, messages.sender_buttons(hold.id))
         except VaultError as exc:
-            log.warning("fail-closed extension for hold %s failed: %s", hold.id, exc)
-            self.store.log_event("brake_failed", {"hold_id": hold.id, "code": exc.code})
-            text = messages.brake_not_recorded(self.settings, hold, [])
-            await self._notify(user_key, text, messages.sender_buttons(hold.id))
+            if brake is None:
+                # The hold could not even be read: keep an hour's brake pending and retry the check later.
+                finding = Finding(Reason.AI_UNAVAILABLE, f"AI check failed: {detail}", source="fail_closed")
+                closed = Verdict(hold.id, True, FAIL_CLOSED_STEP_MS, [finding], summary=f"fail-closed: {detail}")
+                brake = _Brake(user_key, hold, closed, "fail_closed")
+                if hold.id not in self._retries:
+                    self._retries[hold.id] = _Retry(
+                        hold.id,
+                        user_key,
+                        ctx,
+                        base_release_ms=hold.release_at_ms,
+                        fast=fast,
+                        failures=1,
+                        next_retry_ms=self.clock() + RETRY_BASE_MS,
+                    )
+            await self._keep_brake(brake, exc)
 
     async def tick(self) -> int:
-        """Retry failed checks whose retry time has come. Called by the keeper loop."""
+        """Retry failed brakes, and failed checks whose retry time has come. Called by the keeper loop."""
         now = self.clock()
+        brakes = [b for b in self._pending_brakes.values() if not b.running]
+        for brake in brakes:
+            brake.running = True
+            self._spawn(self._retry_brake(brake), f"holdup-brake-{brake.hold.id}")
         due = [s for s in self._retries.values() if not s.running and s.next_retry_ms <= now]
         for state in due:
             state.running = True
             self._spawn(self._retry(state), f"holdup-retry-{state.hold_id}")
-        return len(due)
+        return len(brakes) + len(due)
+
+    async def _retry_brake(self, brake: _Brake) -> None:
+        try:
+            if self._pending_brakes.get(brake.hold.id) is not brake:
+                return  # a newer verdict replaced it
+            current = await self.vault.get_hold(brake.hold.id)
+            if current is None or not current.active:
+                self._brake_done(brake)
+                return
+            max_hold_ms = (await self.vault.get_config()).max_hold_ms
+            if await self.vault.now_ms() >= current.created_ms + max_hold_ms:
+                # No extension can hold it any longer; stop keeping it from the keeper.
+                self._brake_done(brake)
+                return
+            await self._brake(brake)
+        except Exception:
+            log.exception("retrying the brake on hold %s failed", brake.hold.id)
+        finally:
+            brake.running = False
 
     async def _retry(self, state: _Retry) -> None:
         try:
@@ -594,7 +701,7 @@ class Engine:
                 )
                 return
             self._retries.pop(state.hold_id, None)
-            await self._finish(state.user_key, hold, _keep_rules_decision(state.fast, verdict))
+            await self._finish(state.user_key, hold, _keep_rules_decision(state.fast, verdict), state.fast)
         except Exception:
             log.exception("retry for hold %s crashed", state.hold_id)
         finally:
@@ -680,6 +787,7 @@ class Engine:
 
     def _record_cancel(self, hold: Hold, tx: TxResult, kind: str) -> None:
         self._retries.pop(hold.id, None)
+        self._pending_brakes.pop(hold.id, None)
         self._alerted.pop(hold.id, None)
         self.store.record_tx(hold.id, kind, tx.tx_hash)
         self.store.log_event(kind, {"hold_id": hold.id, "flagged": hold.flagged})
@@ -689,6 +797,7 @@ class Engine:
     async def on_settled(self, hold: Hold, tx: TxResult) -> None:
         """Keeper callback after ``release``: tell the sender and, if they use HoldUp, the payee."""
         self._retries.pop(hold.id, None)
+        self._pending_brakes.pop(hold.id, None)
         self._alerted.pop(hold.id, None)
         self.store.record_tx(hold.id, "release", tx.tx_hash)
         sender = self.store.user_by_account(hold.sender)
@@ -712,8 +821,14 @@ class Engine:
         await self._notify(payee["user_key"], messages.received(self.settings, hold, name))
 
     def make_keeper(self, interval_s: float = 5.0) -> Keeper:
-        """A keeper wired to this engine's notifications and retry schedule."""
-        return Keeper(self.vault, on_settled=self.on_settled, on_tick=self.tick, interval_s=interval_s)
+        """A keeper wired to this engine's notifications and retries; it waits for pending brakes."""
+        return Keeper(
+            self.vault,
+            on_settled=self.on_settled,
+            on_tick=self.tick,
+            skip=self.brake_pending,
+            interval_s=interval_s,
+        )
 
     # ------------------------------------------------------------------
     # trust and guardians
@@ -772,7 +887,7 @@ class Engine:
             text = messages.guardian_change_notice(
                 self._name(owner_key), self._name(guardian_user_key), effective, now_ms=now
             )
-            await self._notify(current["user_key"], text)
+            await self._notify(current["user_key"], text, messages.guardian_change_buttons(owner.account_id))
         await self._notify(
             owner_key,
             messages.guardian_set(
@@ -782,6 +897,20 @@ class Engine:
         await self._notify(
             guardian_user_key, messages.guardian_accepted(self._name(owner_key), effective, now_ms=now)
         )
+        return tx
+
+    async def veto_guardian_change(self, guardian_user_key: str, owner_account: str) -> TxResult:
+        """Stay someone's guardian: drop the guardian change they, or whoever has their key, asked for."""
+        tx = await self.vault.veto_guardian_change(self.account_for(guardian_user_key), owner_account)
+        self.store.record_tx(None, "veto_guardian_change", tx.tx_hash)
+        self.store.log_event("guardian_veto", {})
+        owner = self.store.user_by_account(owner_account)
+        owner_name = owner["display_name"] if owner and owner["display_name"] else owner_account
+        await self._notify(
+            guardian_user_key, messages.guardian_change_stopped(owner_name, tx_text=self._tx_text(tx))
+        )
+        if owner is not None:
+            await self._notify(owner["user_key"], messages.guardian_change_vetoed(self._name(guardian_user_key)))
         return tx
 
     # ------------------------------------------------------------------
@@ -860,6 +989,8 @@ class Engine:
             "instant": count("instant_paid"),
             "provisional_brakes": count("brake_provisional"),
             "brakes": count("brake"),
+            # A payment braked quickly and then again by the full check counts once here.
+            "braked_holds": self.store.count_event_holds("brake_provisional", "brake", "fail_closed"),
             "fail_closed": count("fail_closed"),
             "cancels": count("cancel"),
             "guardian_cancels": count("guardian_cancel"),

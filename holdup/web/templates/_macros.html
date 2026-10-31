@@ -26,3 +26,11 @@
 {% macro copy_block(text) -%}
 <div class="code-block"><pre><code>{{ text }}</code></pre><button type="button" class="copy" data-copy="{{ text }}">Copy</button></div>
 {%- endmacro %}
+
+{% macro replay_notice() %}
+{% if ai_replay %}
+<div class="callout tone-held">
+  <strong>Recorded AI answers.</strong> This server has no Otari key, so its AI steps replay responses recorded for the demo story instead of calling the gateway live. Their provider reads "(recorded)".
+</div>
+{% endif %}
+{% endmacro %}

@@ -38,8 +38,8 @@ fn every_open_hold_reserves_what_it_needs_to_settle() {
 fn the_last_users_can_withdraw_everything() {
     let mut sim = Sim::new();
     let deployed_balance = sim.balance;
-    sim.register(&alice(), 7 * NEAR);
-    sim.register(&bob(), 3 * NEAR);
+    sim.register(&alice(), 7 * NEAR + HOLD_FEE);
+    sim.register(&bob(), 3 * NEAR + HOLD_FEE);
     sim.send(&alice(), &shop(), "near", 7 * NEAR).unwrap();
     sim.send(&bob(), &carol(), "near", 3 * NEAR).unwrap();
     sim.advance(HOLD_MS);
@@ -51,9 +51,9 @@ fn the_last_users_can_withdraw_everything() {
     assert_eq!(sim.near_of(&alice()) + sim.near_of(&bob()), 0);
     assert_eq!(sim.near_liabilities(), 0);
     assert_eq!(settlement_reserve(&sim), 0);
-    // Every user yoctoNEAR left; the vault keeps exactly the deployer's reserve and the fees,
-    // which still pay for its storage.
-    assert_eq!(sim.balance, deployed_balance + 2 * REGISTRATION_FEE);
+    // Every user yoctoNEAR left; the vault keeps exactly the deployer's reserve, the registration
+    // fees and the hold storage fees, which still pay for its storage.
+    assert_eq!(sim.balance, deployed_balance + 2 * REGISTRATION_FEE + 2 * HOLD_FEE);
     let solvency = sim.solvency();
     assert!(solvency.account_balance.0 >= solvency.storage_cost.0);
     sim.assert_solvent();
@@ -72,44 +72,45 @@ fn registration_is_refused_when_nothing_pays_for_storage() {
     sim.assert_solvent();
 }
 
+/// Storage fees mean new records never cost the vault its reserve, so the vault falls short only
+/// for a moment: when a failed NEAR payout refunds the sender before the transfer's deposit has
+/// come back as a refund receipt. In that window new records are refused, and every exit still
+/// works.
 #[test]
-fn a_low_reserve_blocks_new_holds_but_never_exits() {
-    let mut sim = Sim::try_init(config(), 10 * MILLINEAR).unwrap();
-    sim.register(&alice(), 20 * NEAR);
-    sim.fund_husd(&alice(), 100 * HUSD);
+fn a_vault_short_of_funds_refuses_new_records_but_never_exits() {
+    let mut sim = funded();
     sim.register(&bob(), 0);
+    let failing = sim.send(&alice(), &shop(), "near", 10 * NEAR).unwrap().id.0;
+    let braked = sim.send(&alice(), &shop(), "near", NEAR).unwrap().id.0;
+    let to_bob = sim.send(&alice(), &bob(), "near", NEAR).unwrap().id.0;
+    let token = sim.send(&alice(), &shop(), husd().as_str(), 10 * HUSD).unwrap().id.0;
+    sim.advance(HOLD_MS);
+    sim.release(&mallory(), failing).unwrap();
+    sim.on_payout(failing, failed()).unwrap();
+    // The vault owes Alice the 10 NEAR again but has not received them back yet.
+    assert_eq!(sim.solvency().surplus, U128(0));
 
-    let mut held = Vec::new();
-    let refused = loop {
-        let payee = if held.len() % 2 == 0 { shop() } else { bob() };
-        match sim.send(&alice(), &payee, "near", NEAR) {
-            Ok(hold) => held.push(hold.id.0),
-            Err(message) => break message,
-        }
-        assert!(held.len() < 10, "the reserve should run out");
-    };
-    assert!(refused.contains("E_INSOLVENT:"), "{refused}");
-    assert!(held.len() >= 2, "a 0.01 NEAR reserve pays for a few holds");
+    assert_error(sim.send(&alice(), &shop(), "near", NEAR), "E_INSOLVENT");
     assert_error(sim.send(&alice(), &shop(), husd().as_str(), HUSD), "E_INSOLVENT");
-    sim.assert_solvent();
+    assert_error(sim.add_trusted(&alice(), &carol()), "E_INSOLVENT");
+    assert_error(sim.set_guardian(&alice(), Some(&carol())), "E_INSOLVENT");
+    assert_error(sim.deposit_near(&treasury(), &carol(), REGISTRATION_FEE), "E_INSOLVENT");
 
-    // Brakes, cancels, releases and payout callbacks still work and the vault stays solvent.
-    for hold_id in &held {
-        sim.extend(&oracle(), *hold_id, START_MS + HOUR_MS, 1, &"e".repeat(4096)).unwrap();
-        sim.assert_solvent();
-    }
-    sim.cancel(&alice(), held[0]).unwrap();
+    // Brakes, cancels, releases and payout callbacks still work.
+    sim.extend(&oracle(), braked, sim.now_ms + HOUR_MS, 1, &"e".repeat(4096)).unwrap();
+    sim.cancel(&alice(), braked).unwrap();
+    assert!(sim.release(&mallory(), to_bob).unwrap().is_some());
+    assert_eq!(sim.release(&mallory(), token), Ok(None));
+    sim.on_payout(token, ok()).unwrap();
+    assert_eq!(sim.near_of(&bob()), NEAR);
+    // Deposits to registered users only move money, so they work too.
+    sim.deposit_near(&treasury(), &bob(), NEAR).unwrap();
+
+    // The refund receipt arrives and everything works again.
+    sim.refund(10 * NEAR);
     sim.assert_solvent();
-    sim.now_ms = START_MS + HOUR_MS;
-    for hold_id in &held[1..] {
-        if sim.release(&mallory(), *hold_id).unwrap().is_none() {
-            sim.on_payout(*hold_id, failed()).unwrap();
-            sim.refund(NEAR);
-        }
-        sim.assert_solvent();
-    }
-    assert_eq!(sim.near_of(&alice()) + sim.near_of(&bob()), 20 * NEAR);
-    assert_eq!(settlement_reserve(&sim), 0);
+    assert!(sim.send(&alice(), &shop(), "near", NEAR).is_ok());
+    assert_eq!(settlement_reserve(&sim), storage_reserve());
 }
 
 #[test]
@@ -119,10 +120,13 @@ fn solvency_view_reports_the_books() {
     let solvency = sim.solvency();
     assert_eq!(solvency.account_balance, U128(sim.balance));
     assert_eq!(solvency.locked, U128(0));
-    assert_eq!(solvency.near_liabilities, U128(20 * NEAR));
+    assert_eq!(solvency.near_liabilities, U128(20 * NEAR - HOLD_FEE));
     assert_eq!(solvency.settlement_reserve, U128(storage_reserve()));
     assert_eq!(solvency.storage_usage, U64(sim.storage_usage));
     let storage_cost = u128::from(sim.storage_usage) * env::storage_byte_cost().as_yoctonear();
     assert_eq!(solvency.storage_cost, U128(storage_cost));
-    assert_eq!(solvency.surplus, U128(sim.balance - 20 * NEAR - storage_reserve() - storage_cost));
+    assert_eq!(
+        solvency.surplus,
+        U128(sim.balance - (20 * NEAR - HOLD_FEE) - storage_reserve() - storage_cost)
+    );
 }

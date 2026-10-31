@@ -361,10 +361,12 @@ def payee_findings(profile: dict[str, Any], now_ms: int) -> list[Finding]:
         findings.append(Finding(Reason.UNKNOWN_PAYEE, "no NEAR account with this name exists", SOURCE))
         return findings
     reputation = profile.get("reputation") or {}
+    # Reports count senders, each once per payee, and age from the latest report (not the
+    # latest flag, which a later honest payment can set).
     reports = int(reputation.get("cancelled_after_flag") or 0)
-    last_flag = reputation.get("last_flag_ms")
-    if reports >= REPORTS_TO_BRAKE and last_flag is not None and now_ms - int(last_flag) <= REPORT_WINDOW_MS:
-        detail = f"{reports} earlier senders cancelled after a warning; latest warning {_ago(now_ms - int(last_flag))}"
+    last_report = reputation.get("last_report_ms")
+    if reports >= REPORTS_TO_BRAKE and last_report is not None and now_ms - int(last_report) <= REPORT_WINDOW_MS:
+        detail = f"{reports} earlier senders cancelled after a warning; latest report {_ago(now_ms - int(last_report))}"
         findings.append(Finding(Reason.PAYEE_REPORTED, detail, SOURCE))
     age = profile.get("age_hours")
     if age is not None and not profile.get("age_is_lower_bound") and age < NEW_ACCOUNT_HOURS:

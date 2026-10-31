@@ -36,9 +36,11 @@ class Profile:
     max_hold_ms: int = 72 * HOUR_MS
 
 
+# A guardian change waits long enough on the hosted bot for the guardian in charge to hear about
+# it (from the bot or from the vault's guardian_changed events) and veto it.
 PROFILES: dict[str, Profile] = {
     "demo": Profile("demo", 20 * SECOND_MS, 30 * SECOND_MS, 30 * SECOND_MS),
-    "hosted": Profile("hosted", 10 * MINUTE_MS, 10 * MINUTE_MS, 10 * MINUTE_MS),
+    "hosted": Profile("hosted", 10 * MINUTE_MS, 10 * MINUTE_MS, 24 * HOUR_MS),
 }
 
 

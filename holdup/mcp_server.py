@@ -137,15 +137,15 @@ class NearIntelTools:
         if record is None:
             raise ToolError("the vault statistics are unavailable right now")
         now = await self.vault.now_ms()
-        last_flag = record.get("last_flag_ms")
+        last_report = record.get("last_report_ms")
         return {
             "account_id": account_id,
             **record,
             "reports": record["cancelled_after_flag"],
             "recent_reports": bool(record["cancelled_after_flag"])
-            and last_flag is not None
-            and now - last_flag <= REPORT_WINDOW_MS,
-            "meaning": "reports count payments that senders cancelled after a HoldUp warning",
+            and last_report is not None
+            and now - last_report <= REPORT_WINDOW_MS,
+            "meaning": "reports count senders who cancelled a payment after a HoldUp warning, each sender once",
         }
 
     async def sender_history(self, scope: HoldScope, sender: str, payee: str) -> dict[str, Any]:

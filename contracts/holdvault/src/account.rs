@@ -8,7 +8,7 @@ use crate::asset::Asset;
 use crate::errors::{ensure, fail, Error, SafeMath};
 use crate::events;
 use crate::user::{PendingGuardian, TrustedView, User, UserView, MAX_TRUSTED};
-use crate::{is_self_or_parent, HoldVault, HoldVaultExt};
+use crate::{is_self_or_parent, HoldVault, HoldVaultExt, ENTRY_STORAGE_FEE};
 
 /// `msg` accepted by `ft_on_transfer` to credit an account other than the token sender.
 #[near(serializers = [json])]
@@ -62,6 +62,7 @@ impl HoldVault {
 
     /// Lets payments to `payee` be instant (within the daily cap) once `trust_delay_ms` has passed.
     /// Re-adding a payee keeps its existing entry and does not restart or shorten the delay.
+    /// A new entry costs `ENTRY_STORAGE_FEE` from the caller's NEAR balance.
     pub fn add_trusted(&mut self, payee: AccountId) -> TrustedView {
         let owner = env::predecessor_account_id();
         let mut user = self.registered_user(&owner);
@@ -70,18 +71,19 @@ impl HoldVault {
             Error::SelfPayment,
             "cannot trust yourself or the vault",
         );
-        let effective_ms = match user.trusted.get(&payee) {
-            Some(effective_ms) => *effective_ms,
+        let (effective_ms, fee) = match user.trusted.get(&payee) {
+            Some(effective_ms) => (*effective_ms, 0),
             None => {
                 ensure(user.trusted.len() < MAX_TRUSTED, Error::TooManyTrusted, "at most 50 trusted payees");
+                self.take_storage_fee(&mut user, ENTRY_STORAGE_FEE, "a trusted payee");
                 let effective_ms = env::block_timestamp_ms().safe_add(self.config.trust_delay_ms);
                 user.trusted.insert(payee.clone(), effective_ms);
-                effective_ms
+                (effective_ms, ENTRY_STORAGE_FEE.as_yoctonear())
             }
         };
         self.users.insert(owner.clone(), user);
         self.assert_solvent();
-        events::trust_added(&owner, &payee, effective_ms);
+        events::trust_added(&owner, &payee, effective_ms, fee);
         TrustedView { payee, effective_ms: U64(effective_ms) }
     }
 
@@ -99,8 +101,9 @@ impl HoldVault {
 
     /// Sets (or with `None`, removes) the guardian who may cancel the caller's held payments.
     ///
-    /// The first guardian takes effect at once. Any later change waits `guardian_delay_ms`,
-    /// the current guardian stays in charge meanwhile, and a newer call replaces the pending one.
+    /// The first guardian takes effect at once. Any later change waits `guardian_delay_ms`:
+    /// the current guardian stays in charge meanwhile and can veto the change, and a newer call
+    /// replaces the pending one. Each call costs `ENTRY_STORAGE_FEE` from the caller's NEAR balance.
     pub fn set_guardian(&mut self, guardian: Option<AccountId>) -> UserView {
         let owner = env::predecessor_account_id();
         let now_ms = env::block_timestamp_ms();
@@ -112,6 +115,7 @@ impl HoldVault {
                 "you cannot be your own guardian",
             );
         }
+        self.take_storage_fee(&mut user, ENTRY_STORAGE_FEE, "a guardian change");
         user.apply_due_guardian(now_ms);
         let effective_ms = if user.guardian.is_none() && user.pending_guardian.is_none() {
             user.guardian = guardian.clone();
@@ -124,7 +128,32 @@ impl HoldVault {
         let view = UserView::new(owner.clone(), &user, now_ms);
         self.users.insert(owner.clone(), user);
         self.assert_solvent();
-        events::guardian_changed(&owner, guardian.as_ref(), effective_ms);
+        events::guardian_changed(&owner, guardian.as_ref(), effective_ms, ENTRY_STORAGE_FEE.as_yoctonear());
+        view
+    }
+
+    /// Drops `owner`'s pending guardian change. Only the guardian in charge can call it.
+    ///
+    /// A change waits `guardian_delay_ms` so the guardian can see it coming and stop it. Without
+    /// this, whoever holds the owner's key (the server that signs for HoldUp users, for one) could
+    /// remove the guardian, wait out the delay and then send everything to a payee nobody can
+    /// cancel for the owner any more.
+    pub fn veto_guardian_change(&mut self, owner: AccountId) -> UserView {
+        let caller = env::predecessor_account_id();
+        let now_ms = env::block_timestamp_ms();
+        let mut user = self.registered_user(&owner);
+        user.apply_due_guardian(now_ms);
+        ensure(
+            user.guardian.as_ref() == Some(&caller),
+            Error::NotGuardian,
+            "only the guardian in charge can veto a guardian change",
+        );
+        let Some(vetoed) = user.pending_guardian.take() else {
+            fail(Error::BadGuardian, "no guardian change is pending")
+        };
+        let view = UserView::new(owner.clone(), &user, now_ms);
+        self.users.insert(owner.clone(), user);
+        events::guardian_change_vetoed(&owner, &caller, vetoed.guardian.as_ref());
         view
     }
 }

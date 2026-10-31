@@ -6,8 +6,9 @@
   payees already on its simulated chain), ``NearVault`` on sandbox and testnet;
 - payee intel and the deterministic rules (``RulesRisk``), the fast check;
 - the Otari pipeline (``OtariRisk``), the full check: recorded answers when
-  ``otari_mode`` is ``replay``, the hosted gateway when it is ``live``, and no
-  AI step at all when it is ``off``;
+  ``otari_mode`` is ``replay`` (offline, or the scripted demo story on a real
+  network), the hosted gateway when it is ``live``, and no AI step at all when
+  it is ``off``;
 - the store, the notifiers and the engine;
 - with ``web=True``: the Telegram bot (when a token is set) and the web app,
   with the near-intel MCP server at ``/mcp`` and the guardrail at ``/validate``.
@@ -19,8 +20,8 @@ Every command of the CLI (``serve``, ``demo``, ``attack``, ``chat``, ``prove``,
 from __future__ import annotations
 
 import functools
-import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -42,27 +43,44 @@ CONSOLE_CHANNEL = "web"
 TELEGRAM_CHANNEL = "tg"
 
 
+_PAYEE_FACT = re.compile(r"^- payee account: ([a-z0-9._-]+)\s*$", re.MULTILINE)
+# The recorded scenario for each payee of the demo story, by the first label of its account id.
+_SCENARIO_BY_PAYEE = {"safe-wallet-77": "hero", "northwind-paper": "invoice"}
+
+
 class ScenarioResolver:
     """Chooses which recorded Otari exchange to replay for a request.
 
-    The demo sets ``current`` before each payment; otherwise well-known
-    phrases in the request pick the scenario.
+    The demo sets ``current`` before each payment. Otherwise the payee named in
+    the request's payment facts picks it: each recording was made for one of the
+    demo story's payees, and replaying it for any other payee would pin that
+    story's findings on an unrelated payment, whatever the message mentions.
     """
-
-    KEYWORDS = (("coinhaven", "hero"), ("northwind", "invoice"))
 
     def __init__(self, default: str = "benign") -> None:
         self.default = default
         self.current: str | None = None
 
-    def __call__(self, *args: Any, **kwargs: Any) -> str:
+    def __call__(self, step: str = "", body: Any = None) -> str:
         if self.current:
             return self.current
-        text = json.dumps([args, kwargs], default=str).lower()
-        for needle, scenario in self.KEYWORDS:
-            if needle in text:
-                return scenario
+        for text in _message_texts(body):
+            if match := _PAYEE_FACT.search(text):
+                return _SCENARIO_BY_PAYEE.get(match.group(1).split(".", 1)[0], self.default)
         return self.default
+
+
+def _message_texts(body: Any) -> list[str]:
+    """The text parts of a chat completion request."""
+    messages = body.get("messages") if isinstance(body, dict) else None
+    texts: list[str] = []
+    for message in messages or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts += [part["text"] for part in content if isinstance(part, dict) and isinstance(part.get("text"), str)]
+    return texts
 
 
 class LogNotifier:
@@ -144,6 +162,7 @@ def build_runtime(
     clock: Callable[[], int] | None = None,
     web: bool = True,
     profile: str = "demo",
+    allow_replay: bool = False,
 ) -> Runtime:
     """Wire HoldUp for ``settings``.
 
@@ -151,7 +170,10 @@ def build_runtime(
     their own (the demo's and the console's users); by default they are logged.
     ``clock`` drives the offline world (a ``SimClock`` for the scripted demo);
     on a real network time comes from the chain. ``profile`` picks the offline
-    vault's waits (``demo``: seconds, ``hosted``: minutes).
+    vault's waits (``demo``: seconds, ``hosted``: minutes). Recorded AI answers
+    are refused on a real network, where the oracle would put them on-chain as
+    evidence about real payees, unless ``allow_replay`` is set: only the
+    scripted demo story does that, for its own demo payees.
     """
     if settings.network not in NETWORKS:
         raise ValueError(f"unknown network {settings.network!r}")
@@ -160,6 +182,11 @@ def build_runtime(
     offline = settings.network == "offline"
     if not offline and settings.secret in ("", OFFLINE_SECRET):
         raise ValueError("a real network needs its own HOLDUP_SECRET (every user's account is derived from it)")
+    if not offline and settings.otari_mode == "replay" and not allow_replay:
+        raise ValueError(
+            f"OTARI_MODE=replay replays recorded AI answers, which must not brake real payments on {settings.network}; "
+            "use OTARI_MODE=live with OTARI_API_KEY, or OTARI_MODE=off for the rules alone"
+        )
 
     if offline:
         clock = clock or wall_clock_ms

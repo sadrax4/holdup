@@ -1,9 +1,11 @@
 {% extends "base.html" %}
+{% from "_macros.html" import replay_notice %}
 {% block title %}Stats - HoldUp{% endblock %}
 {% block main %}
 <p class="eyebrow">Stats</p>
 <h1>What HoldUp has done on this server</h1>
 <p class="lead">Counted from the server's own log of holds, brakes and checks. Every number links back to on-chain holds you can inspect one by one.</p>
+{{ replay_notice() }}
 <div class="tiles">
   {% for value, title, note in tiles %}
   <div class="tile">

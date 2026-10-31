@@ -18,8 +18,17 @@ from ..models import UserAccount
 
 NAME_CHARS = 10
 
-# Methods each restricted key may call on the vault (allowance: unlimited, zero deposit).
-USER_METHODS = ("send", "cancel", "guardian_cancel", "add_trusted", "remove_trusted", "set_guardian")
+# Methods each restricted key may call on the vault (allowance: unlimited, zero deposit). A user
+# who is someone's guardian uses the same key for guardian_cancel and veto_guardian_change.
+USER_METHODS = (
+    "send",
+    "cancel",
+    "guardian_cancel",
+    "add_trusted",
+    "remove_trusted",
+    "set_guardian",
+    "veto_guardian_change",
+)
 ORACLE_METHODS = ("extend_hold",)
 KEEPER_METHODS = ("release",)
 

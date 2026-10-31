@@ -148,7 +148,9 @@ def test_landing_page(world: World) -> None:
     text = visible(response.text)
     assert "Give AI the brakes, not the keys." in text
     assert 'href="/console"' in response.text and 'href="/prove"' in response.text
-    assert "12 payments" in text and "9 brakes" in text and "3 cancelled after a warning" in text
+    # Braked payments, each counted once: not quick brakes plus full brakes (review finding).
+    assert "12 payments" in text and "6 braked" in text and "3 cancelled after a warning" in text
+    assert "9 brakes" not in text
     assert "It is not Circle USDC." in text
 
 
@@ -362,6 +364,18 @@ def test_stats_page_and_json(world: World) -> None:
     assert "3 Cancelled after a warning counted on-chain against the payee" in text
     assert "$0.0213 Total AI cost" in text
     assert world.client.get("/stats.json").json() == world.engine.stats_value
+
+
+def test_pages_say_when_ai_answers_are_recorded(world: World) -> None:
+    """Replayed answers used to be presented as live gateway results (review finding)."""
+    assert world.settings.otari_mode == "replay"
+    hold = world.braked_hold()
+    for path in ("/stats", f"/h/{hold.id}", f"/why/{hold.id}"):
+        assert "Recorded AI answers." in visible(world.client.get(path).text), path
+    live = make_settings(otari_mode="live", otari_api_key="otk_v1_us_test")
+    app = create_app(live, FakeEngine(live), world.vault, Store(":memory:"))
+    with TestClient(app) as client:
+        assert "Recorded AI answers." not in client.get("/stats").text
 
 
 def test_signed_export_link(world: World) -> None:

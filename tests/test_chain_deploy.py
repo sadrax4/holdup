@@ -39,7 +39,9 @@ def kinds(tx: Any) -> list[str]:
 def test_profiles_match_the_spec() -> None:
     demo, hosted = PROFILES["demo"], PROFILES["hosted"]
     assert (demo.new_payee_hold_ms, demo.trust_delay_ms, demo.guardian_delay_ms) == (20_000, 30_000, 30_000)
-    assert (hosted.new_payee_hold_ms, hosted.trust_delay_ms, hosted.guardian_delay_ms) == (600_000,) * 3
+    assert (hosted.new_payee_hold_ms, hosted.trust_delay_ms) == (600_000,) * 2
+    # Long enough for a guardian to notice a change and veto it.
+    assert hosted.guardian_delay_ms == 24 * 3_600_000
     assert demo.max_hold_ms == hosted.max_hold_ms == 72 * 3_600_000
     settings = Settings(oracle_accounts=["oracle.x.testnet"], husd_token="husd.x.testnet", usdc_token="usdc.testnet")
     config = vault_config(settings, "hosted")

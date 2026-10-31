@@ -50,7 +50,7 @@ from .profiles import YOCTO_PER_NEAR, config_input, vault_config
 VERSION = "1.0.0"
 DAY_MS = 86_400_000
 MAX_EVIDENCE_BYTES = 4096
-MAX_MEMO_HASH_CHARS = 64
+MAX_MEMO_HASH_BYTES = 64
 MAX_TRUSTED = 50
 MAX_ORACLES = 3
 MAX_TOKENS = 4
@@ -60,7 +60,11 @@ U32_MAX = 2**32 - 1
 
 STORAGE_BYTE_COST = 10**19  # yoctoNEAR per byte, as on NEAR mainnet and testnet
 FT_STORAGE_DEPOSIT = 1_250 * 10**18  # 0.00125 NEAR attached to storage_deposit before a token payout
-HOLD_SETTLEMENT_BYTES = 32 + 8 + 4 + 64 + 8  # storage a hold can still add after send
+# Storage a hold can still add after send: evidence hash, settled time, canceller, the payee's
+# flag and report times, and a new reporter entry (32-byte key + 40 bytes per storage record).
+HOLD_SETTLEMENT_BYTES = 32 + 8 + 4 + 64 + 8 + 8 + (32 + 40)
+HOLD_STORAGE_FEE = 15 * 10**21  # 0.015 NEAR from the sender's NEAR balance for every hold
+ENTRY_STORAGE_FEE = 10**21  # 0.001 NEAR for each new trusted payee and each guardian change
 MAX_ACTIVE_HOLDS_LIMIT = 100
 MAX_DURATION_MS = 365 * DAY_MS
 
@@ -139,6 +143,14 @@ def _validate_config(config: VaultConfig, vault_id: str) -> None:
     for asset in config.instant_caps:
         if asset != NEAR and asset not in config.tokens:
             raise bad(f"instant cap for unknown asset {asset}")
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """``json.loads`` hook that refuses duplicate keys, as the contract's serde parser does."""
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError("duplicate key")
+    return dict(pairs)
 
 
 def _settlement_reserve(asset: str) -> int:
@@ -220,6 +232,7 @@ class HoldVaultModel:
         self.holds: dict[int, Hold] = {}
         self.active: set[int] = set()
         self.stats: dict[str, PayeeStats] = {}
+        self.reporters: set[tuple[str, str]] = set()  # (payee, sender): each sender reports a payee once
         self.next_hold_id = 0
         self.account_balance = reserve
         self.near_liabilities = 0
@@ -302,6 +315,16 @@ class HoldVaultModel:
         balances[asset] = balances.get(asset, 0) + amount
         return balances[asset]
 
+    @staticmethod
+    def _require_fee(user: _User, fee: int, what: str) -> None:
+        if user.balances.get(NEAR, 0) < fee:
+            raise _fail(E.E_INSUFFICIENT_BALANCE, f"{what} needs {fee} yoctoNEAR of vault balance for its storage")
+
+    def _take_fee(self, user: _User, fee: int) -> None:
+        """A storage fee leaves the user's balance and the liabilities; the vault keeps it."""
+        user.balances[NEAR] -= fee
+        self.near_liabilities -= fee
+
     # ------------------------------------------------------------------
     # deposits
     # ------------------------------------------------------------------
@@ -353,7 +376,7 @@ class HoldVaultModel:
         target = sender_id
         if msg:
             try:
-                parsed = json.loads(msg)
+                parsed = json.loads(msg, object_pairs_hook=_unique_keys)
             except ValueError:
                 parsed = None
             if (
@@ -388,12 +411,13 @@ class HoldVaultModel:
             raise _fail(E.E_UNKNOWN_ASSET, f"{asset} is not accepted by this vault")
         if payee in (predecessor, self.vault_id):
             raise _fail(E.E_SELF_PAYMENT, "cannot pay yourself or the vault")
-        if user.balances.get(asset, 0) < amount:
-            raise _fail(E.E_INSUFFICIENT_BALANCE, "balance is lower than the amount")
+        near_needed = HOLD_STORAGE_FEE + (amount if asset == NEAR else 0)
+        if user.balances.get(asset, 0) < amount or user.balances.get(NEAR, 0) < near_needed:
+            raise _fail(E.E_INSUFFICIENT_BALANCE, "balance is lower than the amount plus the hold storage fee in NEAR")
         if len(user.active_holds) >= self.config.max_active_holds:
             raise _fail(E.E_TOO_MANY_HOLDS, "too many held payments; cancel one or wait for a release")
-        if memo_hash is not None and len(memo_hash) > MAX_MEMO_HASH_CHARS:
-            raise _fail(E.E_MEMO_TOO_LONG, "memo_hash is limited to 64 characters")
+        if memo_hash is not None and len(memo_hash.encode()) > MAX_MEMO_HASH_BYTES:
+            raise _fail(E.E_MEMO_TOO_LONG, "memo_hash is limited to 64 bytes")
 
         now = self.now()
         day = now // DAY_MS
@@ -404,7 +428,9 @@ class HoldVaultModel:
             and user.instant_used_on(asset, day) + amount <= self.config.instant_caps.get(asset, 0)
         )
         stats_growth = 0 if instant or payee in self.stats else PAYEE_STATS_BYTES
-        self._require_solvent(storage=HOLD_BYTES + stats_growth, reserve=_settlement_reserve(asset))
+        self._require_solvent(
+            storage=HOLD_BYTES + stats_growth, liabilities=-HOLD_STORAGE_FEE, reserve=_settlement_reserve(asset)
+        )
 
         hold = Hold(
             id=self.next_hold_id,
@@ -422,6 +448,7 @@ class HoldVaultModel:
         self.holds[hold.id] = hold
         self.storage_usage += HOLD_BYTES
         user.balances[asset] -= amount
+        self._take_fee(user, HOLD_STORAGE_FEE)
         user.sent.append(hold.id)
         if instant:
             user.instant_used[asset] = (day, user.instant_used_on(asset, day) + amount)
@@ -438,6 +465,7 @@ class HoldVaultModel:
                 release_at_ms=str(hold.release_at_ms),
                 instant=instant,
                 memo_hash=memo_hash,
+                storage_fee=str(HOLD_STORAGE_FEE),
             ),
         )
         settle = self._pay_out(hold) if instant else None
@@ -464,17 +492,23 @@ class HoldVaultModel:
         self._require_active(hold)
         self._close_active(hold)
         self._credit(hold.sender, hold.asset, hold.amount)
+        now = self.now()
         hold.status = HoldStatus.CANCELLED
         hold.cancelled_by = caller
-        hold.settled_ms = self.now()
+        hold.settled_ms = now
         self.settlement_reserve -= _settlement_reserve(hold.asset)
+        # A cancel after a flag is a report, but each sender counts once per payee.
+        report = hold.flagged and (hold.payee, hold.sender) not in self.reporters
+        if report:
+            self.reporters.add((hold.payee, hold.sender))
         stats = self._payee_stats(hold.payee)
         stats.cancelled += 1
-        if hold.flagged:
+        if report:
             stats.cancelled_after_flag += 1
+            stats.last_report_ms = now
         self._emit(
             "hold_cancelled",
-            self._hold_event(hold, by=role, cancelled_by=caller, flagged=hold.flagged),
+            self._hold_event(hold, by=role, cancelled_by=caller, flagged=hold.flagged, report=report),
         )
         return hold.to_view()
 
@@ -607,15 +641,20 @@ class HoldVaultModel:
         if payee in (predecessor, self.vault_id):
             raise _fail(E.E_SELF_PAYMENT, "cannot trust yourself or the vault")
         effective_ms = user.trusted.get(payee)
+        fee = 0
         if effective_ms is None:
             if len(user.trusted) >= MAX_TRUSTED:
                 raise _fail(E.E_TOO_MANY_TRUSTED, "at most 50 trusted payees")
-            self._require_solvent(storage=TRUSTED_BYTES)
+            fee = ENTRY_STORAGE_FEE
+            self._require_fee(user, fee, "a trusted payee")
+            self._require_solvent(storage=TRUSTED_BYTES, liabilities=-fee)
+            self._take_fee(user, fee)
             effective_ms = self.now() + self.config.trust_delay_ms
             user.trusted[payee] = effective_ms
             self.storage_usage += TRUSTED_BYTES
         self._emit(
-            "trust_added", {"owner": predecessor, "payee": payee, "effective_ms": str(effective_ms)}
+            "trust_added",
+            {"owner": predecessor, "payee": payee, "effective_ms": str(effective_ms), "storage_fee": str(fee)},
         )
         return {"payee": payee, "effective_ms": str(effective_ms)}
 
@@ -633,10 +672,13 @@ class HoldVaultModel:
         user = self._user(predecessor)
         if guardian is not None and guardian in (predecessor, self.vault_id):
             raise _fail(E.E_BAD_GUARDIAN, "you cannot be your own guardian")
+        self._require_fee(user, ENTRY_STORAGE_FEE, "a guardian change")
         now = self.now()
+        guardian_now, pending_now = user.guardian_at(now)
+        growth = GUARDIAN_BYTES if guardian is not None and guardian_now is None and pending_now is None else 0
+        self._require_solvent(storage=growth, liabilities=-ENTRY_STORAGE_FEE)
+        self._take_fee(user, ENTRY_STORAGE_FEE)
         user.settle_guardian(now)
-        growth = GUARDIAN_BYTES if guardian is not None and user.guardian is None and user.pending is None else 0
-        self._require_solvent(storage=growth)
         if user.guardian is None and user.pending is None:
             effective_ms = now
             user.guardian = guardian
@@ -646,8 +688,27 @@ class HoldVaultModel:
         self.storage_usage += growth
         self._emit(
             "guardian_changed",
-            {"owner": predecessor, "guardian": guardian, "effective_ms": str(effective_ms)},
+            {
+                "owner": predecessor,
+                "guardian": guardian,
+                "effective_ms": str(effective_ms),
+                "storage_fee": str(ENTRY_STORAGE_FEE),
+            },
         )
+        return self._user_view(user, now)
+
+    def veto_guardian_change(self, predecessor: str, owner: str) -> dict[str, Any]:
+        """The guardian in charge of ``owner`` drops their pending guardian change."""
+        _require_account_id(owner, "owner")
+        user = self._user(owner)
+        now = self.now()
+        guardian, pending = user.guardian_at(now)
+        if guardian is None or predecessor != guardian:
+            raise _fail(E.E_NOT_GUARDIAN, "only the guardian in charge can veto a guardian change")
+        if pending is None:
+            raise _fail(E.E_BAD_GUARDIAN, "no guardian change is pending")
+        user.guardian, user.pending = guardian, None
+        self._emit("guardian_change_vetoed", {"owner": owner, "guardian": guardian, "vetoed": pending[0]})
         return self._user_view(user, now)
 
     # ------------------------------------------------------------------
@@ -657,7 +718,12 @@ class HoldVaultModel:
     def get_config(self) -> dict[str, Any]:
         view = config_input(self.config)
         view["instant_caps"] = dict(sorted(view["instant_caps"].items()))
-        return {**view, "version": VERSION}
+        return {
+            **view,
+            "hold_storage_fee": str(HOLD_STORAGE_FEE),
+            "entry_storage_fee": str(ENTRY_STORAGE_FEE),
+            "version": VERSION,
+        }
 
     def get_hold(self, hold_id: int) -> dict[str, Any] | None:
         hold = self.holds.get(hold_id)
@@ -719,6 +785,7 @@ class HoldVaultModel:
             "cancelled_after_flag": stats.cancelled_after_flag,
             "released": stats.released,
             "last_flag_ms": None if stats.last_flag_ms is None else str(stats.last_flag_ms),
+            "last_report_ms": None if stats.last_report_ms is None else str(stats.last_report_ms),
         }
 
     def is_registered(self, account_id: str) -> bool:
@@ -1039,6 +1106,14 @@ class FakeVault:
             "set_guardian",
             {"guardian": guardian},
             lambda: self.model.set_guardian(user.account_id, guardian),
+        )
+
+    async def veto_guardian_change(self, guardian: UserAccount, owner: str) -> TxResult:
+        return self._run(
+            guardian.account_id,
+            "veto_guardian_change",
+            {"owner": owner},
+            lambda: self.model.veto_guardian_change(guardian.account_id, owner),
         )
 
     # ------------------------------------------------------------------

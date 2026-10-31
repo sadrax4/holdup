@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import reason_list %}
+{% from "_macros.html" import reason_list, replay_notice %}
 {% set h = why.hold %}
 {% block title %}Checks for payment #{{ h.id }} - HoldUp{% endblock %}
 {% block head %}<meta name="robots" content="noindex">{% endblock %}
@@ -10,6 +10,7 @@
   <span class="badge badge-large tone-{{ status[1] }}">{{ status[0] }}</span>
 </div>
 <p class="lead">Every step that looked at this payment, with the model, the provider that served it, fallbacks, attempts and cost, as reported by the gateway.</p>
+{{ replay_notice() }}
 
 {% if reasons %}
 <section class="section">

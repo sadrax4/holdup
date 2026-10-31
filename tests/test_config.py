@@ -64,6 +64,16 @@ def test_otari_mode(tmp_path: Path) -> None:
     assert load(tmp_path).otari_mode == "replay"
     assert load(tmp_path, OTARI_API_KEY="otk_test").otari_mode == "live"
     assert load(tmp_path, OTARI_API_KEY="otk_test", OTARI_MODE="replay").otari_mode == "replay"
+    # Recorded answers are never the default on a real network.
+    for network in ("sandbox", "testnet"):
+        assert load(tmp_path, HOLDUP_NETWORK=network).otari_mode == "off"
+        assert load(tmp_path, HOLDUP_NETWORK=network, OTARI_API_KEY="otk_test").otari_mode == "live"
+
+
+def test_training_pages_can_have_their_own_host(tmp_path: Path) -> None:
+    assert load(tmp_path).fixture_base() == "http://127.0.0.1:8000"
+    settings = load(tmp_path, PUBLIC_BASE_URL="https://holdup.example", FIXTURE_BASE_URL="https://fixtures.example/")
+    assert (settings.fixture_base_url, settings.fixture_base()) == ("https://fixtures.example", "https://fixtures.example")
     with pytest.raises(ValueError, match="OTARI_MODE"):
         load(tmp_path, OTARI_MODE="sometimes")
 

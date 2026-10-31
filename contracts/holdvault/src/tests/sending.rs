@@ -24,9 +24,9 @@ fn payment_to_a_new_payee_is_held() {
     assert_eq!((hold.extensions, hold.reason_bits), (0, 0));
     assert_eq!((hold.evidence_hash.clone(), hold.settled_ms, hold.cancelled_by.clone()), (None, None, None));
 
-    assert_eq!(sim.near_of(&alice()), 18 * NEAR);
-    // NEAR inside a hold is still owed by the vault.
-    assert_eq!(sim.near_liabilities(), 20 * NEAR);
+    assert_eq!(sim.near_of(&alice()), 18 * NEAR - HOLD_FEE);
+    // NEAR inside a hold is still owed by the vault; the storage fee is not.
+    assert_eq!(sim.near_liabilities(), 20 * NEAR - HOLD_FEE);
     assert_eq!(sim.stats(&shop()).holds, 1);
     assert_eq!(sim.user(&alice()).unwrap().active_holds, 1);
     assert_eq!(sim.view(|v| v.get_active_holds(alice())), vec![hold]);
@@ -39,6 +39,7 @@ fn payment_to_a_new_payee_is_held() {
     assert_eq!(created["amount"], (2 * NEAR).to_string());
     assert_eq!(created["release_at_ms"], (START_MS + HOLD_MS).to_string());
     assert_eq!(created["instant"], false);
+    assert_eq!(created["storage_fee"], HOLD_FEE.to_string());
     sim.assert_solvent();
 }
 
@@ -49,7 +50,9 @@ fn token_payments_are_held_too() {
     assert_eq!(hold.asset, husd().as_str());
     assert_eq!(hold.status, HoldStatus::Held);
     assert_eq!(sim.husd_of(&alice()), 950 * HUSD);
-    assert_eq!(sim.near_liabilities(), 20 * NEAR);
+    // A token payment pays its storage fee in NEAR.
+    assert_eq!(sim.near_of(&alice()), 20 * NEAR - HOLD_FEE);
+    assert_eq!(sim.near_liabilities(), 20 * NEAR - HOLD_FEE);
     sim.assert_solvent();
 }
 
@@ -78,11 +81,23 @@ fn send_validates_every_input() {
 }
 
 #[test]
-fn the_whole_balance_can_be_sent() {
+fn the_memo_limit_counts_bytes() {
     let mut sim = funded();
-    sim.send(&alice(), &shop(), "near", 20 * NEAR).unwrap();
+    // 40 characters but 80 bytes in UTF-8 (FakeVault must count the same way).
+    let accented = Some("\u{e9}".repeat(40));
+    assert_error(sim.send_with_memo(&alice(), &shop(), "near", 1, accented), "E_MEMO_TOO_LONG");
+    assert!(sim.send_with_memo(&alice(), &shop(), "near", 1, Some("\u{e9}".repeat(32))).is_ok());
+}
+
+#[test]
+fn the_whole_balance_can_be_sent_except_the_fee() {
+    let mut sim = funded();
+    assert_error(sim.send(&alice(), &shop(), "near", 20 * NEAR - HOLD_FEE + 1), "E_INSUFFICIENT_BALANCE");
+    sim.send(&alice(), &shop(), "near", 20 * NEAR - HOLD_FEE).unwrap();
     assert_eq!(sim.near_of(&alice()), 0);
     assert_error(sim.send(&alice(), &shop(), "near", 1), "E_INSUFFICIENT_BALANCE");
+    // Without NEAR for the fee, tokens cannot be sent either.
+    assert_error(sim.send(&alice(), &shop(), husd().as_str(), HUSD), "E_INSUFFICIENT_BALANCE");
 }
 
 #[test]

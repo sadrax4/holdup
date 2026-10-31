@@ -308,6 +308,15 @@ class Store:
         row = self._one("SELECT COUNT(*) AS n FROM events WHERE kind = ?", (kind,))
         return int(row["n"]) if row else 0
 
+    def count_event_holds(self, *kinds: str) -> int:
+        """How many different holds have at least one event of these kinds."""
+        marks = ", ".join("?" for _ in kinds)
+        row = self._one(
+            f"SELECT COUNT(DISTINCT json_extract(data, '$.hold_id')) AS n FROM events WHERE kind IN ({marks})",
+            kinds,
+        )
+        return int(row["n"]) if row else 0
+
     # ------------------------------------------------------------------
     # per-user Otari keys
     # ------------------------------------------------------------------

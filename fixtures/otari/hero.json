@@ -2,7 +2,7 @@
   "scenario": "hero",
   "synthetic": true,
   "description": "Priya forwards the fictional CoinHaven Support DM and pays 50 to safe-wallet-77.testnet. Triage flags urgency, impersonation and the line aimed at the AI checker, the monitor guardrail flags the text, the blocking gate keeps it away from the tool-using models, and the investigator finds a two hour old payee collecting from 14 senders (near-intel), public warnings (web search, two sources), a phishing verify page (web fetch) and computes the account age with code execution.",
-  "source": "Written by hand from the documented response shapes: chat completion and stream chunks (api-reference: Web tool calls on Chat Completions), Otari-* headers and usage.cost_usd as recorded from the hosted gateway on 2026-10-31, the Otari-Guardrails list and the 403 guardrail_violation body as observed on the hosted gateway on 2026-10-30. The fetched link is the verify page of the offline demo message; in a live run it is the public URL of the HoldUp training fixture page. Request ids are marked replay.",
+  "source": "Written by hand from the documented response shapes: chat completion and stream chunks (api-reference: Web tool calls on Chat Completions), Otari-* headers and usage.cost_usd as recorded from the hosted gateway on 2026-10-31, the Otari-Guardrails list and the 403 guardrail_violation body as observed on the hosted gateway on 2026-10-30. The fetched link is the training fixture verify page, written as {base_url}/fixtures/coinhaven/verify: the replay fills in the scheme and host of the link in the forwarded message. Request ids are marked replay.",
   "steps": {
     "triage": {
       "expect": {
@@ -90,7 +90,7 @@
             "id": "otari_wf_replay_hero_1",
             "type": "web_fetch",
             "status": "completed",
-            "url": "http://127.0.0.1:8000/fixtures/coinhaven/verify"
+            "url": "{base_url}/fixtures/coinhaven/verify"
           }
         ],
         "content": {
@@ -99,8 +99,8 @@
             {"reason": "MULE_PATTERN", "tool": "near-intel", "detail": "payee_profile shows 14 distinct senders paid this account in the last 24 hours", "citations": [], "computation": ""},
             {"reason": "NEW_ACCOUNT", "tool": "code_execution", "detail": "account age computed as 2.0 hours from its creation time", "citations": [], "computation": "payee account age in hours"},
             {"reason": "PUBLIC_WARNING", "tool": "web_search", "detail": "consumer protection agencies warn that requests to move funds into a protected wallet are a common scam", "citations": ["https://consumer.ftc.gov/articles/what-know-about-cryptocurrency-and-scams", "https://www.consumerfinance.gov/consumer-tools/fraud/"], "computation": ""},
-            {"reason": "PHISHING_LINK", "tool": "web_fetch", "detail": "the linked page imitates a wallet sign-in page", "citations": ["http://127.0.0.1:8000/fixtures/coinhaven/verify"], "computation": ""},
-            {"reason": "SECRET_REQUEST", "tool": "web_fetch", "detail": "the linked page asks for a 12 word recovery phrase", "citations": ["http://127.0.0.1:8000/fixtures/coinhaven/verify"], "computation": ""}
+            {"reason": "PHISHING_LINK", "tool": "web_fetch", "detail": "the linked page imitates a wallet sign-in page", "citations": ["{base_url}/fixtures/coinhaven/verify"], "computation": ""},
+            {"reason": "SECRET_REQUEST", "tool": "web_fetch", "detail": "the linked page asks for a 12 word recovery phrase", "citations": ["{base_url}/fixtures/coinhaven/verify"], "computation": ""}
           ],
           "computations": [
             {"label": "payee account age in hours", "code": "created_ms = 1793440800000\nnow_ms = 1793448000000\nprint(round((now_ms - created_ms) / 3600000, 1))", "result": "2.0"},

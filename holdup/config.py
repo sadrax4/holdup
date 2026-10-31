@@ -64,9 +64,12 @@ class Settings:
     telegram_bot_token: str = field(default="", repr=False)
     telegram_webhook_secret: str = field(default="", repr=False)
     public_base_url: str = "http://127.0.0.1:8000"
+    # Where the fictional training pages are linked from (a separate host keeps phishing reports
+    # about the demo links off the bot's own host); empty means public_base_url.
+    fixture_base_url: str = ""
     otari_api_key: str = field(default="", repr=False)
     otari_base_url: str = ""
-    otari_mode: str = "replay"  # "live", "replay" (recorded fixtures) or "off" (rules only)
+    otari_mode: str = "replay"  # "live", "replay" (recorded fixtures, offline only) or "off" (rules only)
     database_path: str = ".holdup/holdup.sqlite3"
     demo_funds: dict[str, int] = field(default_factory=dict)
     user_gas_near: str = "0.05"
@@ -95,6 +98,10 @@ class Settings:
     def tx_link_fallback(self, tx_hash: str) -> str:
         template = EXPLORER_TX_FALLBACK.get(self.network, "")
         return template.format(tx=tx_hash) if template and tx_hash else ""
+
+    def fixture_base(self) -> str:
+        """Base URL of the training pages that the sample messages link to."""
+        return self.fixture_base_url or self.public_base_url or "http://127.0.0.1:8000"
 
     def otari_url(self) -> str:
         if self.otari_base_url:
@@ -158,13 +165,17 @@ def load_settings(
     network = network or pick("HOLDUP_NETWORK", "network", "offline")
     if network not in NETWORKS:
         raise ValueError(f"HOLDUP_NETWORK must be one of {', '.join(NETWORKS)} (got {network!r})")
-    otari_mode = pick("OTARI_MODE", None, "live" if env.get("OTARI_API_KEY") else "replay")
+    # Without a key the offline world replays recorded answers. On a real network that would
+    # attach recorded findings to real payments, so the checks there run on the rules alone.
+    default_mode = "live" if env.get("OTARI_API_KEY") else ("replay" if network == "offline" else "off")
+    otari_mode = pick("OTARI_MODE", None, default_mode)
     if otari_mode not in OTARI_MODES:
         raise ValueError(f"OTARI_MODE must be one of {', '.join(OTARI_MODES)} (got {otari_mode!r})")
     channels = {
         "telegram_bot_token": pick("TELEGRAM_BOT_TOKEN"),
         "telegram_webhook_secret": pick("TELEGRAM_WEBHOOK_SECRET"),
         "public_base_url": pick("PUBLIC_BASE_URL", None, "http://127.0.0.1:8000").rstrip("/"),
+        "fixture_base_url": pick("FIXTURE_BASE_URL").rstrip("/"),
         "otari_api_key": pick("OTARI_API_KEY"),
         "otari_base_url": pick("OTARI_BASE_URL"),
         "otari_mode": otari_mode,

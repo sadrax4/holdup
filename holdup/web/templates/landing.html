@@ -61,7 +61,7 @@
   <h2>On this server so far</h2>
   <div class="tiles tiles-compact">
     <div class="tile"><span class="tile-value">{{ stats.get("holds", 0) }}</span><span class="tile-title">payments</span></div>
-    <div class="tile"><span class="tile-value">{{ stats.get("brakes", 0) + stats.get("provisional_brakes", 0) }}</span><span class="tile-title">brakes</span></div>
+    <div class="tile"><span class="tile-value">{{ stats.get("braked_holds", 0) }}</span><span class="tile-title">braked</span></div>
     <div class="tile"><span class="tile-value">{{ stats.get("cancels_after_flag", 0) }}</span><span class="tile-title">cancelled after a warning</span></div>
     <div class="tile"><span class="tile-value">{{ stats.get("releases", 0) }}</span><span class="tile-title">released</span></div>
   </div>

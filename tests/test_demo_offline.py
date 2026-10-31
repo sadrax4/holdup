@@ -85,8 +85,16 @@ async def test_the_attack_walkthrough_shows_three_failures() -> None:
     injected = await result.runtime.vault.get_hold(result.holds["injection"])
     assert injected.reason_bits & Reason.CHECKER_INJECTION
     forged = await result.runtime.vault.get_hold(result.holds["forged"])
-    assert forged.status == HoldStatus.CANCELLED and forged.cancelled_by == result.runtime.engine.account_for("demo:sam").account_id
-    assert "Priya's balance: 2 NEAR, 2000 HUSD" in text
+    sam = result.runtime.engine.account_for("demo:sam").account_id
+    assert forged.status == HoldStatus.CANCELLED and forged.cancelled_by == sam
+    # The stolen key's attempt to remove Sam first is vetoed: he is still in charge afterwards.
+    assert "Sam vetoes the removal" in text and "their own NEAR wallet" in text
+    priya = await result.runtime.vault.get_user(result.runtime.engine.account_for("demo:priya").account_id)
+    assert priya is not None and priya.guardian == sam and not priya.pending_guardian_set
+    # Every token is back; the NEAR balance only paid storage fees (two holds, two guardian changes).
+    config = await result.runtime.vault.get_config()
+    near = 2 * 10**24 - 2 * config.hold_storage_fee - 2 * config.entry_storage_fee
+    assert f"Priya's balance: {near / 10**24:g} NEAR, 2000 HUSD" in text
 
 
 async def test_the_console_drives_the_same_engine() -> None:
@@ -115,7 +123,7 @@ async def test_the_console_drives_the_same_engine() -> None:
     assert "Brakes on - held until" in joined
     assert "CHECKER_INJECTION" in joined and "evidence sha256" in joined
     assert "Released: 2 HUSD paid to ravi.testnet." in joined
-    assert "2 NEAR, 1998 HUSD" in joined
+    assert "1.97 NEAR, 1998 HUSD" in joined  # two payments, each paying the 0.015 NEAR storage fee
     assert "There is no payment with that number." in joined
     assert "Unknown command." in joined
 
@@ -137,3 +145,22 @@ def test_python_dash_m_holdup_demo_offline() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "Every transaction id above is simulated" in completed.stdout
+
+
+async def test_a_braked_everyday_payment_does_not_stall_the_story(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """On testnet the story's payees are as old as the deployment, so the rules brake the dinner payment
+    as a new account; the story used to sleep through that hour-long brake (review finding)."""
+    import holdup.runtime
+    from holdup.chain.fake import DEMO_START_MS
+    from holdup.intel import load_payee_fixtures
+
+    fixtures = load_payee_fixtures()
+    fixtures["payees"]["ravi.testnet"] = {**fixtures["payees"]["ravi.testnet"], "age_hours": 1}
+    monkeypatch.setattr(holdup.runtime, "load_payee_fixtures", lambda: fixtures)
+    result = await run_offline_demo(out=None, rules_only=True)
+    text = result.transcript.text
+    benign = await result.runtime.vault.get_hold(result.holds["benign"])
+    assert benign.status == HoldStatus.HELD and benign.extensions == 1
+    assert "the story moves on rather than wait" in text
+    assert "Released: 12.5 HUSD" not in text
+    assert result.runtime.clock() - DEMO_START_MS < 5 * 60_000  # never the hour of the brake

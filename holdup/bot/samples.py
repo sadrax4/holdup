@@ -65,7 +65,7 @@ def load_samples(settings: Settings, directory: Path | None = None) -> list[Samp
         log.warning("training samples unavailable: %s", exc)
         return []
     symbol = stable_symbol(settings)
-    base_url = settings.public_base_url or "http://127.0.0.1:8000"
+    base_url = settings.fixture_base()
     samples = []
     for entry in index.get("messages", []):
         try:

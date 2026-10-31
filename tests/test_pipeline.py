@@ -420,6 +420,10 @@ async def test_mcp_claims_need_a_logged_call_when_a_log_is_given(tmp_path: Path)
     risk, _ = make_risk("mcp", fixtures_dir=folder, mcp_log=lambda hold_id: calls.get(hold_id, []))
     unlogged = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=DINNER))
     assert sources(unlogged) == {"investigator"}
+    # A call the server refused returned nothing to cite, so it is not proof either (review finding).
+    calls[7] = [{"tool": "payee_profile", "args": {"account_id": "other.testnet", "refused": "out of scope"}}]
+    refused = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=DINNER))
+    assert sources(refused) == {"investigator"}
     calls[7] = [{"tool": "payee_profile", "args": {"account_id": "safe-wallet-77.testnet"}}]
     logged = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=DINNER))
     assert sources(logged) == {"mcp"}

@@ -13,7 +13,7 @@ from holdup.chain.errors import VaultError
 from holdup.chain.fake import FakeVault, SimClock
 from holdup.config import offline_settings
 from holdup.engine import Engine
-from holdup.models import Finding, Hold, PaymentContext, Reason, Verdict
+from holdup.models import Finding, Hold, HoldStatus, PaymentContext, Reason, Verdict
 from holdup.runtime import offline_vault
 from holdup.store import Store
 
@@ -237,3 +237,128 @@ async def test_when_the_chain_refuses_the_brake_the_user_is_warned(clock, setup,
     await held_payment(clock, setup, Scripted(brake(Reason.MULE_PATTERN, HOUR)), None)
     text = notifier.last()
     assert "We could not add time on-chain" in text and "Cancel now if you are not sure." in text
+
+
+# ----------------------------------------------------------------------
+# a brake that cannot reach the chain is retried, never dropped
+# ----------------------------------------------------------------------
+
+
+class FlakyChain:
+    """``extend_hold`` fails like an unreachable RPC node while ``down`` is set."""
+
+    def __init__(self, vault: FakeVault, monkeypatch: Any) -> None:
+        self.down = True
+        self.failures = 0
+        real = vault.extend_hold
+
+        async def extend_hold(*args: Any) -> Any:
+            if self.down:
+                self.failures += 1
+                raise VaultError(E.E_RPC, "RPC timeout")
+            return await real(*args)
+
+        monkeypatch.setattr(vault, "extend_hold", extend_hold)
+
+
+async def test_a_brake_that_fails_on_chain_is_retried_and_the_keeper_waits(clock, setup, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The review's scenario: the RPC node is down while both brakes are sent. Before, nothing retried
+    them and the keeper released the payment at its original time."""
+    vault, _, notifier = setup
+    chain = FlakyChain(vault, monkeypatch)
+    fast = Scripted(brake(Reason.NEW_ACCOUNT, HOUR))
+    full = Scripted(brake(Reason.IMPERSONATION, 72 * HOUR, "triage"))
+    engine, hold = await held_payment(clock, setup, fast, full)
+    assert chain.failures == 2  # the quick brake and the full verdict
+    assert (await current(engine, hold)).extensions == 0
+    warnings = [text for _, text in notifier.sent if "could not add time on-chain" in text]
+    assert len(warnings) == 1 and "HoldUp will not release it meanwhile" in warnings[0]
+
+    keeper = engine.make_keeper()
+    clock.advance(hold.release_at_ms - clock() + 5_000)  # due, and the node is still down
+    await keeper.run_once()
+    await engine.wait_idle()
+    assert (await current(engine, hold)).status == HoldStatus.HELD
+    assert chain.failures == 3
+
+    chain.down = False
+    clock.advance(5_000)
+    await keeper.run_once()
+    await engine.wait_idle()
+    fresh = await current(engine, hold)
+    assert (fresh.status, fresh.extensions) == (HoldStatus.HELD, 1)
+    assert fresh.reason_bits == Reason.IMPERSONATION  # the newest verdict replaced the quick brake
+    assert fresh.release_at_ms == hold.created_ms + 72 * HOUR
+    assert notifier.last().startswith("Brakes on - held until")
+    await keeper.run_once()
+    await engine.wait_idle()
+    assert (await current(engine, hold)).status == HoldStatus.HELD
+    assert (await engine.stats())["brakes"] == 1
+
+
+async def test_a_pending_brake_ends_when_the_payment_is_cancelled(clock, setup, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    vault, _, _ = setup
+    chain = FlakyChain(vault, monkeypatch)
+    engine, hold = await held_payment(clock, setup, Scripted(brake(Reason.MULE_PATTERN, HOUR)), None)
+    assert engine.brake_pending(hold)
+    await engine.cancel("tg:1", hold.id)
+    assert not engine.brake_pending(hold)
+    await engine.tick()
+    await engine.wait_idle()
+    assert chain.failures == 1
+
+
+async def test_a_pending_brake_gives_up_at_the_maximum_hold(clock, setup, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """Past created + max hold no extension is possible, so the keeper may release again."""
+    vault, _, _ = setup
+    FlakyChain(vault, monkeypatch)
+    engine, hold = await held_payment(clock, setup, Scripted(brake(Reason.MULE_PATTERN, HOUR)), None)
+    keeper = engine.make_keeper()
+    clock.advance(72 * HOUR)
+    await keeper.run_once()
+    await engine.wait_idle()
+    assert (await current(engine, hold)).status == HoldStatus.HELD
+    assert not engine.brake_pending(hold)
+    await keeper.run_once()
+    assert (await current(engine, hold)).status == HoldStatus.RELEASED
+
+
+async def test_a_failed_fail_closed_extension_is_retried_too(clock, setup, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    vault, _, notifier = setup
+    chain = FlakyChain(vault, monkeypatch)
+    engine, hold = await held_payment(clock, setup, Scripted(CLEAN), Scripted(RuntimeError("gateway down")))
+    assert engine.brake_pending(hold) and chain.failures == 1
+    chain.down = False
+    await engine.tick()
+    await engine.wait_idle()
+    fresh = await current(engine, hold)
+    assert fresh.extensions >= 1 and fresh.reason_bits & Reason.AI_UNAVAILABLE
+    assert not engine.brake_pending(hold)
+    assert any(text.startswith("Brakes on - held until") for _, text in notifier.sent)
+
+
+# ----------------------------------------------------------------------
+# one brake per decision
+# ----------------------------------------------------------------------
+
+
+async def test_a_full_check_that_adds_nothing_does_not_brake_twice(clock, setup) -> None:  # type: ignore[no-untyped-def]
+    """The rules flag, the full check confirms only that: one extension and one "Brakes on" (review finding)."""
+    rules = brake(Reason.NEW_ACCOUNT, HOUR)
+    engine, hold = await held_payment(clock, setup, Scripted(rules), Scripted(rules))
+    fresh = await current(engine, hold)
+    assert fresh.extensions == 1
+    texts = [text for _, text in setup[2].sent]
+    assert sum(text.startswith("Brakes on") for text in texts) == 1
+    assert texts[-1].startswith("Full check finished: no further warning signs.")
+    stats = await engine.stats()
+    assert (stats["provisional_brakes"], stats["brakes"]) == (1, 0)
+
+
+async def test_new_reasons_that_cannot_extend_are_still_reported_but_not_counted(clock, setup) -> None:  # type: ignore[no-untyped-def]
+    full = Verdict(0, True, HOUR, [Finding(Reason.NEW_ACCOUNT, "new", "rules"), Finding(Reason.URGENCY, "rush", "triage")])
+    engine, hold = await held_payment(clock, setup, Scripted(brake(Reason.NEW_ACCOUNT, HOUR)), Scripted(full))
+    assert (await current(engine, hold)).extensions == 1  # the target did not move, so nothing was sent
+    last = setup[2].last()
+    assert last.startswith("Brakes on - held until") and "Pressure or an artificial deadline" in last
+    assert (await engine.stats())["brakes"] == 0

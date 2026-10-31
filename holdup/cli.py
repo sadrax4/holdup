@@ -48,6 +48,17 @@ def _offline(settings: Settings) -> bool:
     return settings.network == "offline"
 
 
+def _runtime(settings: Settings, **kwargs: Any) -> Any:
+    """``build_runtime``, with a configuration problem reported in one line instead of a traceback."""
+    from .runtime import build_runtime
+
+    try:
+        return build_runtime(settings, **kwargs)
+    except ValueError as exc:
+        print(f"holdup: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
 def missing_credentials(settings: Settings) -> list[str]:
     """What a live command still needs, as ``NAME (why)`` lines; empty when nothing is missing."""
     return [f"{name} ({why})" for attr, name, why in LIVE_NEEDS if not getattr(settings, attr)]
@@ -77,7 +88,6 @@ def _explain_missing(settings: Settings, command: str) -> int:
 
 def _run_story(args: argparse.Namespace, offline_story: Callable[..., Any], story: Callable[..., Any]) -> int:
     from .demo import Transcript, TranscriptNotifier
-    from .runtime import build_runtime
 
     settings = _settings_for(args)
     if _offline(settings):
@@ -87,11 +97,16 @@ def _run_story(args: argparse.Namespace, offline_story: Callable[..., Any], stor
         return code
     if args.rules_only:
         settings.otari_mode = "off"
+    elif not settings.otari_api_key and not os.environ.get("OTARI_MODE"):
+        # Without a key the story replays its recorded AI answers, one scenario per demo payee
+        # (a real network otherwise runs the rules alone).
+        settings.otari_mode = "replay"
 
     async def live() -> None:
         transcript = Transcript()
         notifier = TranscriptNotifier(transcript)
-        runtime = build_runtime(settings, notifier=notifier, web=False)
+        # The story chooses the recorded answers for its own payees, so replay is allowed here.
+        runtime = _runtime(settings, notifier=notifier, web=False, allow_replay=True)
         try:
             await story(runtime, transcript, notifier)
         finally:
@@ -348,14 +363,13 @@ class Console:
 def cmd_chat(args: argparse.Namespace) -> int:
     from .chain.fake import SimClock
     from .demo import Transcript, TranscriptNotifier
-    from .runtime import build_runtime
 
     settings = _settings_for(args)
     if not _offline(settings) and (code := _explain_missing(settings, "chat")):
         return code
     notifier = TranscriptNotifier(Transcript())
     clock = SimClock() if _offline(settings) else None
-    runtime = build_runtime(settings, notifier=notifier, clock=clock, web=False)
+    runtime = _runtime(settings, notifier=notifier, clock=clock, web=False)
 
     async def loop() -> None:
         console = Console(runtime, notifier)
@@ -383,8 +397,6 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 
 def cmd_keeper(args: argparse.Namespace) -> int:
-    from .runtime import build_runtime
-
     settings = _settings_for(args)
     if _offline(settings):
         print("The keeper releases holds on a real network; offline holds live in memory. "
@@ -392,7 +404,7 @@ def cmd_keeper(args: argparse.Namespace) -> int:
         return 2
     if code := _explain_missing(settings, "keeper"):
         return code
-    runtime = build_runtime(settings, web=False)
+    runtime = _runtime(settings, web=False)
     print(f"Keeper running on {settings.network} every {args.interval} s (Ctrl-C to stop).")
 
     async def run() -> None:
@@ -409,8 +421,6 @@ def cmd_keeper(args: argparse.Namespace) -> int:
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
-    from .runtime import build_runtime
-
     settings = _settings_for(args)
     if not _offline(settings) and (code := _explain_missing(settings, "serve")):
         return code
@@ -418,7 +428,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         # The offline world starts from scratch on every restart anyway, so a server that may be
         # reachable by others signs its cookies, export links and hold tokens with a fresh secret.
         settings.secret = secrets.token_urlsafe(32)
-    runtime = build_runtime(settings)
+    runtime = _runtime(settings)
     where = "offline, in-memory vault" if _offline(settings) else settings.network
     bot = "on" if runtime.bot is not None else "off (TELEGRAM_BOT_TOKEN is not set)"
     print(f"HoldUp on http://{args.host}:{args.port} ({where}; checks: {runtime.checks}; Telegram {bot}).")

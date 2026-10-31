@@ -114,9 +114,18 @@ fn token_deposit_for_an_unknown_account_is_returned() {
 fn malformed_transfer_messages_are_rejected() {
     let mut sim = Sim::new();
     sim.register(&alice(), 0);
-    for msg in ["hello", "{}", r#"{"credit_to":"NOT VALID"}"#, r#"{"credit_to":"alice.holdup.near","x":1}"#] {
+    sim.register(&bob(), 0);
+    for msg in [
+        "hello",
+        "{}",
+        r#"{"credit_to":"NOT VALID"}"#,
+        r#"{"credit_to":"alice.holdup.near","x":1}"#,
+        // A duplicate key is refused, not resolved to either account (FakeVault does the same).
+        r#"{"credit_to":"nobody.near","credit_to":"bob.holdup.near"}"#,
+    ] {
         assert_error(sim.ft_deposit(&husd(), &alice(), HUSD, msg), "E_BAD_MSG");
     }
+    assert_eq!(sim.husd_of(&bob()), 0);
     assert_eq!(sim.husd_of(&alice()), 0);
 }
 

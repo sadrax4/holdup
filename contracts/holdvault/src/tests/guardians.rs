@@ -30,7 +30,7 @@ fn the_first_guardian_takes_effect_at_once() {
         (Some("guardian"), Some("carol.holdup.near"))
     );
     // The money goes back to the sender, never to the guardian.
-    assert_eq!(sim.near_of(&alice()), 20 * NEAR);
+    assert_eq!(sim.near_of(&alice()), 20 * NEAR - ENTRY_FEE - HOLD_FEE);
     assert_eq!(sim.near_of(&carol()), 0);
     // The sender keeps the right to cancel their own holds.
     sim.send(&alice(), &shop(), "near", NEAR).unwrap();
@@ -110,7 +110,7 @@ fn a_guardian_only_guards_their_own_user() {
     let mut sim = funded();
     sim.register(&bob(), NEAR);
     sim.set_guardian(&alice(), Some(&carol())).unwrap();
-    sim.send(&bob(), &shop(), "near", NEAR).unwrap();
+    sim.send(&bob(), &shop(), "near", NEAR / 2).unwrap();
     assert_error(sim.guardian_cancel(&carol(), 0), "E_NOT_GUARDIAN");
 }
 
@@ -121,4 +121,68 @@ fn guardian_rules() {
     assert_error(sim.set_guardian(&alice(), Some(&vault())), "E_BAD_GUARDIAN");
     assert_error(sim.set_guardian(&mallory(), Some(&carol())), "E_NOT_REGISTERED");
     assert_eq!(guardian_of(&sim, &alice()), None);
+}
+
+/// The review's attack: the key that signs for Alice (held by the HoldUp server) is stolen. It
+/// removes the guardian, waits out the delay and sends everything to a payee nobody can cancel
+/// for her. The guardian in charge vetoes the removal, so the payments stay cancellable.
+#[test]
+fn the_guardian_vetoes_a_removal_signed_with_a_stolen_key() {
+    let mut sim = funded();
+    sim.set_guardian(&alice(), Some(&carol())).unwrap();
+    sim.set_guardian(&alice(), None).unwrap();
+    let view = sim.veto(&carol(), &alice()).unwrap();
+    assert_eq!((view.guardian, view.pending_guardian), (Some(carol()), None));
+    let event = sim.event("guardian_change_vetoed");
+    assert_eq!(event["owner"], "alice.holdup.near");
+    assert_eq!(event["guardian"], "carol.holdup.near");
+    assert_eq!(event["vetoed"], Value::Null);
+
+    sim.advance(GUARDIAN_DELAY_MS);
+    assert_eq!(guardian_of(&sim, &alice()), Some(carol()));
+    let token = sim.send(&alice(), &mallory(), husd().as_str(), 1_000 * HUSD).unwrap();
+    let everything = sim.near_of(&alice()) - HOLD_FEE;
+    let near = sim.send(&alice(), &mallory(), "near", everything).unwrap();
+    assert!(sim.guardian_cancel(&carol(), token.id.0).is_ok());
+    assert!(sim.guardian_cancel(&carol(), near.id.0).is_ok());
+    assert_eq!(sim.husd_of(&alice()), 1_000 * HUSD);
+    assert_eq!(sim.near_of(&alice()), everything);
+}
+
+#[test]
+fn only_the_guardian_in_charge_can_veto_a_pending_change() {
+    let mut sim = funded();
+    assert_error(sim.veto(&carol(), &alice()), "E_NOT_GUARDIAN");
+    assert_error(sim.veto(&carol(), &mallory()), "E_NOT_REGISTERED");
+    sim.set_guardian(&alice(), Some(&carol())).unwrap();
+    assert_error(sim.veto(&carol(), &alice()), "E_BAD_GUARDIAN");
+
+    sim.set_guardian(&alice(), Some(&dave())).unwrap();
+    for caller in [alice(), dave(), mallory(), oracle(), vault()] {
+        assert_error(sim.veto(&caller, &alice()), "E_NOT_GUARDIAN");
+    }
+    // Once the delay has passed the change has happened, and there is nothing left to veto.
+    sim.advance(GUARDIAN_DELAY_MS);
+    assert_error(sim.veto(&carol(), &alice()), "E_NOT_GUARDIAN");
+    assert_error(sim.veto(&dave(), &alice()), "E_BAD_GUARDIAN");
+    assert_eq!(guardian_of(&sim, &alice()), Some(dave()));
+}
+
+#[test]
+fn after_a_veto_the_owner_can_ask_again() {
+    let mut sim = funded();
+    sim.set_guardian(&alice(), Some(&carol())).unwrap();
+    sim.set_guardian(&alice(), Some(&dave())).unwrap();
+    sim.advance(GUARDIAN_DELAY_MS / 2);
+    sim.veto(&carol(), &alice()).unwrap();
+    assert_eq!(sim.event("guardian_change_vetoed")["vetoed"], "dave.near");
+    sim.advance(GUARDIAN_DELAY_MS);
+    assert_eq!(guardian_of(&sim, &alice()), Some(carol()));
+
+    // A new request waits the full delay again; this time Carol lets it happen.
+    let asked_at = sim.now_ms;
+    let view = sim.set_guardian(&alice(), Some(&dave())).unwrap();
+    assert_eq!(view.pending_guardian.unwrap().effective_ms, U64(asked_at + GUARDIAN_DELAY_MS));
+    sim.now_ms = asked_at + GUARDIAN_DELAY_MS;
+    assert_eq!(guardian_of(&sim, &alice()), Some(dave()));
 }

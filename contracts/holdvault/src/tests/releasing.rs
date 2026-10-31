@@ -50,8 +50,8 @@ fn release_to_a_vault_user_is_internal() {
     assert_eq!(released.settled_ms, Some(U64(START_MS + HOLD_MS)));
     assert!(sim.receipts().is_empty(), "no money leaves the vault");
     assert_eq!(sim.near_of(&bob()), 3 * NEAR);
-    assert_eq!(sim.near_of(&alice()), 17 * NEAR);
-    assert_eq!(sim.near_liabilities(), 20 * NEAR);
+    assert_eq!(sim.near_of(&alice()), 17 * NEAR - HOLD_FEE);
+    assert_eq!(sim.near_liabilities(), 20 * NEAR - HOLD_FEE);
     let event = sim.event("hold_released");
     assert_eq!(event["internal"], true);
     assert_eq!(event["payee"], "bob.holdup.near");
@@ -96,7 +96,7 @@ fn near_release_to_an_outside_account() {
 
     // The amount left the account balance together with the liability.
     assert_eq!(sim.balance, balance_before - 3 * NEAR);
-    assert_eq!(sim.near_liabilities(), 17 * NEAR);
+    assert_eq!(sim.near_liabilities(), 17 * NEAR - HOLD_FEE);
     sim.assert_solvent();
     assert_error(sim.release(&mallory(), 0), "E_HOLD_NOT_ACTIVE");
 
@@ -106,7 +106,7 @@ fn near_release_to_an_outside_account() {
     assert_eq!(settled.settled_ms, Some(U64(START_MS + HOLD_MS + 1_000)));
     assert_eq!(sim.event("hold_released")["internal"], false);
     assert_eq!(sim.stats(&shop()).released, 1);
-    assert_eq!(sim.near_of(&alice()), 17 * NEAR);
+    assert_eq!(sim.near_of(&alice()), 17 * NEAR - HOLD_FEE);
     assert_eq!(sim.view(|v| v.settlement_reserve), 0);
     sim.assert_solvent();
     assert_error(sim.on_payout(0, ok()), "E_HOLD_NOT_ACTIVE");
@@ -121,8 +121,8 @@ fn failed_near_payout_refunds_the_sender() {
     let failed_hold = sim.on_payout(0, failed()).unwrap();
     assert_eq!(failed_hold.status, HoldStatus::Failed);
     assert!(failed_hold.settled_ms.is_some());
-    assert_eq!(sim.near_of(&alice()), 20 * NEAR);
-    assert_eq!(sim.near_liabilities(), 20 * NEAR);
+    assert_eq!(sim.near_of(&alice()), 20 * NEAR - HOLD_FEE);
+    assert_eq!(sim.near_liabilities(), 20 * NEAR - HOLD_FEE);
     let event = sim.event("hold_failed");
     assert_eq!(event["refunded_to"], "alice.holdup.near");
     assert_eq!(event["amount"], (3 * NEAR).to_string());
@@ -131,7 +131,7 @@ fn failed_near_payout_refunds_the_sender() {
     sim.refund(3 * NEAR);
     sim.assert_solvent();
     // The refunded money can be sent again.
-    assert!(sim.send(&alice(), &carol(), "near", 20 * NEAR).is_ok());
+    assert!(sim.send(&alice(), &carol(), "near", 20 * NEAR - 2 * HOLD_FEE).is_ok());
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn token_release_registers_the_payee_then_transfers() {
     let deposits = FT_STORAGE_DEPOSIT.as_yoctonear() + 1;
     assert_eq!(sim.balance, balance_before - deposits);
     assert_eq!(sim.view(|v| v.settlement_reserve), reserve_before - deposits);
-    assert_eq!(sim.near_liabilities(), 20 * NEAR);
+    assert_eq!(sim.near_liabilities(), 20 * NEAR - HOLD_FEE);
     sim.assert_solvent();
 
     sim.on_payout(0, ok()).unwrap();
@@ -187,7 +187,7 @@ fn failed_token_payout_refunds_the_sender() {
     sim.release(&mallory(), 0).unwrap();
     assert_eq!(sim.on_payout(0, failed()).unwrap().status, HoldStatus::Failed);
     assert_eq!(sim.husd_of(&alice()), 1_000 * HUSD);
-    assert_eq!(sim.near_liabilities(), 20 * NEAR);
+    assert_eq!(sim.near_liabilities(), 20 * NEAR - HOLD_FEE);
     assert_eq!(sim.event_names(), ["hold_failed"]);
     sim.assert_solvent();
 }

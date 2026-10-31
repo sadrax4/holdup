@@ -159,8 +159,9 @@ class PayeeIntel:
         baseline = (self._table.get(account_id) or {}).get("reputation") or {}
         for key in ("holds", "flagged", "cancelled", "cancelled_after_flag", "released"):
             record[key] += int(baseline.get(key, 0))
-        if record["last_flag_ms"] is None and baseline.get("last_flag_ms") is not None:
-            record["last_flag_ms"] = int(baseline["last_flag_ms"])
+        for key in ("last_flag_ms", "last_report_ms"):
+            if record[key] is None and baseline.get(key) is not None:
+                record[key] = int(baseline[key])
         return record
 
     # ------------------------------------------------------------------

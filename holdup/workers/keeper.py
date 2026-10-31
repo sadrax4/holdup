@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 OnSettled = Callable[[Hold, TxResult], Awaitable[None]]
 OnTick = Callable[[], Awaitable[object]]
+Skip = Callable[[Hold], bool]
 
 
 @dataclass
@@ -38,12 +39,14 @@ class Keeper:
         *,
         on_settled: OnSettled | None = None,
         on_tick: OnTick | None = None,
+        skip: Skip | None = None,
         interval_s: float = 5.0,
         batch: int = 50,
     ) -> None:
         self.vault = vault
         self.on_settled = on_settled
         self.on_tick = on_tick
+        self.skip = skip  # holds not to release yet, e.g. while a brake for them is being retried
         self.interval_s = interval_s
         self.batch = batch
 
@@ -56,6 +59,9 @@ class Keeper:
             log.warning("keeper could not list due holds: %s", exc)
             due = []
         for hold in due:
+            if self.skip is not None and self.skip(hold):
+                log.info("keeper leaves hold %s for now: a brake for it is still being retried", hold.id)
+                continue
             try:
                 tx = await self.vault.release(hold.id)
             except VaultError as exc:

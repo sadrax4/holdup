@@ -63,6 +63,10 @@ pub struct ConfigView {
     pub instant_caps: BTreeMap<String, U128>,
     pub max_active_holds: u32,
     pub registration_fee: U128,
+    /// `HOLD_STORAGE_FEE`: yoctoNEAR a sender pays from their NEAR balance for each hold.
+    pub hold_storage_fee: U128,
+    /// `ENTRY_STORAGE_FEE`: yoctoNEAR for each new trusted payee and each guardian change.
+    pub entry_storage_fee: U128,
     pub version: String,
 }
 
@@ -168,6 +172,8 @@ impl Config {
                 .collect(),
             max_active_holds: self.max_active_holds,
             registration_fee: U128(self.registration_fee),
+            hold_storage_fee: U128(crate::HOLD_STORAGE_FEE.as_yoctonear()),
+            entry_storage_fee: U128(crate::ENTRY_STORAGE_FEE.as_yoctonear()),
             version: crate::VERSION.to_owned(),
         }
     }

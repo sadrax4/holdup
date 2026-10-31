@@ -14,6 +14,11 @@ response marked ``waf`` is answered with the firewall's HTML 403 whenever the
 request text still contains a backtick or an ASCII quote, as the hosted CDN
 does (otari issue #2704).
 
+Every replayed answer names its provider as ``<provider> (recorded)``, so the
+steps, the /why page and the evidence hashed on-chain all say it was not a
+live call. ``{base_url}`` in a recording stands for the scheme and host of the
+first link the request lists, so recorded citations point where the message did.
+
 Fixture files carry ``"synthetic": true`` when they were written by hand from
 the documented shapes rather than recorded from the live gateway.
 """
@@ -22,12 +27,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -44,6 +51,9 @@ WAF_PAGE = (
     b"<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n</body>\r\n</html>\r\n"
 )
 _WAF_CHARS = ("\u0060", "'", '"')
+RECORDED = "recorded"
+DEFAULT_BASE_URL = "http://127.0.0.1:8000"
+_LINKS_FACT = re.compile(r"^- links in the message: (.+)$", re.MULTILINE)
 
 ScenarioResolver = Callable[..., str]
 
@@ -96,10 +106,12 @@ class ReplayTransport(httpx.AsyncBaseTransport):
         fixtures_dir: Path = FIXTURES_DIR,
         default: str = DEFAULT_SCENARIO,
         strict: bool = False,
+        base_url: str = "",
     ) -> None:
         self.scenario = scenario
         self.fixtures_dir = Path(fixtures_dir)
         self.default = default
+        self.base_url = base_url.rstrip("/") or DEFAULT_BASE_URL  # for requests that list no link
         self.strict = strict  # refuse requests whose shape differs from what the fixture recorded
         # The latest requests and shape mismatches, bounded for long-running offline servers.
         self.requests: deque[Replayed] = deque(maxlen=500)
@@ -184,20 +196,33 @@ class ReplayTransport(httpx.AsyncBaseTransport):
             problems.append(f"expected stream={expect['stream']}")
         return problems
 
-    @staticmethod
-    def _render(recorded: dict[str, Any], body: dict[str, Any], scenario: str, step: str) -> httpx.Response:
+    def _base_url(self, body: dict[str, Any]) -> str:
+        """Scheme and host of the first link in the request's payment facts."""
+        for text in _texts(body):
+            if match := _LINKS_FACT.search(text):
+                for link in match.group(1).split(","):
+                    parts = urlsplit(link.strip())
+                    if parts.scheme in ("http", "https") and parts.netloc:
+                        return f"{parts.scheme}://{parts.netloc}"
+        return self.base_url
+
+    def _render(self, recorded: dict[str, Any], body: dict[str, Any], scenario: str, step: str) -> httpx.Response:
         status = int(recorded.get("status", 200))
         headers = {k.lower(): _header_value(v) for k, v in (recorded.get("headers") or {}).items()}
+        provider = headers.get("otari-provider")
+        headers["otari-provider"] = f"{provider} ({RECORDED})" if provider else RECORDED
         if status != 200:
             payload = recorded.get("body", {"detail": "recorded error"})
             if isinstance(payload, str):
                 headers.setdefault("content-type", "text/plain")
                 return httpx.Response(status, headers=headers, content=payload.encode("utf-8"))
             return httpx.Response(status, headers=headers, json=payload)
+        base_url = self._base_url(body)
         content = recorded.get("content", "")
         if not isinstance(content, str):
             content = json.dumps(content, ensure_ascii=False)
-        calls = list(recorded.get("otari_tool_calls") or [])
+        content = content.replace("{base_url}", base_url)
+        calls = json.loads(json.dumps(recorded.get("otari_tool_calls") or []).replace("{base_url}", base_url))
         usage = recorded.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         finish = recorded.get("finish_reason", "stop")
         base = {
@@ -247,7 +272,12 @@ def replay_client(
     strict: bool = False,
 ) -> OtariClient:
     """An ``OtariClient`` whose requests never leave the process."""
-    transport = ReplayTransport(scenario_resolver, fixtures_dir=fixtures_dir or FIXTURES_DIR, strict=strict)
+    transport = ReplayTransport(
+        scenario_resolver,
+        fixtures_dir=fixtures_dir or FIXTURES_DIR,
+        strict=strict,
+        base_url=settings.fixture_base_url or settings.public_base_url,
+    )
     client = OtariClient(settings, httpx.AsyncClient(transport=transport), api_key="replay", offline=True)
     client.transport = transport
     return client
