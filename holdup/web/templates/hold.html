@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% from "_macros.html" import reason_list, tags, tx_link, copy_block %}
+{% set h = view.hold %}
+{% block title %}Payment #{{ h.id }}: {{ view.status }} - HoldUp{% endblock %}
+{% block description %}{{ view.headline }}: {{ view.status }}.{% endblock %}
+{% block head %}<meta name="robots" content="noindex">{% endblock %}
+{% block main %}
+<article class="hold" data-hold-poll="{{ h.id }}" data-signature="{{ poll_signature }}"{% if h.status.value in ("held", "releasing") %} data-active{% endif %}>
+  <header class="hold-head">
+    <p class="eyebrow">Payment #{{ h.id }}</p>
+    <div class="hold-title">
+      <h1>{{ view.amount }} <span class="arrow" aria-hidden="true">&rarr;</span> <span class="mono break">{{ h.payee }}</span></h1>
+      <span class="badge badge-large tone-{{ view.tone }}">{{ view.status }}</span>
+    </div>
+    <p class="muted">From <span class="mono break">{{ h.sender }}</span>{% if view.account_urls.get(h.sender) %} &middot; <a href="{{ view.account_urls[h.sender] }}" rel="noopener noreferrer" target="_blank">explorer</a>{% endif %}</p>
+  </header>
+
+  <section class="card release tone-{{ view.tone }}">
+    {% if h.active %}
+    <p class="release-when">Releases at <time datetime="{{ h.release_at_ms|iso }}">{{ h.release_at_ms|utc(now_ms) }}</time></p>
+    <p class="countdown" data-countdown data-target-ms="{{ h.release_at_ms }}" data-now-ms="{{ now_ms }}">in {{ (h.release_at_ms - now_ms)|duration }}</p>
+    <p class="muted small">Only the sender or their guardian can cancel. Nobody can release it early.</p>
+    {% else %}
+    <p class="release-when">{{ view.release_text }}</p>
+    {% endif %}
+    <div class="hold-length">
+      <div class="hold-length-labels"><span>Hold length {{ view.hold_length }}</span><span>cap {{ view.cap }}</span></div>
+      <progress max="100" value="{{ view.progress }}" aria-label="Hold length compared with the cap">{{ view.progress }}%</progress>
+      <p class="small muted">New payees wait {{ view.base_wait }}. Checks can only add time, up to {{ view.cap }} after the payment.</p>
+    </div>
+  </section>
+
+  {% if view.reasons %}
+  <section class="section">
+    <h2>Why it is held</h2>
+    {{ reason_list(view.reasons) }}
+    <p><a class="more" href="/why/{{ h.id }}">Every check step: models, providers, fallbacks and cost</a></p>
+  </section>
+  {% elif h.active %}
+  <section class="section">
+    <h2>Checks</h2>
+    <p>No warning signs so far. New payees always wait while the checks run, and checks can only add time.</p>
+    {% if steps %}<p><a class="more" href="/why/{{ h.id }}">See every check step</a></p>{% endif %}
+  </section>
+  {% endif %}
+
+  <section class="section">
+    <h2>Timeline</h2>
+    <ol class="timeline">
+      {% for entry in view.timeline %}
+      <li class="tl tone-{{ entry.tone }}">
+        <div class="tl-head">
+          <span class="tl-title">{{ entry.title }}</span>
+          {% if entry.when_ms %}<time class="tl-time" datetime="{{ entry.when_ms|iso }}">{{ entry.when_ms|utc(now_ms) }}</time>{% endif %}
+        </div>
+        <p class="tl-detail">{{ entry.detail }}</p>
+        {% if entry.reasons %}
+        <ul class="tl-reasons">
+          {% for row in entry.reasons %}<li>{{ row.label }} {{ tags(row.tags) }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+        {% if entry.evidence_hash %}<p class="small">Evidence sha256 <a class="mono break" href="{{ evidence_url }}?sha256={{ entry.evidence_hash }}">{{ entry.evidence_hash }}</a></p>{% endif %}
+        {% if entry.tx %}<p class="small">{{ tx_link(entry.tx) }}</p>{% endif %}
+      </li>
+      {% endfor %}
+    </ol>
+  </section>
+
+  <section class="section">
+    <h2>Verify the evidence</h2>
+    {% if view.evidence_onchain %}
+    <dl class="kv">
+      <dt>On-chain evidence_hash</dt><dd class="mono break">{{ view.evidence_onchain }}</dd>
+      <dt>sha256 of the published JSON</dt><dd class="mono break">{{ view.evidence_published or "not published on this server" }}</dd>
+    </dl>
+    {% if view.evidence_match %}
+    <p class="verdict verdict-ok">They match: the published reasons are exactly what the oracle recorded with the hold.</p>
+    {% elif view.evidence_match is false %}
+    <p class="verdict verdict-bad">They differ: the newest published evidence is not the one recorded on-chain.</p>
+    {% endif %}
+    <p class="small muted">Re-hash it yourself:</p>
+    {{ copy_block("curl -s " ~ evidence_url ~ " | sha256sum") }}
+    <p><a class="btn btn-small" href="{{ evidence_url }}">Evidence JSON</a></p>
+    {% else %}
+    <p class="muted">No brake was recorded for this payment, so there is no evidence hash on-chain.</p>
+    {% endif %}
+  </section>
+
+  {% if view.context_note %}<p class="note">{{ view.context_note }}</p>{% endif %}
+</article>
+{% endblock %}

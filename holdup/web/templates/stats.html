@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Stats - HoldUp{% endblock %}
+{% block main %}
+<p class="eyebrow">Stats</p>
+<h1>What HoldUp has done on this server</h1>
+<p class="lead">Counted from the server's own log of holds, brakes and checks. Every number links back to on-chain holds you can inspect one by one.</p>
+<div class="tiles">
+  {% for value, title, note in tiles %}
+  <div class="tile">
+    <span class="tile-value">{{ value }}</span>
+    <span class="tile-title">{{ title }}</span>
+    {% if note %}<span class="tile-note">{{ note }}</span>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+<p class="small muted">Also as JSON: <a href="/stats.json">/stats.json</a></p>
+{% endblock %}

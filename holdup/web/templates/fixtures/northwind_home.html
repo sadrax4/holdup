@@ -1,0 +1,28 @@
+{% extends "fixtures/base.html" %}
+{% block title %}Northwind Paper Co. - Office paper since 1998{% endblock %}
+{% block brand %}fixture northwind{% endblock %}
+{% block banner_text %}This page imitates a supplier's website for the HoldUp demo. Northwind Paper Co. is a made-up company, and this page collects nothing.{% endblock %}
+{% block body %}
+<header class="nw-top">
+  <span class="nw-logo" aria-hidden="true">N</span>
+  <span class="nw-name">Northwind Paper Co.</span>
+  <nav class="nw-nav"><a href="/fixtures/northwind">Home</a> <a href="/fixtures/northwind/invoices/NP-2291">Invoices</a></nav>
+</header>
+<main class="nw-main">
+  <section class="nw-hero">
+    <h1>Office paper, delivered since 1998.</h1>
+    <p>Copy paper, envelopes and print supplies for small offices, with next-day delivery.</p>
+  </section>
+  <section class="nw-card">
+    <h2>Paying us</h2>
+    <p>We accept USDC on NEAR at one account only:</p>
+    <p class="nw-account">{{ supplier_account }}</p>
+    <p><strong>Our payment details have not changed.</strong> We never change bank or wallet details by email or chat. If you get a message saying otherwise, do not pay it: call our accounts team first.</p>
+  </section>
+  <section class="nw-card">
+    <h2>Accounts team</h2>
+    <p>accounts@northwind-paper.example &middot; +1 555 0100 (fictional)</p>
+    <p>Recent invoice: <a href="/fixtures/northwind/invoices/NP-2291">NP-2291 (October)</a></p>
+  </section>
+</main>
+{% endblock %}

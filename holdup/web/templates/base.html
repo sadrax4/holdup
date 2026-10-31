@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}HoldUp{% endblock %}</title>
+  <meta name="description" content="{% block description %}HoldUp: Telegram payments on NEAR with scam brakes. New payees wait in a keyless vault, and the AI can only add time.{% endblock %}">
+  {% block head %}{% endblock %}
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css?v={{ asset_version }}">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <a class="brand" href="/" aria-label="HoldUp home">{% include "_logo.svg" %}<span>HoldUp</span></a>
+      <nav class="site-nav" aria-label="Main">
+        <a href="/console"{% if request.url.path == "/console" %} aria-current="page"{% endif %}>Console</a>
+        <a href="/prove"{% if request.url.path == "/prove" %} aria-current="page"{% endif %}>Proof</a>
+        <a href="/stats"{% if request.url.path == "/stats" %} aria-current="page"{% endif %}>Stats</a>
+      </nav>
+    </div>
+  </header>
+  <main id="main" class="wrap {% block main_class %}page{% endblock %}">
+    {% block main %}{% endblock %}
+  </main>
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <span>Give AI the brakes, not the keys.</span>
+      <span class="footer-net"><span class="dot dot-{{ network }}" aria-hidden="true"></span>{{ network_label }}</span>
+    </div>
+  </footer>
+  <script src="/static/page.js?v={{ asset_version }}" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ status }} - HoldUp{% endblock %}
+{% block head %}<meta name="robots" content="noindex">{% endblock %}
+{% block main %}
+<section class="error-page">
+  <p class="eyebrow">Error {{ status }}</p>
+  <h1>{{ message }}</h1>
+  <p><a class="btn" href="/">Home</a> <a class="btn btn-ghost" href="/console">Web console</a></p>
+</section>
+{% endblock %}

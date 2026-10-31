@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Web console - HoldUp{% endblock %}
+{% block description %}A web console that drives the same HoldUp engine as the Telegram bot.{% endblock %}
+{% block head %}<meta name="robots" content="noindex">{% endblock %}
+{% block main_class %}console-page{% endblock %}
+{% block main %}
+<section class="console" data-console data-invite="{{ invite }}">
+  <header class="console-head">
+    <div class="console-title">
+      <h1>Web console</h1>
+      <p class="small muted">Drives the same HoldUp engine as the Telegram bot{% if telegram %} <a href="https://t.me/{{ telegram }}">@{{ telegram }}</a>{% endif %}. {{ network_label }}.</p>
+    </div>
+    <div class="account" data-account hidden>
+      <span class="account-label">Your account</span>
+      <span class="mono break account-id" data-account-id></span>
+      <span class="account-balances" data-balances></span>
+    </div>
+  </header>
+
+  <div class="chat" data-chat>
+    <div class="welcome" data-welcome>
+      <p class="welcome-title">Try HoldUp without Telegram</p>
+      <p>Open a demo account funded with test money, forward a training sample, then pay it. Watch the brakes come on, and cancel.</p>
+      {% if invite %}<p class="callout tone-held">You were invited to be someone's guardian. Opening an account accepts the invite.</p>{% endif %}
+      <div class="welcome-row">
+        <label class="sr-only" for="console-name">Your name (optional)</label>
+        <input id="console-name" class="input" data-name maxlength="32" placeholder="Your name (optional)" autocomplete="nickname">
+        <button type="button" class="btn btn-primary" data-start>Open a demo account</button>
+      </div>
+      <p class="small muted" data-start-error hidden></p>
+    </div>
+    <ol class="messages" data-messages aria-live="polite" aria-label="Conversation"></ol>
+  </div>
+
+  <div class="chips" data-chips role="toolbar" aria-label="Quick actions">
+    {% for chip in story_chips %}<button type="button" class="chip{% if chip.action %} chip-sample{% endif %}"{% if chip.send %} data-send="{{ chip.send }}"{% else %} data-action="{{ chip.action }}"{% endif %} data-label="{{ chip.label }}" disabled>{{ chip.label }}</button>{% endfor %}
+    {% for chip in command_chips %}<button type="button" class="chip chip-command" data-send="{{ chip.send }}" data-label="{{ chip.label }}" disabled>{{ chip.label }}</button>{% endfor %}
+  </div>
+
+  <form class="composer" data-composer autocomplete="off">
+    <label class="sr-only" for="console-input">Message</label>
+    <textarea id="console-input" class="input" data-input rows="1" maxlength="8000" placeholder="Type a payment, paste a message, or /help" disabled></textarea>
+    <button type="submit" class="btn btn-primary" data-submit disabled>Send</button>
+  </form>
+</section>
+{% endblock %}
+{% block scripts %}<script src="/static/console.js?v={{ asset_version }}" defer></script>{% endblock %}

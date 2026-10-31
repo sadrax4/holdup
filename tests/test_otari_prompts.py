@@ -23,8 +23,17 @@ STEP_CONTRACTS: dict[str, type[BaseModel]] = {
 }
 STEP_PROMPTS = ("triage", "vision", "investigator", "reviewer", "gate")
 # Phrases a guardrail or a firewall could read as an attack if they sat in our own instructions.
-TRIGGERS = ("ignore previous", "ignore all", "pre-approved", "preapproved", "mark it safe", "note to any ai",
-            "system prompt", "jailbreak", " or 1=1")
+TRIGGERS = (
+    "ignore previous",
+    "ignore all",
+    "pre-approved",
+    "preapproved",
+    "mark it safe",
+    "note to any ai",
+    "system prompt",
+    "jailbreak",
+    " or 1=1",
+)
 
 
 @pytest.mark.parametrize("name", prompts.PROMPT_NAMES)
@@ -88,7 +97,9 @@ def _objects(schema: Any) -> list[dict[str, Any]]:
     return found
 
 
-@pytest.mark.parametrize("contract", [C.TriageResult, C.VisionResult, C.ReviewerResult, C.InvestigatorResult, C.PolicyVerdict])
+@pytest.mark.parametrize(
+    "contract", [C.TriageResult, C.VisionResult, C.ReviewerResult, C.InvestigatorResult, C.PolicyVerdict]
+)
 def test_strict_schemas_close_every_object(contract: type[BaseModel]) -> None:
     schema = C.strict_schema(contract)
     assert "$defs" not in schema and "$ref" not in str(schema)
@@ -100,27 +111,41 @@ def test_strict_schemas_close_every_object(contract: type[BaseModel]) -> None:
 
 def test_contracts_normalise_untidy_answers() -> None:
     triage = C.TriageResult.model_validate(
-        {"categories": ["Invoice", "made-up", "invoice"], "urgency": "true", "impersonation": False,
-         "secret_request": False, "details_changed": False, "injection_suspected": False, "impossible_returns": False,
-         "money_claims": [{"label": "total  due", "amount": "1,250.00", "currency": "USDC", "extra": 1}],
-         "risk": "HIGH", "summary": "x" * 500, "unexpected": True}
+        {
+            "categories": ["Invoice", "made-up", "invoice"],
+            "urgency": "true",
+            "impersonation": False,
+            "secret_request": False,
+            "details_changed": False,
+            "injection_suspected": False,
+            "impossible_returns": False,
+            "money_claims": [{"label": "total  due", "amount": "1,250.00", "currency": "USDC", "extra": 1}],
+            "risk": "HIGH",
+            "summary": "x" * 500,
+            "unexpected": True,
+        }
     )
     assert triage.categories == ["invoice"] and triage.urgency is True and triage.risk == "high"
     assert triage.money_claims[0].label == "total due" and len(triage.summary) == 200
 
     result = C.InvestigatorResult.model_validate(
-        {"findings": [
-            {"reason": "new_account", "tool": "near-intel.payee_profile"},
-            {"reason": "NOT_A_REASON", "tool": "web_search"},
-            {"reason": "PUBLIC_WARNING", "tool": "Otari Web Search", "citations": ["https://a.example", 7]},
-            {"reason": "PHISHING_LINK", "tool": "fetch_page"},
-            {"reason": "AMOUNT_MISMATCH", "tool": "python"},
-            {"reason": "URGENCY", "tool": "a hunch"},
-        ]}
+        {
+            "findings": [
+                {"reason": "new_account", "tool": "near-intel.payee_profile"},
+                {"reason": "NOT_A_REASON", "tool": "web_search"},
+                {"reason": "PUBLIC_WARNING", "tool": "Otari Web Search", "citations": ["https://a.example", 7]},
+                {"reason": "PHISHING_LINK", "tool": "fetch_page"},
+                {"reason": "AMOUNT_MISMATCH", "tool": "python"},
+                {"reason": "URGENCY", "tool": "a hunch"},
+            ]
+        }
     )
     assert [(f.reason, f.tool) for f in result.findings] == [
-        ("NEW_ACCOUNT", "near-intel"), ("PUBLIC_WARNING", "web_search"), ("PHISHING_LINK", "near-intel"),
-        ("AMOUNT_MISMATCH", "code_execution"), ("URGENCY", "message"),
+        ("NEW_ACCOUNT", "near-intel"),
+        ("PUBLIC_WARNING", "web_search"),
+        ("PHISHING_LINK", "near-intel"),
+        ("AMOUNT_MISMATCH", "code_execution"),
+        ("URGENCY", "message"),
     ]
     assert result.findings[1].citations == ["https://a.example", "7"]
     assert result.brake is False and result.amount_check is None

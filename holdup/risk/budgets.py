@@ -67,7 +67,9 @@ class OtariAdmin:
             body["metadata"] = dict(metadata)
         return await self.client.rest("POST", KEYS, json_body=body)
 
-    async def create_budget(self, name: str, max_usd: float, *, reset_alignment: str = "calendar_day") -> dict[str, Any]:
+    async def create_budget(
+        self, name: str, max_usd: float, *, reset_alignment: str = "calendar_day"
+    ) -> dict[str, Any]:
         """A USD budget that resets on a UTC calendar boundary (``calendar_day``, ``_week`` or ``_month``)."""
         body = {"name": name, "max_budget": max_usd, "reset_alignment": reset_alignment}
         return await self.client.rest("POST", BUDGETS, json_body=body)

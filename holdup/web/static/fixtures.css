@@ -1,0 +1,310 @@
+/* Training fixture pages: fictional brands for the HoldUp demo. */
+
+:root {
+  --fx-bg: #f4f6f8;
+  --fx-surface: #ffffff;
+  --fx-text: #14161a;
+  --fx-muted: #5d6470;
+  --fx-border: #dde2e8;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fx-bg: #0f1216;
+    --fx-surface: #181d23;
+    --fx-text: #e9ecf0;
+    --fx-muted: #a2aab6;
+    --fx-border: #2b333d;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  background: var(--fx-bg);
+  color: var(--fx-text);
+  line-height: 1.5;
+}
+
+a {
+  color: inherit;
+}
+
+.fixture-banner {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  width: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+  text-align: center;
+  color: #111111;
+  background: repeating-linear-gradient(-45deg, #ffd400 0 18px, #ffe45c 18px 36px);
+  border-bottom: 3px solid #111111;
+  font-size: 0.92rem;
+}
+
+.fixture-banner strong {
+  letter-spacing: 0.06em;
+}
+
+.fixture-foot {
+  text-align: center;
+  color: var(--fx-muted);
+  font-size: 0.85rem;
+  padding: 24px 16px 32px;
+}
+
+.fixture-index {
+  max-width: 720px;
+  margin: 32px auto;
+  padding: 0 16px;
+}
+
+.fixture-index li {
+  margin: 8px 0;
+}
+
+/* ---------- CoinHaven (fake exchange) ---------- */
+
+.coinhaven {
+  --ch-brand: #0b5cad;
+  --ch-brand-2: #12b5a5;
+}
+
+.ch-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  background: linear-gradient(90deg, var(--ch-brand), var(--ch-brand-2));
+  color: #ffffff;
+}
+
+.ch-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 7px var(--ch-brand-2);
+}
+
+.ch-name {
+  font-weight: 800;
+  font-size: 1.2rem;
+}
+
+.ch-secure {
+  margin-left: auto;
+  font-size: 0.85rem;
+  opacity: 0.9;
+}
+
+.ch-main {
+  max-width: 560px;
+  margin: 24px auto;
+  padding: 0 16px;
+}
+
+.ch-card {
+  background: var(--fx-surface);
+  border: 1px solid var(--fx-border);
+  border-radius: 16px;
+  padding: 22px 20px;
+}
+
+.ch-card h1 {
+  font-size: 1.4rem;
+  margin: 0 0 8px;
+}
+
+.ch-card h2 {
+  font-size: 1.05rem;
+  margin: 18px 0 4px;
+}
+
+.ch-alert {
+  display: inline-block;
+  background: #fde8e8;
+  color: #9b1c1c;
+  font-weight: 700;
+  font-size: 0.85rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
+.ch-timer {
+  font-size: 2rem;
+  font-weight: 800;
+  color: #c81e1e;
+  margin: 4px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-hint,
+.ch-alt,
+.ch-legal {
+  color: var(--fx-muted);
+  font-size: 0.9rem;
+}
+
+.ch-words {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 16px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.ch-words li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ch-num {
+  width: 22px;
+  text-align: right;
+  color: var(--fx-muted);
+  font-size: 0.85rem;
+}
+
+.ch-field {
+  flex: 1;
+  border: 1px solid var(--fx-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--fx-muted);
+  font-size: 0.85rem;
+  background: var(--fx-bg);
+}
+
+.ch-button {
+  text-align: center;
+  background: var(--ch-brand);
+  color: #ffffff;
+  font-weight: 700;
+  border-radius: 10px;
+  padding: 12px;
+  margin: 8px 0 12px;
+  opacity: 0.85;
+}
+
+.ch-legal {
+  text-align: center;
+  margin-top: 16px;
+}
+
+/* ---------- Northwind Paper Co. (fake supplier) ---------- */
+
+.northwind {
+  --nw-brand: #2f6b3a;
+}
+
+.nw-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  background: var(--fx-surface);
+  border-bottom: 1px solid var(--fx-border);
+}
+
+.nw-logo {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: var(--nw-brand);
+  color: #ffffff;
+  font-weight: 800;
+  font-family: Georgia, serif;
+}
+
+.nw-name {
+  font-weight: 700;
+  font-family: Georgia, serif;
+  font-size: 1.15rem;
+}
+
+.nw-nav {
+  margin-left: auto;
+  display: flex;
+  gap: 14px;
+  font-size: 0.92rem;
+}
+
+.nw-main {
+  max-width: 720px;
+  margin: 24px auto;
+  padding: 0 16px;
+  display: grid;
+  gap: 16px;
+}
+
+.nw-hero h1 {
+  font-family: Georgia, serif;
+  font-size: 1.8rem;
+  margin: 8px 0;
+}
+
+.nw-card {
+  background: var(--fx-surface);
+  border: 1px solid var(--fx-border);
+  border-radius: 12px;
+  padding: 18px 20px;
+}
+
+.nw-card h1,
+.nw-card h2 {
+  font-family: Georgia, serif;
+  margin: 0 0 8px;
+}
+
+.nw-account {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.nw-meta,
+.nw-small {
+  color: var(--fx-muted);
+  font-size: 0.9rem;
+}
+
+.nw-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0 16px;
+}
+
+.nw-table th,
+.nw-table td {
+  text-align: left;
+  padding: 8px 4px;
+  border-bottom: 1px solid var(--fx-border);
+}
+
+.nw-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.nw-table tfoot th,
+.nw-table tfoot td {
+  font-weight: 800;
+  border-bottom: 0;
+}

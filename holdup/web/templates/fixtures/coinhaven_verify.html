@@ -1,0 +1,27 @@
+{% extends "fixtures/base.html" %}
+{% block title %}CoinHaven - Verify your wallet{% endblock %}
+{% block brand %}fixture coinhaven{% endblock %}
+{% block banner_text %}This page imitates a phishing page for the HoldUp demo. CoinHaven is a made-up exchange, and this page collects nothing. Never type a recovery phrase into a website.{% endblock %}
+{% block body %}
+<header class="ch-top">
+  <span class="ch-logo" aria-hidden="true"></span>
+  <span class="ch-name">CoinHaven</span>
+  <span class="ch-secure">Secure Verification Center</span>
+</header>
+<main class="ch-main">
+  <section class="ch-card">
+    <p class="ch-alert">Unusual login detected on your account</p>
+    <h1>Verify your wallet to avoid suspension</h1>
+    <p>We noticed a sign-in from a new device. To keep your funds safe, your account will be <strong>frozen in 30 minutes</strong> unless you confirm ownership.</p>
+    <p class="ch-timer" aria-label="Time left">29:58</p>
+    <h2>Enter your 12-word recovery phrase</h2>
+    <p class="ch-hint">Our security team needs your recovery phrase to confirm you own this wallet.</p>
+    <ol class="ch-words">
+      {% for n in range(1, 13) %}<li><span class="ch-num">{{ n }}</span><span class="ch-field">word {{ n }}</span></li>{% endfor %}
+    </ol>
+    <p class="ch-button" aria-hidden="true">Verify wallet</p>
+    <p class="ch-alt">Can't verify now? Move your USDC to the protected wallet named in your support message. Transfers there are pre-approved by CoinHaven Support.</p>
+  </section>
+  <p class="ch-legal">CoinHaven Security &copy; 2026. All transfers to protected wallets are insured.</p>
+</main>
+{% endblock %}

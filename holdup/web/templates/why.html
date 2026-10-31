@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% from "_macros.html" import reason_list %}
+{% set h = why.hold %}
+{% block title %}Checks for payment #{{ h.id }} - HoldUp{% endblock %}
+{% block head %}<meta name="robots" content="noindex">{% endblock %}
+{% block main %}
+<p class="eyebrow"><a href="/h/{{ h.id }}">Payment #{{ h.id }}</a></p>
+<div class="hold-title">
+  <h1>What checked this payment</h1>
+  <span class="badge badge-large tone-{{ status[1] }}">{{ status[0] }}</span>
+</div>
+<p class="lead">Every step that looked at this payment, with the model, the provider that served it, fallbacks, attempts and cost, as reported by the gateway.</p>
+
+{% if reasons %}
+<section class="section">
+  <h2>Findings</h2>
+  {{ reason_list(reasons) }}
+</section>
+{% endif %}
+
+<section class="section">
+  <h2>Steps</h2>
+  {% if steps %}
+  <p class="totals">
+    <span>{{ totals.model_calls }} model call{{ "" if totals.model_calls == 1 else "s" }}</span>
+    {% if totals.models %}<span>{{ totals.models|join(", ") }}</span>{% endif %}
+    <span>{{ totals.fallbacks }} fallback{{ "" if totals.fallbacks == 1 else "s" }}</span>
+    <span>${{ "%.4f"|format(totals.cost_usd) }}</span>
+    {% if totals.latency_ms %}<span>{{ "{:,}".format(totals.latency_ms) }} ms</span>{% endif %}
+  </p>
+  <ol class="steps">
+    {% for step in steps %}
+    <li class="card step">
+      <div class="step-head">
+        <span class="step-name">{{ step.step }}</span>
+        {% if step.model %}<span class="mono break">{{ step.model }}</span>{% endif %}
+        {% if step.fallback == "yes" %}<span class="badge tone-held badge-small">fallback</span>{% endif %}
+        {% if step.error %}<span class="badge tone-bad badge-small">failed</span>{% endif %}
+      </div>
+      <dl class="kv kv-compact">
+        {% if step.provider %}<dt>Provider</dt><dd>{{ step.provider }}</dd>{% endif %}
+        {% if step.fallback %}<dt>Fallback</dt><dd>{{ step.fallback }}</dd>{% endif %}
+        {% if step.attempts %}<dt>Attempts</dt><dd>{{ step.attempts }}</dd>{% endif %}
+        {% if step.latency %}<dt>Latency</dt><dd>{{ step.latency }}</dd>{% endif %}
+        {% if step.cost %}<dt>Cost</dt><dd>{{ step.cost }}</dd>{% endif %}
+        {% if step.tools %}<dt>Tools</dt><dd>{{ step.tools|join(", ") }}</dd>{% endif %}
+        {% if step.guardrail %}<dt>Guardrail</dt><dd>{{ step.guardrail }}</dd>{% endif %}
+        {% if step.request_id %}<dt>Request id</dt><dd class="mono break">{{ step.request_id }}</dd>{% endif %}
+        {% if step.prompt %}<dt>Prompt sha256</dt><dd class="mono">{{ step.prompt }}</dd>{% endif %}
+        {% if step.error %}<dt>Error</dt><dd>{{ step.error }}</dd>{% endif %}
+      </dl>
+    </li>
+    {% endfor %}
+  </ol>
+  {% elif h.active %}
+  <p class="muted">No steps recorded yet. The checks may still be running.</p>
+  {% else %}
+  <p class="muted">No AI steps were recorded for this payment.</p>
+  {% endif %}
+</section>
+
+{% if mcp_calls %}
+<section class="section">
+  <h2>near-intel MCP calls</h2>
+  <p class="muted">Logged by HoldUp's own MCP server when the investigator model asked about this payment's parties. Its token only opens data about this one payment.</p>
+  <ul class="plain-list">
+    {% for call in mcp_calls %}<li class="mono break">{{ call }}</li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+{% if prompts %}
+<section class="section">
+  <h2>Prompt versions</h2>
+  <dl class="kv kv-compact">
+    {% for step, digest in prompts.items() %}<dt>{{ step }}</dt><dd class="mono">{{ digest }}</dd>{% endfor %}
+  </dl>
+</section>
+{% endif %}
+
+<section class="section">
+  <h2>Evidence</h2>
+  {% if why.evidence_hash %}
+  <p>On-chain evidence hash <span class="mono break">{{ why.evidence_hash }}</span>.</p>
+  <p><a class="btn btn-small" href="/v/{{ h.id }}.json">Evidence JSON</a> <a class="btn btn-small btn-ghost" href="/h/{{ h.id }}">Timeline</a></p>
+  {% else %}
+  <p class="muted">No evidence was recorded on-chain for this payment.</p>
+  <p><a class="btn btn-small btn-ghost" href="/h/{{ h.id }}">Timeline</a></p>
+  {% endif %}
+</section>
+{% endblock %}

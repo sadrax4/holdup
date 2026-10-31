@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% from "_macros.html" import copy_block %}
+{% block title %}Proof: the AI has the brakes, not the keys - HoldUp{% endblock %}
+{% block description %}Live checks that HoldUp's vault has no keys and that its AI oracle can only make payments wait longer.{% endblock %}
+{% block main %}
+<p class="eyebrow">Proof</p>
+<h1>The AI has the brakes, not the keys</h1>
+<p class="lead">These checks read the chain directly, and anyone can repeat them with a public NEAR RPC endpoint.</p>
+
+{% if proof.simulated %}
+<div class="callout tone-held">
+  <strong>Simulated sample.</strong> This server runs the offline demo, so the results below come from the in-memory vault, which applies the contract's rules and nearcore's access-key rules. Against testnet, this page reads the live deployment instead.
+</div>
+{% endif %}
+{% if proof.error %}<div class="callout tone-bad">{{ proof.error }}</div>{% endif %}
+
+{% if proof.checks %}
+<section class="section">
+  <p class="summary-line">
+    {% if proof.ok %}<span class="badge badge-large tone-ok">All checks pass</span>{% else %}<span class="badge badge-large tone-brake">Some checks fail</span>{% endif %}
+    <span class="muted small">{{ network_label }} &middot; checked {{ proof.checked_ms|utc }}</span>
+  </p>
+  <ul class="checks">
+    {% for check in proof.checks %}
+    <li class="card check {{ 'check-pass' if check.ok else 'check-fail' }}">
+      <div class="check-head">
+        <span class="check-mark" aria-hidden="true">{{ "&#10003;"|safe if check.ok else "&#10007;"|safe }}</span>
+        <h3>{{ check.title }}</h3>
+        <span class="badge tone-{{ 'ok' if check.ok else 'brake' }}">{{ "pass" if check.ok else "fail" }}</span>
+      </div>
+      {% if check.explanation %}<p>{{ check.explanation }}</p>{% endif %}
+      <dl class="kv kv-compact">
+        <dt>Expected</dt><dd class="mono break">{{ check.expected }}</dd>
+        <dt>Observed</dt><dd class="mono break">{{ check.observed }}</dd>
+        {% if check.detail %}<dt>Note</dt><dd class="break">{{ check.detail }}</dd>{% endif %}
+      </dl>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}
+
+<section class="section">
+  <h2>What the keys cannot do</h2>
+  {% if proof.simulated %}
+  <p>Each row is a transaction a restricted key tried to sign, and the error nearcore's access-key rules give it.</p>
+  {% else %}
+  <p><span class="mono">holdup prove</span> signs each of these with the real keys and records how the network rejects them. Nothing reaches a contract: the node refuses the transaction before it runs.</p>
+  {% endif %}
+  <div class="table-wrap">
+    <table class="table">
+      <thead><tr><th scope="col">Key</th><th scope="col">Tries to</th><th scope="col">Rejected with</th>{% if proof.simulated %}<th scope="col">Result</th>{% endif %}</tr></thead>
+      <tbody>
+        {% for attempt in proof.attempts %}
+        <tr>
+          <td>{{ attempt.actor }}</td>
+          <td>{{ attempt.description }}</td>
+          <td class="mono">{{ attempt.observed or attempt.expected }}</td>
+          {% if proof.simulated %}<td>{% if attempt.passed %}<span class="badge tone-ok badge-small">refused</span>{% else %}<span class="badge tone-brake badge-small">not refused</span>{% endif %}</td>{% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="section">
+  <h2>The accounts</h2>
+  <dl class="kv kv-compact">
+    {% for label, account in accounts %}<dt>{{ label }}</dt><dd class="mono break">{{ account }}</dd>{% endfor %}
+  </dl>
+  {% if commands %}
+  <h3>Check it yourself</h3>
+  {% for title, command in commands %}
+  <p class="small">{{ title }}</p>
+  {{ copy_block(command) }}
+  {% endfor %}
+  {% endif %}
+</section>
+{% endblock %}

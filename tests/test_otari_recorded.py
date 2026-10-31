@@ -66,8 +66,13 @@ async def test_a_real_monitor_verdict_without_a_service_is_inconclusive() -> Non
     document = load("guardrails-monitor-prompt-injection-benign.json")
     text, record = await client_answering(document).chat("triage", O.INVESTIGATOR_MODEL, [])
     assert text == "OK"
-    assert record.guardrail == {"profile": "prompt-injection", "mode": "monitor", "valid": None, "score": None,
-                                "verdict": "inconclusive"}
+    assert record.guardrail == {
+        "profile": "prompt-injection",
+        "mode": "monitor",
+        "valid": None,
+        "score": None,
+        "verdict": "inconclusive",
+    }
 
 
 @pytest.mark.parametrize(
@@ -95,7 +100,9 @@ async def test_real_refusals_map_to_the_right_errors(name: str, kind: type[O.Ota
 )
 async def test_real_workspace_tool_switches_name_the_tools(name: str, tools: set[str]) -> None:
     with pytest.raises(O.ToolNotEnabled) as caught:
-        await client_answering(load(name)).chat("investigator", O.INVESTIGATOR_MODEL, [], tools=[{"type": O.WEB_SEARCH}])
+        await client_answering(load(name)).chat(
+            "investigator", O.INVESTIGATOR_MODEL, [], tools=[{"type": O.WEB_SEARCH}]
+        )
     assert caught.value.tools == tools
 
 
@@ -123,7 +130,32 @@ async def test_a_real_bedrock_refusal_of_reasoning_effort_is_retried_without_it(
         seen.append(body)
         return replay(refusal if "reasoning_effort" in body else answer)
 
-    client = O.OtariClient(Settings(otari_api_key="otk_v1_us_test"), http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    client = O.OtariClient(
+        Settings(otari_api_key="otk_v1_us_test"), http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
     text, _ = await client.chat("triage", O.TRIAGE_MODEL, [], reasoning_effort="low")
     assert json.loads(text)["risk"] == "high"
     assert ["reasoning_effort" in body for body in seen] == [True, False]
+
+
+def test_every_model_is_an_open_weights_catalog_id() -> None:
+    catalog = {m["id"]: m for m in load("catalog-models.json")["models"]}
+    for model in (
+        O.TRIAGE_MODEL,
+        O.INVESTIGATOR_MODEL,
+        O.VISION_MODEL,
+        O.REVIEWER_MODEL,
+        O.INJECTION_GUARD_MODEL,
+        O.SAFETY_GUARD_MODEL,
+    ):
+        assert catalog[model]["open_weights"] is True, model
+    for model in (O.TRIAGE_MODEL, O.INVESTIGATOR_MODEL, O.REVIEWER_MODEL, O.VISION_MODEL):
+        assert catalog[model]["capabilities"]["tool_call"], model
+    # Images only go to models that read them; the gateway silently drops images sent elsewhere.
+    for model in (O.VISION_MODEL, O.REVIEWER_MODEL):
+        assert "image" in catalog[model]["input_modalities"], model
+    assert "image" not in catalog[O.INVESTIGATOR_MODEL]["input_modalities"]
+    # Reviewer and investigator must come from different families.
+    assert catalog[O.REVIEWER_MODEL]["family"] != catalog[O.INVESTIGATOR_MODEL]["family"]
+    assert catalog[O.INJECTION_GUARD_MODEL]["providers"] == ["bedrock"]  # hence no reasoning_effort for it
+    assert O.INJECTION_GUARD_MODEL not in O.REASONING_EFFORT_MODELS

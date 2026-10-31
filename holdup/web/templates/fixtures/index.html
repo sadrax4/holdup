@@ -1,0 +1,12 @@
+{% extends "fixtures/base.html" %}
+{% block title %}HoldUp training fixtures{% endblock %}
+{% block banner_text %}These pages imitate scams for the HoldUp demo. Every brand is made up, and no page collects anything.{% endblock %}
+{% block body %}
+<main class="fixture-index">
+  <h1>Training fixtures</h1>
+  <p>Fictional pages used by the HoldUp demo story. The AI checker may fetch them when a forwarded message links here.</p>
+  <ul>
+    {% for href, title in entries %}<li><a href="{{ href }}">{{ title }}</a></li>{% endfor %}
+  </ul>
+</main>
+{% endblock %}

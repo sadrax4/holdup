@@ -95,17 +95,29 @@ def ok(content: Any = TRIAGE_JSON, headers: dict[str, str] | None = None, **extr
 
 async def test_a_plain_call_returns_the_contract_and_a_step_record() -> None:
     guard = json.dumps([{"profile": "checker-injection", "mode": "monitor", "valid": False, "score": 0.91}])
-    gateway = Gateway(lambda body, req: ok(headers={"otari-guardrails": guard, "otari-fallback": "true", "otari-attempt-count": "2"}))
+    gateway = Gateway(
+        lambda body, req: ok(headers={"otari-guardrails": guard, "otari-fallback": "true", "otari-attempt-count": "2"})
+    )
     client = client_for(gateway)
     value, record = await client.chat(
-        "triage", O.TRIAGE_MODEL, [{"role": "user", "content": "hi"}],
-        output=TriageResult, metadata={"step": "triage", "hold": "3"}, prompt_sha256="ab" * 32,
+        "triage",
+        O.TRIAGE_MODEL,
+        [{"role": "user", "content": "hi"}],
+        output=TriageResult,
+        metadata={"step": "triage", "hold": "3"},
+        prompt_sha256="ab" * 32,
     )
     assert isinstance(value, TriageResult) and value.risk == "low"
     assert record.step == "triage" and record.model == O.TRIAGE_MODEL and record.provider == "deepinfra"
     assert record.fallback is True and record.attempts == 2 and record.request_id == "req-1"
     assert record.cost_usd == pytest.approx(0.000006) and record.latency_ms is not None
-    assert record.guardrail == {"profile": "checker-injection", "mode": "monitor", "valid": False, "score": 0.91, "verdict": "flagged"}
+    assert record.guardrail == {
+        "profile": "checker-injection",
+        "mode": "monitor",
+        "valid": False,
+        "score": 0.91,
+        "verdict": "flagged",
+    }
     assert record.prompt_sha256 == "ab" * 32
 
     body = gateway.bodies[0]
@@ -116,7 +128,7 @@ async def test_a_plain_call_returns_the_contract_and_a_step_record() -> None:
     assert schema["schema"]["additionalProperties"] is False
     assert "user" not in body and "stream" not in body
     assert gateway.requests[0].headers["authorization"] == "Bearer otk_v1_us_test"
-    assert gateway.requests[0].headers["idempotency-key"].startswith("holdup-")
+    assert "idempotency-key" not in gateway.requests[0].headers  # a retried check must get a fresh answer
 
 
 @pytest.mark.parametrize("model", [O.INJECTION_GUARD_MODEL, O.REVIEWER_MODEL, O.VISION_MODEL, O.SAFETY_GUARD_MODEL])
@@ -130,37 +142,63 @@ async def test_gateway_fields_go_in_the_body_and_tool_calls_are_streamed() -> No
     def handler(body: dict[str, Any], req: httpx.Request) -> httpx.Response:
         started = {"id": "otari_ws_1", "type": "web_search", "status": "in_progress", "query": "q"}
         ended = {**started, "status": "completed", "sources": [{"url": "https://a.example/x?y=1", "title": "A"}]}
-        fetch = {"id": "otari_wf_1", "type": "web_fetch", "status": "failed", "url": "https://b.example/",
-                 "error": {"provider": None, "status": None, "tag": "call_limit", "retryable": False}}
+        fetch = {
+            "id": "otari_wf_1",
+            "type": "web_fetch",
+            "status": "failed",
+            "url": "https://b.example/",
+            "error": {"provider": None, "status": None, "tag": "call_limit", "retryable": False},
+        }
         events = [
             chunk({"role": "assistant", "content": ""}),
             chunk(otari_tool_calls=[started]),
             chunk(otari_tool_calls=[ended]),
             chunk(otari_tool_calls=[fetch]),
-            chunk({"content": "{\"findings\": [], "}),
-            chunk({"content": "\"brake\": false}"}, "stop"),
-            {**chunk(), "choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12, "cost_usd": "0.010040"}},
+            chunk({"content": '{"findings": [], '}),
+            chunk({"content": '"brake": false}'}, "stop"),
+            {
+                **chunk(),
+                "choices": [],
+                "usage": {"prompt_tokens": 9, "completion_tokens": 3, "total_tokens": 12, "cost_usd": "0.010040"},
+            },
         ]
         return httpx.Response(200, headers={**SERVED, "content-type": "text/event-stream"}, content=sse(events))
 
     gateway = Gateway(handler)
     servers = [{"name": "near-intel", "url": "https://h.example/mcp"}]
-    guardrails = [{"profile": "checker-injection", "url": "https://h.example/validate", "mode": "monitor", "on": ["input"]}]
+    guardrails = [
+        {"profile": "checker-injection", "url": "https://h.example/validate", "mode": "monitor", "on": ["input"]}
+    ]
     text, record = await client_for(gateway).chat(
-        "investigator", O.INVESTIGATOR_MODEL, [{"role": "user", "content": "hi"}],
-        tools=[{"type": O.WEB_SEARCH, "max_uses": 3}], mcp_servers=servers, guardrails=guardrails, max_tool_iterations=8,
+        "investigator",
+        O.INVESTIGATOR_MODEL,
+        [{"role": "user", "content": "hi"}],
+        tools=[{"type": O.WEB_SEARCH, "max_uses": 3}],
+        mcp_servers=servers,
+        guardrails=guardrails,
+        max_tool_iterations=8,
     )
     assert json.loads(text) == {"findings": [], "brake": False}
     body = gateway.bodies[0]
     assert body["stream"] is True and body["stream_options"] == {"include_usage": True}
     assert body["mcp_servers"] == servers and body["guardrails"] == guardrails and body["max_tool_iterations"] == 8
     assert body["tools"] == [{"type": "otari_web_search", "max_uses": 3}] and "response_format" not in body
-    assert "idempotency-key" not in gateway.requests[0].headers  # streams ignore it
     assert record.cost_usd == pytest.approx(0.01004)
     assert record.tool_calls == [
-        {"name": "otari_web_search", "id": "otari_ws_1", "status": "completed", "query": "q", "sources": ["https://a.example/x?y=1"]},
-        {"name": "otari_web_fetch", "id": "otari_wf_1", "status": "failed", "url": "https://b.example/",
-         "error": {"tag": "call_limit", "status": None, "provider": None, "retryable": False}},
+        {
+            "name": "otari_web_search",
+            "id": "otari_ws_1",
+            "status": "completed",
+            "query": "q",
+            "sources": ["https://a.example/x?y=1"],
+        },
+        {
+            "name": "otari_web_fetch",
+            "id": "otari_wf_1",
+            "status": "failed",
+            "url": "https://b.example/",
+            "error": {"tag": "call_limit", "status": None, "provider": None, "retryable": False},
+        },
     ]
 
 
@@ -190,26 +228,71 @@ async def test_answers_that_break_the_contract_or_are_empty_raise_bad_output() -
 @pytest.mark.parametrize(
     ("status", "headers", "body", "kind", "label"),
     [
-        (403, {"otari-error-code": "budget_exceeded", "otari-budget-scope": "api_token", "retry-after": "60"},
-         {"detail": "spent", "code": "budget_exceeded"}, O.BudgetExceeded, "budget_exceeded"),
-        (403, {}, {"message": "Request blocked by guardrail policy.", "code": "guardrail_violation",
-                   "guardrails": [{"profile": "checker-injection", "explanation": None, "score": 1.0}]},
-         O.GuardrailViolation, "guardrail_violation"),
-        (502, {}, {"detail": "guardrail profile checker-injection requested but no guardrails service is configured."},
-         O.GuardrailUnavailable, "guardrail_unavailable"),
-        (402, {"otari-error-code": "insufficient_funds"}, {"detail": "no funds"}, O.InsufficientFunds, "insufficient_funds"),
+        (
+            403,
+            {"otari-error-code": "budget_exceeded", "otari-budget-scope": "api_token", "retry-after": "60"},
+            {"detail": "spent", "code": "budget_exceeded"},
+            O.BudgetExceeded,
+            "budget_exceeded",
+        ),
+        (
+            403,
+            {},
+            {
+                "message": "Request blocked by guardrail policy.",
+                "code": "guardrail_violation",
+                "guardrails": [{"profile": "checker-injection", "explanation": None, "score": 1.0}],
+            },
+            O.GuardrailViolation,
+            "guardrail_violation",
+        ),
+        (
+            502,
+            {},
+            {"detail": "guardrail profile checker-injection requested but no guardrails service is configured."},
+            O.GuardrailUnavailable,
+            "guardrail_unavailable",
+        ),
+        (
+            402,
+            {"otari-error-code": "insufficient_funds"},
+            {"detail": "no funds"},
+            O.InsufficientFunds,
+            "insufficient_funds",
+        ),
         (403, {}, {"detail": "web search is not enabled for this workspace"}, O.ToolNotEnabled, "tool_not_enabled"),
-        (400, {"otari-error-code": "all_candidates_rejected"}, {"detail": "No model accepted the request (2 attempts)."},
-         O.AllCandidatesFailed, "all_candidates_rejected"),
+        (
+            400,
+            {"otari-error-code": "all_candidates_rejected"},
+            {"detail": "No model accepted the request (2 attempts)."},
+            O.AllCandidatesFailed,
+            "all_candidates_rejected",
+        ),
         (400, {"otari-error-code": "invalid_model"}, {"detail": "Unknown model"}, O.ModelUnavailable, "invalid_model"),
-        (424, {}, {"detail": "No credential", "code": "provider_not_configured"}, O.ModelUnavailable, "provider_not_configured"),
-        (429, {"otari-error-code": "upstream_rate_limited", "retry-after": "5"}, {"detail": "slow down"}, O.RateLimited,
-         "upstream_rate_limited"),
+        (
+            424,
+            {},
+            {"detail": "No credential", "code": "provider_not_configured"},
+            O.ModelUnavailable,
+            "provider_not_configured",
+        ),
+        (
+            429,
+            {"otari-error-code": "upstream_rate_limited", "retry-after": "5"},
+            {"detail": "slow down"},
+            O.RateLimited,
+            "upstream_rate_limited",
+        ),
         (502, {}, {"detail": "All upstream providers failed"}, O.AllCandidatesFailed, "all_candidates_failed"),
         (504, {}, {"detail": "The provider timed out"}, O.AllCandidatesFailed, "all_candidates_failed"),
         (401, {}, {"detail": "Invalid master key"}, O.OtariRequestError, "request_refused"),
-        (403, {}, {"detail": "'user' field does not match the authenticated API key's user"}, O.OtariRequestError,
-         "request_refused"),
+        (
+            403,
+            {},
+            {"detail": "'user' field does not match the authenticated API key's user"},
+            O.OtariRequestError,
+            "request_refused",
+        ),
     ],
 )
 def test_error_responses_map_to_typed_exceptions(
@@ -228,7 +311,9 @@ def test_error_details_carry_scope_retry_after_tools_and_guardrails() -> None:
     assert isinstance(access, O.ToolNotEnabled) and access.tools == {O.WEB_SEARCH, O.WEB_FETCH}
     code = O.error_from_response(403, {}, b'{"detail": "code execution is not enabled for this workspace"}')
     assert code.tools == {O.CODE_EXECUTION}
-    blocked = O.error_from_response(403, {}, b'{"code": "guardrail_violation", "guardrails": [{"profile": "p", "score": 0.7}]}')
+    blocked = O.error_from_response(
+        403, {}, b'{"code": "guardrail_violation", "guardrails": [{"profile": "p", "score": 0.7}]}'
+    )
     assert blocked.verdict() == {"profile": "p", "mode": "block", "valid": False, "score": 0.7, "verdict": "blocked"}
     waf = O.error_from_response(403, {"content-type": "text/html"}, b"<html>403 Forbidden</html>")
     assert isinstance(waf, O.WafBlocked) and not waf.fallback_ok
@@ -244,7 +329,10 @@ def test_only_failures_another_model_could_fix_allow_a_fallback() -> None:
 
 async def test_a_stream_that_fails_after_it_started_raises_the_event_code() -> None:
     def handler(body: dict[str, Any], req: httpx.Request) -> httpx.Response:
-        events = [chunk({"content": "partial"}), {"error": {"message": "cut", "type": "server_error", "code": "upstream_rate_limited"}}]
+        events = [
+            chunk({"content": "partial"}),
+            {"error": {"message": "cut", "type": "server_error", "code": "upstream_rate_limited"}},
+        ]
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse(events))
 
     with pytest.raises(O.RateLimited) as caught:
@@ -254,7 +342,9 @@ async def test_a_stream_that_fails_after_it_started_raises_the_event_code() -> N
 
 async def test_a_stream_that_closes_without_finishing_is_a_failure() -> None:
     def handler(body: dict[str, Any], req: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=sse([chunk({"content": "x"})]))
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"}, content=sse([chunk({"content": "x"})])
+        )
 
     with pytest.raises(O.OtariUnavailable) as caught:
         await client_for(Gateway(handler)).chat("investigator", "m", [], stream=True)
@@ -327,14 +417,18 @@ async def test_refused_optional_fields_are_dropped_once() -> None:
         if "reasoning_effort" in body:
             return httpx.Response(400, json={"detail": "'reasoning_effort' is not supported for bedrock."})
         if "response_format" in body:
-            return httpx.Response(400, json={"detail": "No model accepted the request (2 attempts).", "code": "all_candidates_rejected"})
+            return httpx.Response(
+                400, json={"detail": "No model accepted the request (2 attempts).", "code": "all_candidates_rejected"}
+            )
         return ok(TRIAGE_JSON)
 
     gateway = Gateway(handler)
     value, _ = await client_for(gateway).chat("triage", O.TRIAGE_MODEL, [], output=TriageResult, reasoning_effort="low")
     assert value.risk == "low"
     assert [sorted(k for k in b if k in ("reasoning_effort", "response_format")) for b in gateway.bodies] == [
-        ["reasoning_effort", "response_format"], ["response_format"], [],
+        ["reasoning_effort", "response_format"],
+        ["response_format"],
+        [],
     ]
 
 
@@ -397,8 +491,10 @@ def test_guardrail_header_parsing() -> None:
     mixed = O.parse_guardrails_header('[{"profile": "a", "valid": true}, {"profile": "b", "valid": false}]')
     assert O.guardrail_verdict(mixed)["verdict"] == "flagged"
     assert O.guardrail_verdict(mixed, "a")["verdict"] == "passed"
-    assert O.parse_guardrails_header("checker-injection=fail, other=pass") == [
-        {"profile": "checker-injection", "valid": False}, {"profile": "other", "valid": True},
+    assert O.parse_guardrails_header("checker-injection=fail, other=pass, third=skipped") == [
+        {"profile": "checker-injection", "valid": False},
+        {"profile": "other", "valid": True},
+        {"profile": "third", "valid": None},
     ]
     assert O.parse_guardrails_header(None) == [] and O.guardrail_verdict([]) is None
 

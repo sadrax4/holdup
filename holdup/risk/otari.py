@@ -21,7 +21,6 @@ with what HoldUp needs from it:
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import logging
 import re
@@ -292,7 +291,9 @@ def error_from_response(status: int, headers: Mapping[str, str], content: bytes 
     if status == 403 and "html" in lowered.get("content-type", "").lower():
         return WafBlocked("the gateway firewall rejected the request text", **kwargs)
     if code == "budget_exceeded":
-        return BudgetExceeded(detail or "a budget refused the request", scope=lowered.get("otari-budget-scope"), **kwargs)
+        return BudgetExceeded(
+            detail or "a budget refused the request", scope=lowered.get("otari-budget-scope"), **kwargs
+        )
     if code == "guardrail_violation":
         guardrails = body.get("guardrails") if isinstance(body, dict) else None
         return GuardrailViolation(
@@ -334,6 +335,8 @@ def error_from_stream_event(body: Any) -> OtariError:
 # response helpers
 # ----------------------------------------------------------------------
 
+_PASS_WORDS = frozenset({"pass", "passed", "valid", "true", "ok"})
+_FAIL_WORDS = frozenset({"fail", "failed", "flagged", "invalid", "false", "blocked"})
 _LOOKALIKES = str.maketrans({"\u0060": "\u02cb", "'": "\u2019", '"': "\u201d"})
 _FENCE = "\u0060" * 3
 
@@ -394,7 +397,7 @@ def parse_guardrails_header(value: str | None) -> list[dict[str, Any]]:
         for part in value.split(","):
             profile, _, verdict = part.strip().partition("=")
             word = verdict.strip().lower()
-            valid = True if word in ("pass", "passed", "valid", "true") else False if word else None
+            valid = True if word in _PASS_WORDS else False if word in _FAIL_WORDS else None
             entries.append({"profile": profile.strip(), "valid": valid})
         return [e for e in entries if e["profile"]]
     if isinstance(data, dict):
@@ -606,9 +609,16 @@ class OtariClient:
         chain = [model, *(m for m in fallbacks if m != model)]
         for index, candidate in enumerate(chain):
             params = self._params(
-                candidate, messages, output=output, tools=tools, mcp_servers=mcp_servers,
-                guardrails=guardrails, metadata=metadata, max_tokens=max_tokens,
-                reasoning_effort=reasoning_effort, max_tool_iterations=max_tool_iterations,
+                candidate,
+                messages,
+                output=output,
+                tools=tools,
+                mcp_servers=mcp_servers,
+                guardrails=guardrails,
+                metadata=metadata,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                max_tool_iterations=max_tool_iterations,
             )
             try:
                 reply = await self._attempt(params, streaming)
@@ -697,21 +707,18 @@ class OtariClient:
     async def _send(self, params: dict[str, Any], streaming: bool) -> _Reply:
         body = dict(params)
         extra_body = body.pop("extra_body", None)
-        headers = None
-        if not streaming:
-            # Makes a retry of the same body free and safe; streams ignore it
-            # (api-reference: Retrying safely).
-            digest = hashlib.sha256(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest()
-            headers = {"Idempotency-Key": f"holdup-{digest[:40]}"}
         create = self._sdk.chat.completions.with_raw_response.create
         try:
             if streaming:
                 raw = await create(
-                    **body, stream=True, stream_options={"include_usage": True},
-                    extra_body=extra_body, timeout=TOOL_LOOP_TIMEOUT_S,
+                    **body,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    extra_body=extra_body,
+                    timeout=TOOL_LOOP_TIMEOUT_S,
                 )
                 return await _read_stream(raw)
-            raw = await create(**body, extra_body=extra_body, extra_headers=headers, timeout=PLAIN_TIMEOUT_S)
+            raw = await create(**body, extra_body=extra_body, timeout=PLAIN_TIMEOUT_S)
             return _read_completion(raw)
         except openai.APIStatusError as exc:
             raise error_from_response(exc.status_code, exc.response.headers, exc.response.content) from exc
@@ -765,7 +772,10 @@ class OtariClient:
             http = self._own_http = self._own_http or httpx.AsyncClient()
         try:
             response = await http.request(
-                method, f"{self.base_url}{path}", json=json_body, timeout=timeout,
+                method,
+                f"{self.base_url}{path}",
+                json=json_body,
+                timeout=timeout,
                 headers={"Authorization": f"Bearer {self._key}"},
             )
         except httpx.HTTPError as exc:

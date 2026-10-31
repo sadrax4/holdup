@@ -74,7 +74,9 @@ async def _injection(client: OtariClient, content: str) -> dict[str, Any]:
         {"role": "user", "content": untrusted("CONTENT TO CLASSIFY", content)},
     ]
     verdict, _ = await client.chat(
-        "guard", INJECTION_GUARD_MODEL, messages,
+        "guard",
+        INJECTION_GUARD_MODEL,
+        messages,
         output=PolicyVerdict,
         metadata={"app": "holdup", "step": "guard"},
         max_tokens=1_000,  # the model reasons before it answers; small limits end with no answer
@@ -87,7 +89,9 @@ async def _injection(client: OtariClient, content: str) -> dict[str, Any]:
 async def _safety(client: OtariClient, content: str) -> dict[str, Any]:
     # Llama Guard answers "safe", or "unsafe" and a line of category codes such as S2.
     answer, _ = await client.chat(
-        "guard", SAFETY_GUARD_MODEL, [{"role": "user", "content": content}],
+        "guard",
+        SAFETY_GUARD_MODEL,
+        [{"role": "user", "content": content}],
         metadata={"app": "holdup", "step": "guard"},
         max_tokens=20,
     )

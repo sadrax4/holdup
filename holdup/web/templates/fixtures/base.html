@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="color-scheme" content="light dark">
+  <title>{% block title %}Training fixture{% endblock %} (training fixture)</title>
+  <link rel="stylesheet" href="/static/fixtures.css?v={{ asset_version }}">
+</head>
+<body class="{% block brand %}fixture{% endblock %}">
+  <div class="fixture-banner" role="note">
+    <strong>TRAINING FIXTURE - fictional</strong>
+    <span>{% block banner_text %}This page imitates a scam for the HoldUp demo. The brand is made up, and nothing on this page collects anything.{% endblock %}</span>
+  </div>
+  {% block body %}{% endblock %}
+  <footer class="fixture-foot">Part of the HoldUp demo. <a href="/fixtures/">All training fixtures</a> &middot; <a href="/">HoldUp</a></footer>
+</body>
+</html>

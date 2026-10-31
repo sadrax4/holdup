@@ -1,0 +1,171 @@
+{
+ "probe": "catalog-models",
+ "synthetic": false,
+ "recorded_utc": "2026-10-29T14:17:05.240721Z",
+ "summary": "The six catalog entries HoldUp uses, trimmed from the hosted gateway's model catalog",
+ "endpoint": "https://api.otari.ai/api/v1/catalog/models",
+ "catalog_count": 160,
+ "models": [
+  {
+   "id": "deepseek/deepseek-v4.1-flash-1017",
+   "name": "DeepSeek V4.1 Flash 1017",
+   "vendor": "DeepSeek",
+   "family": "deepseek-flash",
+   "open_weights": true,
+   "capabilities": {
+    "reasoning": true,
+    "tool_call": true,
+    "structured_output": true,
+    "attachment": true,
+    "temperature": true
+   },
+   "input_modalities": [
+    "image",
+    "text"
+   ],
+   "context_window": 1048576,
+   "max_output_tokens": 1048576,
+   "providers": [
+    "deepinfra",
+    "fireworks",
+    "mistral",
+    "nebius",
+    "together"
+   ],
+   "min_input_price_per_million": 0.098,
+   "min_output_price_per_million": 0.294
+  },
+  {
+   "id": "z-ai/glm-5.3-flash",
+   "name": "GLM-5.3-Flash",
+   "vendor": "Z.ai",
+   "family": "glm-flash",
+   "open_weights": true,
+   "capabilities": {
+    "reasoning": true,
+    "tool_call": true,
+    "structured_output": true,
+    "attachment": true,
+    "temperature": true
+   },
+   "input_modalities": [
+    "image",
+    "pdf",
+    "text",
+    "video"
+   ],
+   "context_window": 1048576,
+   "max_output_tokens": 400000,
+   "providers": [
+    "deepinfra",
+    "fireworks",
+    "mistral",
+    "together"
+   ],
+   "min_input_price_per_million": 0.15,
+   "min_output_price_per_million": 0.5
+  },
+  {
+   "id": "openai/gpt-oss-120b",
+   "name": "GPT OSS 120B",
+   "vendor": "OpenAI",
+   "family": "gpt-oss",
+   "open_weights": true,
+   "capabilities": {
+    "reasoning": true,
+    "tool_call": true,
+    "structured_output": true,
+    "attachment": false,
+    "temperature": true
+   },
+   "input_modalities": [
+    "text"
+   ],
+   "context_window": 131072,
+   "max_output_tokens": 131072,
+   "providers": [
+    "deepinfra",
+    "fireworks",
+    "nebius",
+    "ovhcloud",
+    "together"
+   ],
+   "min_input_price_per_million": 0.037,
+   "min_output_price_per_million": 0.17
+  },
+  {
+   "id": "openai/gpt-oss-20b",
+   "name": "GPT OSS 20B",
+   "vendor": "OpenAI",
+   "family": "gpt-oss",
+   "open_weights": true,
+   "capabilities": {
+    "reasoning": true,
+    "tool_call": true,
+    "structured_output": true,
+    "attachment": false,
+    "temperature": true
+   },
+   "input_modalities": [
+    "text"
+   ],
+   "context_window": 131072,
+   "max_output_tokens": 131072,
+   "providers": [
+    "deepinfra",
+    "ovhcloud"
+   ],
+   "min_input_price_per_million": 0.03,
+   "min_output_price_per_million": 0.14
+  },
+  {
+   "id": "openai/gpt-oss-safeguard-120b",
+   "name": "GPT OSS Safeguard 120B",
+   "vendor": "OpenAI",
+   "family": "gpt-oss",
+   "open_weights": true,
+   "capabilities": {
+    "reasoning": true,
+    "tool_call": true,
+    "structured_output": true,
+    "attachment": false,
+    "temperature": true
+   },
+   "input_modalities": [
+    "text"
+   ],
+   "context_window": 128000,
+   "max_output_tokens": 16384,
+   "providers": [
+    "bedrock"
+   ],
+   "min_input_price_per_million": 0.15,
+   "min_output_price_per_million": 0.6
+  },
+  {
+   "id": "meta/llama-guard-4-12b",
+   "name": "Llama Guard 4 12B",
+   "vendor": "Meta",
+   "family": "llama",
+   "open_weights": true,
+   "capabilities": {
+    "reasoning": false,
+    "tool_call": false,
+    "structured_output": false,
+    "attachment": true,
+    "temperature": true
+   },
+   "input_modalities": [
+    "image",
+    "text"
+   ],
+   "context_window": 163840,
+   "max_output_tokens": 163840,
+   "providers": [
+    "deepinfra"
+   ],
+   "min_input_price_per_million": 0.18,
+   "min_output_price_per_million": 0.18
+  }
+ ]
+}

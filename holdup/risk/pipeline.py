@@ -62,8 +62,8 @@ from .otari import (
     OtariError,
     OtariRequestError,
     ToolNotEnabled,
-    family,
     fallbacks_for,
+    family,
 )
 from .prompts.contracts import (
     AmountCheck,
@@ -143,8 +143,17 @@ _REASON_ORDER = (
     Reason.SECOND_OPINION,
 )
 _SOURCE_ORDER = (
-    "rules", "precheck", "triage", "vision", "guardrail", "mcp",
-    "web_search", "web_fetch", "code_execution", "investigator", "reviewer",
+    "rules",
+    "precheck",
+    "triage",
+    "vision",
+    "guardrail",
+    "mcp",
+    "web_search",
+    "web_fetch",
+    "code_execution",
+    "investigator",
+    "reviewer",
 )
 
 _PAYEE_LABELS = {
@@ -156,8 +165,8 @@ _PAYEE_LABELS = {
     "released": "of those, released",
     "cancelled_after_flag": "reports: payments cancelled after a HoldUp warning",
 }
-_URL = re.compile("https?://[^\\s<>()\\[\\]{}\"'\u0060]+", re.IGNORECASE)
-_FORWARDED_FROM = re.compile(r"^\s*forwarded from (.{1,80}?):\s*$", re.IGNORECASE | re.MULTILINE)
+_URL = re.compile(r"https?://[^\s<>()\[\]{}\"'\u0060]+", re.IGNORECASE)
+_FORWARDED_FROM = re.compile(r"\A\s*forwarded from ([^\n]{1,80}?):[ \t]*(?:\n|\Z)", re.IGNORECASE)
 _NOT_WORDISH = re.compile(r"[^A-Za-z0-9 .&-]+")
 _QUOTE_CHARS = str.maketrans("", "", "\"'\u0060")
 
@@ -192,8 +201,7 @@ def untrusted(title: str, text: str) -> str:
     tag = "m-" + hashlib.sha256(text.encode("utf-8")).hexdigest()[:10]
     body = text.replace("<<<", "\u2039" * 3).replace(">>>", "\u203a" * 3)
     return (
-        f"{title} (untrusted data between the markers)\n"
-        f"<<<BEGIN UNTRUSTED {tag}>>>\n{body}\n<<<END UNTRUSTED {tag}>>>"
+        f"{title} (untrusted data between the markers)\n<<<BEGIN UNTRUSTED {tag}>>>\n{body}\n<<<END UNTRUSTED {tag}>>>"
     )
 
 
@@ -244,16 +252,12 @@ def _appears(amount: str, text: str) -> bool:
 class AmountMismatch:
     items_total: Decimal
     stated_total: Decimal
-    currency: str = ""
 
     @property
     def detail(self) -> str:
-        unit = f" {self.currency}" if self.currency else ""
+        # No currency: the message names one, the payment may be in another (HUSD standing in for USDC).
         gap = abs(self.stated_total - self.items_total)
-        return (
-            f"line items add up to {self.items_total}{unit} but the stated total is "
-            f"{self.stated_total}{unit} (off by {gap})"
-        )
+        return f"line items add up to {self.items_total} but the stated total is {self.stated_total} (off by {gap})"
 
 
 def verify_amount_check(check: AmountCheck | None, message: str) -> AmountMismatch | None:
@@ -276,8 +280,15 @@ def verify_amount_check(check: AmountCheck | None, message: str) -> AmountMismat
     total = sum(items, Decimal(0))
     if total != computed or total == stated:
         return None
-    currency = re.sub(r"[^A-Za-z]", "", check.currency)[:10]
-    return AmountMismatch(total, stated, currency)
+    return AmountMismatch(total, stated)
+
+
+def _claim_text(claim: MoneyClaim) -> str:
+    """A money claim reduced to plain words and digits, fit to show a model that has tools."""
+    label = _NOT_WORDISH.sub(" ", claim.label)
+    amount = re.sub(r"[^0-9.,]", "", claim.amount)[:20]
+    currency = _NOT_WORDISH.sub("", claim.currency)
+    return " ".join(f"{label} {amount} {currency}".split())
 
 
 def _gateway_can_reach(url: str, *, with_token: bool) -> bool:
@@ -319,7 +330,9 @@ def merge_findings(findings: Iterable[Finding]) -> list[Finding]:
     for finding in findings:
         key = (finding.reason, finding.source, finding.model)
         if key not in merged:
-            merged[key] = Finding(finding.reason, finding.detail, finding.source, finding.model, list(finding.citations))
+            merged[key] = Finding(
+                finding.reason, finding.detail, finding.source, finding.model, list(finding.citations)
+            )
             continue
         kept = merged[key]
         for url in finding.citations:
@@ -474,18 +487,28 @@ class OtariRisk:
         if any(o.blocked for o in outcomes):
             case.withheld = True
         elif self._injection_suspected(rules, outcomes):
-            gate = await self._guarded("gate", self._gate(case))
-            outcomes.append(gate)
-            case.withheld = gate.blocked or gate.failure is not None
+            if self.guard_url:
+                gate = await self._guarded("gate", self._gate(case))
+                outcomes.append(gate)
+                # Text the blocking guardrail refused, or could not judge, never reaches a model with tools.
+                case.withheld = gate.blocked or gate.failure is not None
+            else:
+                case.withheld = True  # suspected, and no guardrail to clear it
 
         reviewing = case.large
         investigator, reviewer = await asyncio.gather(
             self._guarded("investigator", self._investigate(case)),
-            self._guarded("reviewer", self._review(case, avoid=family(INVESTIGATOR_MODEL))) if reviewing else _nothing(),
+            self._guarded("reviewer", self._review(case, avoid=family(INVESTIGATOR_MODEL)))
+            if reviewing
+            else _nothing(),
         )
         outcomes.append(investigator)
         served = investigator.record.model if investigator.record and investigator.record.model else INVESTIGATOR_MODEL
-        if reviewer is not None and reviewer.record is not None and family(reviewer.record.model or "") == family(served):
+        if (
+            reviewer is not None
+            and reviewer.record is not None
+            and family(reviewer.record.model or "") == family(served)
+        ):
             # The investigator fell back to the family of the reviewer; ask a third family instead.
             reviewer = await self._guarded("reviewer", self._review(case, avoid=family(served)))
         if reviewer is None and self._disagree(triage, investigator, case):
@@ -517,10 +540,14 @@ class OtariRisk:
         if info is not None:
             amount_text, symbol = format_amount(hold.amount, info.decimals), info.symbol
             units = Decimal(hold.amount) / (Decimal(10) ** info.decimals)
-            large = (units >= REVIEW_NEAR) if hold.asset == NEAR else (info.symbol in STABLECOINS and units >= REVIEW_STABLE_UNITS)
+            large = (
+                (units >= REVIEW_NEAR)
+                if hold.asset == NEAR
+                else (info.symbol in STABLECOINS and units >= REVIEW_STABLE_UNITS)
+            )
         else:
             amount_text, symbol, large = str(hold.amount), f"raw units of {hold.asset}", False
-        match = _FORWARDED_FROM.search(text)
+        match = _FORWARDED_FROM.match(text)  # the header the bot adds, never a line inside the message
         sender = " ".join(_NOT_WORDISH.sub(" ", match.group(1)).split())[:48] if match else ""
         return _Case(
             hold=hold,
@@ -609,10 +636,7 @@ class OtariRisk:
 
     def _message_view(self, case: _Case) -> str:
         if case.withheld:
-            claims = "; ".join(
-                " ".join(f"{_NOT_WORDISH.sub(' ', c.label)} {_amount_text(c.amount)} {_NOT_WORDISH.sub('', c.currency)}".split())
-                for c in case.money_claims[:12]
-            )
+            claims = "; ".join(_claim_text(claim) for claim in case.money_claims[:12])
             return "\n".join(
                 [
                     "FORWARDED MESSAGE: withheld, because the injection guardrail flagged it. Facts HoldUp extracted:",
@@ -673,7 +697,9 @@ class OtariRisk:
         ]
         try:
             result, record = await case.client.chat(
-                "triage", TRIAGE_MODEL, messages,
+                "triage",
+                TRIAGE_MODEL,
+                messages,
                 output=TriageResult,
                 guardrails=self._guardrails(case, "monitor"),
                 metadata=self._metadata(case, "triage"),
@@ -709,7 +735,9 @@ class OtariRisk:
         ]
         try:
             result, record = await case.client.chat(
-                "vision", VISION_MODEL, messages,
+                "vision",
+                VISION_MODEL,
+                messages,
                 output=VisionResult,
                 metadata=self._metadata(case, "vision"),
                 max_tokens=3_000,
@@ -728,8 +756,6 @@ class OtariRisk:
         return _Outcome("vision", record, findings, result=result)
 
     async def _gate(self, case: _Case) -> _Outcome:
-        if not self.guard_url:
-            return _Outcome("gate")
         prompt = prompts.load("gate")
         text = case.message
         messages = [
@@ -738,7 +764,9 @@ class OtariRisk:
         ]
         try:
             _, record = await case.client.chat(
-                "gate", TRIAGE_MODEL, messages,
+                "gate",
+                TRIAGE_MODEL,
+                messages,
                 guardrails=self._guardrails(case, "block"),
                 metadata=self._metadata(case, "gate"),
                 max_tokens=256,
@@ -772,7 +800,9 @@ class OtariRisk:
             servers = mcp if "mcp" not in disabled else None
             try:
                 result, record = await case.client.chat(
-                    "investigator", INVESTIGATOR_MODEL, messages,
+                    "investigator",
+                    INVESTIGATOR_MODEL,
+                    messages,
                     output=InvestigatorResult,
                     tools=offered or None,
                     mcp_servers=servers,
@@ -800,7 +830,10 @@ class OtariRisk:
                 log.warning("investigator failed with near-intel attached (%s); retrying without it", exc.label)
                 disabled.add("mcp")
                 payee = await self._payee(case)
-                messages[1] = {"role": "user", "content": f"{self._facts(case, payee=payee)}\n\n{self._message_view(case)}"}
+                messages[1] = {
+                    "role": "user",
+                    "content": f"{self._facts(case, payee=payee)}\n\n{self._message_view(case)}",
+                }
             except OtariError as exc:
                 return _Outcome("investigator", exc.record, failure=exc)
         available = {t["type"] for t in offered} | ({"mcp"} if servers else set())
@@ -820,7 +853,9 @@ class OtariRisk:
         while True:
             try:
                 result, record = await case.client.chat(
-                    "reviewer", model, messages,
+                    "reviewer",
+                    model,
+                    messages,
                     output=ReviewerResult,
                     tools=tools,
                     metadata=self._metadata(case, "reviewer"),
@@ -954,7 +989,11 @@ class OtariRisk:
         others_flagged = bool(rules.findings) or any(o.findings for o in outcomes if o.step != "reviewer")
         if reviewer is not None and reviewer.findings and others_flagged:
             model = reviewer.record.model if reviewer.record else None
-            ai.append(Finding(Reason.SECOND_OPINION, "an independent reviewer model also flagged this payment", "reviewer", model))
+            ai.append(
+                Finding(
+                    Reason.SECOND_OPINION, "an independent reviewer model also flagged this payment", "reviewer", model
+                )
+            )
         findings = merge_findings([*rules.findings, *ai])
         if not ai and any(o.failure is not None for o in outcomes):
             return self._fail_closed(case, outcomes, findings, steps, rules.hold_for_ms)
@@ -1004,7 +1043,3 @@ class OtariRisk:
         if note:
             parts.append(note)
         return "; ".join(parts)
-
-
-def _amount_text(value: str) -> str:
-    return re.sub(r"[^0-9.,]", "", value)[:20]

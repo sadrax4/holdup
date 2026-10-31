@@ -1,0 +1,28 @@
+{% macro tags(items) -%}
+{% for tag in items %}<span class="tag">{{ tag }}</span>{% endfor %}
+{%- endmacro %}
+
+{% macro reason_list(rows) -%}
+<ul class="reasons">
+  {% for row in rows %}
+  <li class="reason">
+    <p class="reason-label">{{ row.label }}</p>
+    {% if row.detail %}<p class="reason-detail">{{ row.detail }}</p>{% endif %}
+    <p class="tags">{{ tags(row.tags) }}</p>
+    {% if row.citations %}
+    <p class="citations small">Sources:
+      {% for c in row.citations %}{% if c.startswith("http") %}<a href="{{ c }}" rel="noopener noreferrer nofollow" target="_blank">{{ c }}</a>{% else %}<span class="mono">{{ c }}</span>{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+    </p>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{%- endmacro %}
+
+{% macro tx_link(tx) -%}
+{% if tx.url %}<a class="tx" href="{{ tx.url }}" rel="noopener noreferrer" target="_blank">{{ tx.label }} tx <span class="mono">{{ tx.short }}</span></a>{% else %}<span class="tx">{{ tx.label }} tx <span class="mono">{{ tx.short }}</span></span>{% if tx.simulated %} <span class="badge tone-muted badge-small">simulated</span>{% endif %}{% endif %}
+{%- endmacro %}
+
+{% macro copy_block(text) -%}
+<div class="code-block"><pre><code>{{ text }}</code></pre><button type="button" class="copy" data-copy="{{ text }}">Copy</button></div>
+{%- endmacro %}

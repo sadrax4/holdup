@@ -48,11 +48,26 @@ async def test_a_user_key_is_minted_and_capped_by_its_own_ceiling() -> None:
     assert created == UserKey("key-1", "otk_v1_us_minted", "budget-1", "ceiling-1", "holdup-u3kq7x2m9aa.holdup.testnet")
     assert "otk_v1_us_minted" not in repr(created)
     assert org.calls == [
-        ("POST", "/organizations/me/keys", {"key_name": "holdup-u3kq7x2m9aa.holdup.testnet", "metadata": {"app": "holdup"}}),
-        ("POST", "/organizations/me/budgets",
-         {"name": "holdup-u3kq7x2m9aa.holdup.testnet-daily", "max_budget": 0.25, "reset_alignment": "calendar_day"}),
-        ("POST", "/organizations/me/spend-ceilings",
-         {"scope_type": "api_token", "scope_id": "key-1", "budget_id": "budget-1", "name": "holdup-u3kq7x2m9aa.holdup.testnet-ceiling"}),
+        (
+            "POST",
+            "/organizations/me/keys",
+            {"key_name": "holdup-u3kq7x2m9aa.holdup.testnet", "metadata": {"app": "holdup"}},
+        ),
+        (
+            "POST",
+            "/organizations/me/budgets",
+            {"name": "holdup-u3kq7x2m9aa.holdup.testnet-daily", "max_budget": 0.25, "reset_alignment": "calendar_day"},
+        ),
+        (
+            "POST",
+            "/organizations/me/spend-ceilings",
+            {
+                "scope_type": "api_token",
+                "scope_id": "key-1",
+                "budget_id": "budget-1",
+                "name": "holdup-u3kq7x2m9aa.holdup.testnet-ceiling",
+            },
+        ),
     ]
 
 

@@ -1,0 +1,28 @@
+{% extends "fixtures/base.html" %}
+{% block title %}Northwind Paper Co. - Invoice NP-2291{% endblock %}
+{% block brand %}fixture northwind{% endblock %}
+{% block banner_text %}This page imitates a supplier's genuine invoice for the HoldUp demo. The forwarded copy in the demo changes the wallet and the total. Northwind Paper Co. is made up.{% endblock %}
+{% block body %}
+<header class="nw-top">
+  <span class="nw-logo" aria-hidden="true">N</span>
+  <span class="nw-name">Northwind Paper Co.</span>
+  <nav class="nw-nav"><a href="/fixtures/northwind">Home</a> <a href="/fixtures/northwind/invoices/NP-2291">Invoices</a></nav>
+</header>
+<main class="nw-main">
+  <section class="nw-card nw-invoice">
+    <h1>Invoice NP-2291</h1>
+    <p class="nw-meta">October deliveries &middot; due 15 Nov 2026</p>
+    <table class="nw-table">
+      <thead><tr><th scope="col">Item</th><th scope="col" class="num">Amount</th></tr></thead>
+      <tbody>
+        <tr><td>40 reams copy paper</td><td class="num">600.00</td></tr>
+        <tr><td>25 boxes envelopes</td><td class="num">350.00</td></tr>
+        <tr><td>Delivery</td><td class="num">200.00</td></tr>
+      </tbody>
+      <tfoot><tr><th scope="row">Total due (USDC)</th><td class="num">1,150.00</td></tr></tfoot>
+    </table>
+    <p>Pay to our usual account: <span class="nw-account">{{ supplier_account }}</span></p>
+    <p class="nw-small">Our payment details have not changed. We never change them by email.</p>
+  </section>
+</main>
+{% endblock %}

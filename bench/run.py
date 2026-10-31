@@ -120,7 +120,10 @@ def score(model: str, checks: list[Check]) -> ModelScore:
 
 async def check_item(client: OtariClient, model: str, item: dict[str, Any]) -> Check:
     prompt = prompts.load("triage")
-    facts = f"PAYMENT FACTS (looked up by HoldUp)\n- payee account: {item['payee']}\n- amount: {item['amount']} {item['asset']}"
+    facts = (
+        "PAYMENT FACTS (looked up by HoldUp)\n"
+        f"- payee account: {item['payee']}\n- amount: {item['amount']} {item['asset']}"
+    )
     messages = [
         {"role": "system", "content": prompt.text},
         {"role": "user", "content": f"{facts}\n\n{untrusted('FORWARDED MESSAGE', item['text'])}"},
@@ -128,14 +131,18 @@ async def check_item(client: OtariClient, model: str, item: dict[str, Any]) -> C
     started = time.monotonic()
     try:
         result, record = await client.chat(
-            "triage", model, messages,
+            "triage",
+            model,
+            messages,
             output=TriageResult,
             metadata={"app": "holdup", "step": "triage", "bench": item["id"]},
             max_tokens=2_000,
             prompt_sha256=prompt.sha256,
         )
     except OtariError as exc:
-        return Check(item["id"], model, item["label"], None, round((time.monotonic() - started) * 1000), error=exc.label)
+        return Check(
+            item["id"], model, item["label"], None, round((time.monotonic() - started) * 1000), error=exc.label
+        )
     braked = any(getattr(result, name) for name in SIGNALS)
     return Check(item["id"], model, item["label"], braked, record.latency_ms, record.cost_usd)
 
@@ -156,7 +163,8 @@ def render(scores: list[ModelScore], *, replay: bool, items: int) -> str:
     lines = [
         f"# {title}",
         "",
-        f"{items} items, triage prompt {prompts.load('triage').version}, run {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}.",
+        f"{items} items, triage prompt {prompts.load('triage').version}, "
+        f"run {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}.",
         "",
         "| Model | Checks | Failed | Precision | Recall | False holds | Median latency (ms) | Cost per check (USD) |",
         "|---|---|---|---|---|---|---|---|",

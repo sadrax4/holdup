@@ -15,9 +15,23 @@ from holdup.risk.prompts.contracts import InvestigatorResult, ReviewerResult, Tr
 from holdup.risk.replay import FIXTURES_DIR, ReplayTransport, available_scenarios, replay_client
 from holdup.workers.runtime import ScenarioResolver
 
-REQUIRED = {"hero", "invoice", "benign", "injection-only", "budget_exceeded", "guardrail_violation",
-            "guardrail_unavailable", "all_candidates_failed", "waf_html_403"}
-CONTRACTS = {"triage": TriageResult, "vision": VisionResult, "investigator": InvestigatorResult, "reviewer": ReviewerResult}
+REQUIRED = {
+    "hero",
+    "invoice",
+    "benign",
+    "injection-only",
+    "budget_exceeded",
+    "guardrail_violation",
+    "guardrail_unavailable",
+    "all_candidates_failed",
+    "waf_html_403",
+}
+CONTRACTS = {
+    "triage": TriageResult,
+    "vision": VisionResult,
+    "investigator": InvestigatorResult,
+    "reviewer": ReviewerResult,
+}
 
 
 def body(step: str, text: str = "hello", **extra: Any) -> dict[str, Any]:
@@ -40,7 +54,7 @@ def recorded_responses() -> list[tuple[str, str, dict[str, Any]]]:
 
 
 def test_every_required_scenario_is_recorded_and_marked() -> None:
-    assert REQUIRED <= set(available_scenarios())
+    assert set(available_scenarios()) >= REQUIRED
     for path in FIXTURES_DIR.glob("*.json"):
         text = path.read_text()
         document = json.loads(text)
@@ -109,14 +123,19 @@ async def test_the_firewall_rule_blocks_quotes_until_they_are_replaced() -> None
     transport = ReplayTransport("waf_html_403")
     blocked = await post(transport, body("triage", "it's here"))
     assert blocked.status_code == 403 and blocked.headers["content-type"] == "text/html"
-    passed = await post(transport, body("triage", "it’s here"))
+    passed = await post(transport, body("triage", "it\u2019s here"))
     assert passed.status_code == 200
 
 
 async def test_streamed_replays_carry_tool_calls_and_cost_through_the_client() -> None:
     client = replay_client(Settings(), "hero")
-    text, record = await client.chat("investigator", INVESTIGATOR_MODEL, [{"role": "user", "content": "x"}],
-                                     metadata={"step": "investigator"}, stream=True)
+    text, record = await client.chat(
+        "investigator",
+        INVESTIGATOR_MODEL,
+        [{"role": "user", "content": "x"}],
+        metadata={"step": "investigator"},
+        stream=True,
+    )
     assert json.loads(text)["brake"] is True
     assert [c["name"] for c in record.tool_calls] == ["otari_web_search", "otari_web_search", "otari_web_fetch"]
     assert record.tool_calls[0]["sources"] and record.cost_usd == pytest.approx(0.021523)

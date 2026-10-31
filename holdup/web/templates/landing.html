@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}HoldUp: payments with brakes{% endblock %}
+{% block main %}
+<section class="hero">
+  <p class="eyebrow">Telegram payments on NEAR</p>
+  <h1>Give AI the brakes,<br><span class="accent">not the keys.</span></h1>
+  <p class="lead">Pay someone new and the money waits in a vault that has no keys. While it waits, deterministic rules and open-weight AI models check the payment. If something looks wrong they make the wait longer. They can never move your money, and nobody can release it early.</p>
+  <div class="actions">
+    <a class="btn btn-primary" href="/console">Try the web console</a>
+    {% if telegram %}<a class="btn" href="https://t.me/{{ telegram }}">Open @{{ telegram }}</a>{% endif %}
+    <a class="btn btn-ghost" href="/prove">See the proof</a>
+  </div>
+</section>
+
+<section class="section">
+  <h2>How a payment works</h2>
+  <ol class="step-list">
+    <li>
+      <h3>You pay</h3>
+      <p>Type <span class="mono nowrap">send 50 {{ symbol }} to friend.testnet</span>. Forward the message that asked you to pay, and it is checked too.</p>
+    </li>
+    <li>
+      <h3>It waits</h3>
+      <p>Payments to someone you have not trusted yet sit in HoldVault for a short wait. Trusted payees are paid at once, up to a daily cap.</p>
+    </li>
+    <li>
+      <h3>Checks add time</h3>
+      <p>Rules react within seconds. AI models dig deeper with web search, page fetches, code execution and on-chain intel. A flag extends the hold and records the reasons on-chain.</p>
+    </li>
+    <li>
+      <h3>You decide</h3>
+      <p>Cancel and the money comes back. Do nothing and it releases when the time is up. A guardian you chose can cancel for you.</p>
+    </li>
+  </ol>
+</section>
+
+<section class="section">
+  <h2>Why it is safe</h2>
+  <div class="pillars">
+    <div class="card pillar">
+      <h3>No keys to steal</h3>
+      <p>The vault contract has zero access keys: no upgrades, no admin, no way out for the money except its own rules.</p>
+    </div>
+    <div class="card pillar">
+      <h3>The AI can only brake</h3>
+      <p>The oracle's single key can call <span class="mono">extend_hold</span>, which only makes a hold longer, never shorter, capped at 72 hours.</p>
+    </div>
+    <div class="card pillar">
+      <h3>Reports travel</h3>
+      <p>Every cancel after a warning is counted on-chain against the payee, so the next sender is braked by a rule within seconds.</p>
+    </div>
+    <div class="card pillar">
+      <h3>Every reason is public</h3>
+      <p>Each brake links to a timeline and an evidence JSON whose sha256 is stored with the hold. No message text ever goes on-chain.</p>
+    </div>
+  </div>
+</section>
+
+{% if stats %}
+<section class="section">
+  <h2>On this server so far</h2>
+  <div class="tiles tiles-compact">
+    <div class="tile"><span class="tile-value">{{ stats.get("holds", 0) }}</span><span class="tile-title">payments</span></div>
+    <div class="tile"><span class="tile-value">{{ stats.get("brakes", 0) + stats.get("provisional_brakes", 0) }}</span><span class="tile-title">brakes</span></div>
+    <div class="tile"><span class="tile-value">{{ stats.get("cancels_after_flag", 0) }}</span><span class="tile-title">cancelled after a warning</span></div>
+    <div class="tile"><span class="tile-value">{{ stats.get("releases", 0) }}</span><span class="tile-title">released</span></div>
+  </div>
+  <p><a href="/stats">All statistics</a></p>
+</section>
+{% endif %}
+
+{% if stable_note %}<p class="note">{{ stable_note }}</p>{% endif %}
+{% endblock %}

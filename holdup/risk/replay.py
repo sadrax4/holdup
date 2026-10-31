@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
@@ -38,7 +39,10 @@ log = logging.getLogger(__name__)
 FIXTURES_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "otari"
 DEFAULT_SCENARIO = "benign"
 REPLAY_CREATED = 1793448000  # 2026-10-31, a fixed timestamp so replays are deterministic
-WAF_PAGE = b"<html>\r\n<head><title>403 Forbidden</title></head>\r\n<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n</body>\r\n</html>\r\n"
+WAF_PAGE = (
+    b"<html>\r\n<head><title>403 Forbidden</title></head>\r\n"
+    b"<body>\r\n<center><h1>403 Forbidden</h1></center>\r\n</body>\r\n</html>\r\n"
+)
 _WAF_CHARS = ("\u0060", "'", '"')
 
 ScenarioResolver = Callable[..., str]
@@ -97,8 +101,9 @@ class ReplayTransport(httpx.AsyncBaseTransport):
         self.fixtures_dir = Path(fixtures_dir)
         self.default = default
         self.strict = strict  # refuse requests whose shape differs from what the fixture recorded
-        self.requests: list[Replayed] = []
-        self.mismatches: list[str] = []
+        # The latest requests and shape mismatches, bounded for long-running offline servers.
+        self.requests: deque[Replayed] = deque(maxlen=500)
+        self.mismatches: deque[str] = deque(maxlen=100)
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         raw = await request.aread()
@@ -130,8 +135,12 @@ class ReplayTransport(httpx.AsyncBaseTransport):
         model = str(body.get("model", ""))
         entry = self._entry(scenario, step)
         if entry is None:
-            return self._answer(scenario, step, body, httpx.Response(
-                404, json={"detail": f"no recorded response for step {step} in scenario {scenario}"}))
+            return self._answer(
+                scenario,
+                step,
+                body,
+                httpx.Response(404, json={"detail": f"no recorded response for step {step} in scenario {scenario}"}),
+            )
         problems = self._check(entry.get("expect") or {}, body)
         if problems:
             message = f"replay {scenario}/{step}: " + "; ".join(problems)
@@ -142,11 +151,16 @@ class ReplayTransport(httpx.AsyncBaseTransport):
         by_model = entry.get("by_model")
         recorded = (by_model.get(model) or by_model.get("*")) if isinstance(by_model, dict) else entry.get("response")
         if recorded is None:
-            return self._answer(scenario, step, body, httpx.Response(
-                404, json={"detail": f"no recorded response for {model} at {scenario}/{step}"}))
+            return self._answer(
+                scenario,
+                step,
+                body,
+                httpx.Response(404, json={"detail": f"no recorded response for {model} at {scenario}/{step}"}),
+            )
         if recorded.get("waf") and any(ch in text for text in _texts(body) for ch in _WAF_CHARS):
-            return self._answer(scenario, step, body, httpx.Response(
-                403, headers={"content-type": "text/html"}, content=WAF_PAGE))
+            return self._answer(
+                scenario, step, body, httpx.Response(403, headers={"content-type": "text/html"}, content=WAF_PAGE)
+            )
         return self._answer(scenario, step, body, self._render(recorded, body, scenario, step))
 
     def _answer(self, scenario: str, step: str, body: dict[str, Any], response: httpx.Response) -> httpx.Response:
@@ -195,7 +209,9 @@ class ReplayTransport(httpx.AsyncBaseTransport):
             completion = {
                 **base,
                 "object": "chat.completion",
-                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": finish}],
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": finish}
+                ],
                 "usage": usage,
             }
             if calls:
