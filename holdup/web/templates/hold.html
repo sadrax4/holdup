@@ -59,6 +59,7 @@
           {% for row in entry.reasons %}<li>{{ row.label }} {{ tags(row.tags) }}</li>{% endfor %}
         </ul>
         {% endif %}
+        {% if entry.confirmed %}<p class="small muted">{% if entry.reasons %}Also confirmed{% else %}Confirmed{% endif %} {{ entry.confirmed }} earlier reason{{ "" if entry.confirmed == 1 else "s" }}.</p>{% endif %}
         {% if entry.evidence_hash %}<p class="small">Evidence sha256 <a class="mono break" href="{{ evidence_url }}?sha256={{ entry.evidence_hash }}">{{ entry.evidence_hash }}</a></p>{% endif %}
         {% if entry.tx %}<p class="small">{{ tx_link(entry.tx) }}</p>{% endif %}
       </li>

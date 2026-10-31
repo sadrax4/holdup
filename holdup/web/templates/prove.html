@@ -48,7 +48,7 @@
   <p><span class="mono">holdup prove</span> signs each of these with the real keys and records how the network rejects them. Nothing reaches a contract: the node refuses the transaction before it runs.</p>
   {% endif %}
   <div class="table-wrap">
-    <table class="table">
+    <table class="table attempts">
       <thead><tr><th scope="col">Key</th><th scope="col">Tries to</th><th scope="col">Rejected with</th>{% if proof.simulated %}<th scope="col">Result</th>{% endif %}</tr></thead>
       <tbody>
         {% for attempt in proof.attempts %}

@@ -59,7 +59,8 @@ class TimelineEntry:
     detail: str
     tone: str  # "neutral", "brake", "ok", "muted", "bad" or "pending"
     when_ms: int | None = None
-    reasons: list[ReasonRow] = field(default_factory=list)
+    reasons: list[ReasonRow] = field(default_factory=list)  # reasons this step added
+    confirmed: int = 0  # earlier reasons this step found again
     tx: TxLink | None = None
     evidence_hash: str | None = None
 
@@ -213,7 +214,10 @@ def _context_note(summary: Mapping[str, Any] | None) -> str:
         parts.append("an image")
     if not parts:
         return ""
-    return f"The sender shared {' and '.join(parts)} with this payment. It was checked, and it stays private: it is not on-chain or on this page."
+    return (
+        f"The sender shared {' and '.join(parts)} with this payment. "
+        "It was checked, and it stays private: it is not on-chain or on this page."
+    )
 
 
 def build_hold_view(
@@ -310,10 +314,12 @@ def build_timeline(
         )
     ]
     extend_txs = by_label.get("extend", [])
+    seen: set[Reason] = set()
     for index in range(max(len(extend_txs), len(evidence_docs))):
         document_text, digest = evidence_docs[index] if index < len(evidence_docs) else ("", None)
         document = _load_json(document_text)
         findings = findings_from_evidence(document)
+        found = {f.reason for f in findings}
         decided = document.get("decided_ms")
         entries.append(
             TimelineEntry(
@@ -321,11 +327,15 @@ def build_timeline(
                 "The oracle extended the hold and recorded the reasons and the evidence hash on-chain.",
                 "brake",
                 int(decided) if isinstance(decided, int) else None,
-                reasons=reason_rows(findings),
-                tx=tx_link(settings, "extend", extend_txs[index], simulated=simulated) if index < len(extend_txs) else None,
+                reasons=reason_rows(f for f in findings if f.reason not in seen),
+                confirmed=len(found & seen),
+                tx=tx_link(settings, "extend", extend_txs[index], simulated=simulated)
+                if index < len(extend_txs)
+                else None,
                 evidence_hash=digest,
             )
         )
+        seen |= found
 
     if hold.status == HoldStatus.CANCELLED:
         by_guardian = bool(hold.cancelled_by and hold.cancelled_by != hold.sender)
@@ -468,7 +478,11 @@ def stat_tiles(stats: Mapping[str, Any]) -> list[tuple[str, str, str]]:
     if "ai_cost_usd" in stats:
         tiles.append((f"${float(stats['ai_cost_usd'] or 0):.4f}", "Total AI cost", "as reported by the gateway"))
     known = {key for key, _, _ in STAT_TILES} | {"ai_cost_usd"}
-    tiles += [(str(v), k.replace("_", " ").capitalize(), "") for k, v in stats.items() if k not in known and isinstance(v, int | float)]
+    tiles += [
+        (str(v), k.replace("_", " ").capitalize(), "")
+        for k, v in stats.items()
+        if k not in known and isinstance(v, int | float)
+    ]
     return tiles
 
 
@@ -479,11 +493,17 @@ def stat_tiles(stats: Mapping[str, Any]) -> list[tuple[str, str, str]]:
 CHECK_TEXT: dict[str, tuple[str, str]] = {
     "code_hash": (
         "The vault runs the published code",
-        "Its code hash equals base58(sha256(res/holdvault.wasm)) from the repository, so anyone can rebuild and compare.",
+        (
+            "Its code hash equals base58(sha256(res/holdvault.wasm)) from the repository, "
+            "so anyone can rebuild and compare."
+        ),
     ),
     "vault_has_no_keys": (
         "The vault has no access keys",
-        "Nobody, including the HoldUp team, can upgrade the contract or move its funds. It only changes through its own methods.",
+        (
+            "Nobody, including the HoldUp team, can upgrade the contract or move its funds. "
+            "It only changes through its own methods."
+        ),
     ),
     "oracle_key": (
         "The AI's oracle can only add time",

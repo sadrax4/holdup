@@ -147,10 +147,10 @@ class Dialog:
         display_name: str = "",
         chat_ref: str | None = None,
     ) -> list[Reply]:
-        handler = self._commands.get(name.lower().lstrip("/"))
-        if handler is None:
-            return [Reply(f"I don't know /{name}. /help lists what I can do.")]
-        return await self._run(user_key, handler(user_key, list(args)), display_name, chat_ref)
+        name = name.lower().lstrip("/")
+        handler = self._commands.get(name)
+        work = handler(user_key, list(args)) if handler is not None else self._unknown(name)
+        return await self._run(user_key, work, display_name, chat_ref)
 
     async def text(
         self, user_key: str, text: str, *, display_name: str = "", chat_ref: str | None = None
@@ -274,6 +274,9 @@ class Dialog:
             return [Reply(texts.chatter_text(self.symbol))]
         now = self._now()
         self.engine.remember_context(user_key, replace(ctx, received_ms=ctx.received_ms or now))
+        for key, remembered in list(self._contexts.items()):
+            if remembered.expires_ms <= now and key != user_key:
+                del self._contexts[key]
         chars = len(ctx.forwarded_text) if ctx.forwarded_text else None
         has_image = ctx.image_bytes is not None
         previous = self._contexts.get(user_key)
@@ -315,11 +318,14 @@ class Dialog:
             return info, ""
         alternative = self.settings.asset_by_symbol(self.symbol)
         if symbol in STABLE_SYMBOLS and alternative is not None and alternative.symbol in STABLE_SYMBOLS:
-            note = f"{symbol} is not available on this server, so this pays in {alternative.symbol} instead: {alternative.label}."
+            note = (
+                f"{symbol} is not available on this server, "
+                f"so this pays in {alternative.symbol} instead: {alternative.label}."
+            )
             if alternative.symbol == "HUSD":
                 note += " It is not Circle USDC."
             return alternative, note
-        available = ", ".join(info.symbol for info in self.settings.assets.values())
+        available = ", ".join(asset.symbol for asset in self.settings.assets.values())
         return None, f"I can't send {symbol} here. Available: {available}."
 
     async def _offer(self, user_key: str, command: PayCommand) -> list[Reply]:
@@ -408,6 +414,9 @@ class Dialog:
     # ------------------------------------------------------------------
     # commands
     # ------------------------------------------------------------------
+
+    async def _unknown(self, name: str) -> list[Reply]:
+        return [Reply(f"I don't know /{name}. /help lists what I can do.")]
 
     async def _help(self, user_key: str, args: list[str]) -> list[Reply]:
         return [Reply(texts.help_text(self.symbol))]

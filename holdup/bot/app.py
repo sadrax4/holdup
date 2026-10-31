@@ -23,10 +23,19 @@ from telegram import (
     MessageOriginChat,
     MessageOriginHiddenUser,
     MessageOriginUser,
+    PhotoSize,
     Update,
 )
+from telegram import Document as TelegramDocument
 from telegram.error import TelegramError
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from telegram.request import BaseRequest
 
 from ..config import Settings
@@ -37,6 +46,7 @@ log = logging.getLogger(__name__)
 
 CONCURRENT_UPDATES = 16
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
+IMAGE_TOO_LARGE = "That image is too large to check (5 MB at most)."
 ONE_SHOT_BUTTONS = ("confirm:", "drop:", "sample:")
 _SECRET_TOKEN = re.compile(r"[A-Za-z0-9_-]{1,256}")
 
@@ -75,10 +85,7 @@ def build_bot(
     if not settings.telegram_bot_token:
         raise ValueError("TELEGRAM_BOT_TOKEN is not set")
     builder = (
-        Application.builder()
-        .token(settings.telegram_bot_token)
-        .updater(None)
-        .concurrent_updates(CONCURRENT_UPDATES)
+        Application.builder().token(settings.telegram_bot_token).updater(None).concurrent_updates(CONCURRENT_UPDATES)
     )
     if request is not None:
         builder = builder.request(request).get_updates_request(get_updates_request or request)
@@ -132,7 +139,7 @@ class TelegramChannel:
         app.add_handler(CommandHandler(commands, self.on_command, filters=own))
         app.add_handler(MessageHandler(own & (filters.PHOTO | filters.Document.IMAGE), self.on_image))
         app.add_handler(MessageHandler(own & filters.TEXT & ~filters.COMMAND, self.on_text))
-        app.add_handler(MessageHandler(own & filters.COMMAND, self.on_unknown_command))
+        app.add_handler(MessageHandler(own & filters.COMMAND, self.on_command))  # unknown commands get help
         app.add_handler(CallbackQueryHandler(self.on_button))
         app.add_error_handler(self.on_error)
         app.bot_data["holdup"] = self
@@ -162,27 +169,23 @@ class TelegramChannel:
 
     async def on_command(self, update: Update, context: Context) -> None:
         key, name, chat = _who(update)
-        command = _command_name(update.effective_message.text or "")
+        command = _command_name(_message(update).text or "")
         replies = await self.dialog.command(key, command, context.args or [], display_name=name, chat_ref=chat)
         await self.send(update, replies)
 
-    async def on_unknown_command(self, update: Update, context: Context) -> None:
-        command = _command_name(update.effective_message.text or "")
-        await self.send(update, [Reply(f"I don't know /{command}. /help lists what I can do.")])
-
     async def on_text(self, update: Update, context: Context) -> None:
         key, name, chat = _who(update)
-        text = update.effective_message.text or ""
+        text = _message(update).text or ""
         await self.send(update, await self.dialog.text(key, text, display_name=name, chat_ref=chat))
 
     async def on_forward(self, update: Update, context: Context) -> None:
         """A forwarded message is evidence about a payment, never a payment instruction."""
         key, name, chat = _who(update)
-        message = update.effective_message
+        message = _message(update)
         text = message.text or message.caption
-        image, mime, too_large = await self._download_image(message)
-        if too_large:
-            await self.send(update, [Reply("That image is too large to check (5 MB at most).")])
+        image, mime, problem = await self._download_image(message)
+        if problem:
+            await self.send(update, [Reply(problem)])
             if not text:
                 return
         replies = await self.dialog.context(
@@ -199,11 +202,10 @@ class TelegramChannel:
 
     async def on_image(self, update: Update, context: Context) -> None:
         key, name, chat = _who(update)
-        message = update.effective_message
-        image, mime, too_large = await self._download_image(message)
+        message = _message(update)
+        image, mime, problem = await self._download_image(message)
         if image is None:
-            text = "That image is too large to check (5 MB at most)." if too_large else "I could not read that image."
-            await self.send(update, [Reply(text)])
+            await self.send(update, [Reply(problem or "I could not read that image.")])
             return
         replies = await self.dialog.context(
             key, text=message.caption, image=image, image_mime=mime, forwarded=False, display_name=name, chat_ref=chat
@@ -248,25 +250,29 @@ class TelegramChannel:
             else:
                 await send_text(bot, chat_id, reply.text, reply.buttons)
 
-    async def _download_image(self, message: Message) -> tuple[bytes | None, str | None, bool]:
-        """(bytes, mime type, too_large) of the message's photo or image document."""
+    async def _download_image(self, message: Message) -> tuple[bytes | None, str | None, str]:
+        """(bytes, mime type, problem) for the message's photo or image document.
+
+        Without an image all three are empty; ``problem`` explains a download that failed.
+        """
+        item: PhotoSize | TelegramDocument
         if message.photo:
             item, mime = message.photo[-1], "image/jpeg"
         elif message.document is not None and (message.document.mime_type or "").startswith("image/"):
-            item, mime = message.document, message.document.mime_type
+            item, mime = message.document, message.document.mime_type or "image/jpeg"
         else:
-            return None, None, False
+            return None, None, ""
         if item.file_size and item.file_size > MAX_IMAGE_BYTES:
-            return None, None, True
+            return None, None, IMAGE_TOO_LARGE
         try:
             file = await item.get_file()
             data = bytes(await file.download_as_bytearray())
         except TelegramError as exc:
             log.warning("could not download an image: %s", exc)
-            return None, None, False
+            return None, None, "I could not read that image."
         if len(data) > MAX_IMAGE_BYTES:
-            return None, None, True
-        return data, mime, False
+            return None, None, IMAGE_TOO_LARGE
+        return data, mime, ""
 
     def _origin_name(self, message: Message) -> str:
         """Who the forwarded message came from, as Telegram shows it (empty for our own messages)."""
@@ -283,6 +289,13 @@ class TelegramChannel:
         if isinstance(origin, MessageOriginChannel):
             return origin.chat.title or ""
         return ""
+
+
+def _message(update: Update) -> Message:
+    """The message of a message update (message handlers only see updates that have one)."""
+    if update.effective_message is None:
+        raise ValueError("update without a message")
+    return update.effective_message
 
 
 def _who(update: Update) -> tuple[str, str, str]:

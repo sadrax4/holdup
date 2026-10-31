@@ -22,8 +22,14 @@ NOINDEX = {"X-Robots-Tag": "noindex, nofollow", "Cache-Control": "no-store"}
 
 # path under /fixtures -> (template, title shown in the index)
 PAGES: dict[str, tuple[str, str]] = {
-    "coinhaven/verify": ("fixtures/coinhaven_verify.html", "CoinHaven: fake wallet verification page (phishing imitation)"),
-    "northwind": ("fixtures/northwind_home.html", "Northwind Paper Co.: supplier home page with its real payment details"),
+    "coinhaven/verify": (
+        "fixtures/coinhaven_verify.html",
+        "CoinHaven: fake wallet verification page (phishing imitation)",
+    ),
+    "northwind": (
+        "fixtures/northwind_home.html",
+        "Northwind Paper Co.: supplier home page with its real payment details",
+    ),
     "northwind/invoices/NP-2291": ("fixtures/northwind_invoice.html", "Northwind Paper Co.: genuine invoice NP-2291"),
 }
 

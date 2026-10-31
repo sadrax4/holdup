@@ -126,7 +126,7 @@
   function showAccount(account) {
     accountBox.hidden = false;
     find("[data-account-id]").textContent = account.id;
-    find("[data-balances]").textContent = account.balances.join(" · ");
+    find("[data-balances]").textContent = account.balances.join(" \u00b7 ");
   }
 
   function apply(data) {
@@ -155,7 +155,7 @@
     submit.disabled = true;
     const typing = document.createElement("li");
     typing.className = "typing";
-    typing.textContent = "HoldUp is working…";
+    typing.textContent = "HoldUp is working\u2026";
     list.append(typing);
     scrollDown();
     try {

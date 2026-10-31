@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
 from collections.abc import Mapping, Sequence
 from datetime import timedelta
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.error import BadRequest, Forbidden, RetryAfter
+from telegram.warnings import PTBDeprecationWarning
 
 from ..interfaces import Notifier
 
@@ -71,7 +73,11 @@ def split_text(text: str, limit: int = MESSAGE_LIMIT) -> list[str]:
     return [part.rstrip("\n") for part in parts if part.strip()]
 
 
-def _seconds(value: int | float | timedelta) -> float:
+def retry_seconds(exc: RetryAfter) -> float:
+    """How long Telegram asked us to wait (an int today, a timedelta in a future PTB release)."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", PTBDeprecationWarning)
+        value = exc.retry_after
     return value.total_seconds() if isinstance(value, timedelta) else float(value)
 
 
@@ -91,7 +97,7 @@ async def send_text(bot: Bot, chat_id: int, text: str, buttons: Buttons | None =
             except RetryAfter as exc:
                 if attempt == 2:
                     raise
-                await asyncio.sleep(min(_seconds(exc.retry_after), MAX_RETRY_WAIT_S))
+                await asyncio.sleep(min(retry_seconds(exc), MAX_RETRY_WAIT_S))
             except Forbidden:
                 log.info("chat %s blocked the bot; message dropped", chat_id)
                 return

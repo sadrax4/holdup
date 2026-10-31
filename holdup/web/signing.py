@@ -64,9 +64,19 @@ def new_console_token() -> str:
     return secrets.token_urlsafe(24)
 
 
+def new_console_identity(secret: str) -> tuple[str, str]:
+    """A fresh cookie token and the user key it stands for."""
+    token = new_console_token()
+    return token, _console_key(secret, token)
+
+
 def console_user_key(secret: str, token: str | None) -> str | None:
     """``web:<keyed hash>`` for a well-formed cookie token, else None."""
     if not token or not _TOKEN.fullmatch(token):
         return None
+    return _console_key(secret, token)
+
+
+def _console_key(secret: str, token: str) -> str:
     digest = hmac.new(_key(secret, "console"), token.encode(), hashlib.sha256).hexdigest()[:24]
     return f"{CONSOLE_PREFIX}:{digest}"

@@ -7,7 +7,7 @@ import json
 import logging
 import shlex
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -92,10 +92,7 @@ def proof_view(
             AttemptRow(r.actor, r.description, ", ".join(r.expected), r.observed, r.passed) for r in attempts.results
         ]
     else:
-        rows = [
-            AttemptRow(a.actor, a.description, ", ".join(a.expected), "", None)
-            for a in plan_attempts(settings)
-        ]
+        rows = [AttemptRow(a.actor, a.description, ", ".join(a.expected), "", None) for a in plan_attempts(settings)]
     return ProofView(
         network=settings.network,
         simulated=bool(report and report.simulated),
@@ -170,16 +167,23 @@ class Site:
 
     def router(self) -> APIRouter:
         router = APIRouter()
-        html = {"response_class": HTMLResponse, "include_in_schema": False}
-        router.add_api_route("/", self.landing, methods=["GET"], **html)
-        router.add_api_route("/h/{hold_id:int}.json", self.hold_json, methods=["GET"])
-        router.add_api_route("/h/{hold_id:int}", self.hold_page, methods=["GET"], **html)
-        router.add_api_route("/v/{hold_id:int}.json", self.evidence, methods=["GET"])
-        router.add_api_route("/why/{hold_id:int}", self.why_page, methods=["GET"], **html)
-        router.add_api_route("/prove", self.prove_page, methods=["GET"], **html)
-        router.add_api_route("/prove.json", self.prove_json, methods=["GET"])
-        router.add_api_route("/stats", self.stats_page, methods=["GET"], **html)
-        router.add_api_route("/stats.json", self.stats_json, methods=["GET"])
+        html_pages: dict[str, Callable[..., Awaitable[Any]]] = {
+            "/": self.landing,
+            "/h/{hold_id:int}": self.hold_page,
+            "/why/{hold_id:int}": self.why_page,
+            "/prove": self.prove_page,
+            "/stats": self.stats_page,
+        }
+        json_views: dict[str, Callable[..., Awaitable[Any]]] = {
+            "/h/{hold_id:int}.json": self.hold_json,
+            "/v/{hold_id:int}.json": self.evidence,
+            "/prove.json": self.prove_json,
+            "/stats.json": self.stats_json,
+        }
+        for path, endpoint in html_pages.items():
+            router.add_api_route(path, endpoint, methods=["GET"], response_class=HTMLResponse, include_in_schema=False)
+        for path, endpoint in json_views.items():
+            router.add_api_route(path, endpoint, methods=["GET"])
         router.add_api_route("/export/{token}.csv", self.export, methods=["GET"], include_in_schema=False)
         router.add_api_route("/robots.txt", self.robots, methods=["GET"], include_in_schema=False)
         return router
@@ -285,8 +289,8 @@ class Site:
             try:
                 report = await asyncio.wait_for(verify_deploy(self.settings), PROOF_TIMEOUT_S)
                 view, ttl = proof_view(report, None, self.settings, checked_ms=now), PROOF_TTL_S
-            except Exception as exc:
-                log.warning("deployment check failed: %r", exc)
+            except Exception as exc:  # any RPC failure: show it on the page instead of a 500
+                log.warning("deployment check failed", exc_info=True)
                 error = f"Could not reach the NEAR RPC node ({type(exc).__name__}). Try again in a moment."
                 view, ttl = proof_view(None, None, self.settings, checked_ms=now, error=error), PROOF_ERROR_TTL_S
             self._proof = (time.monotonic() + ttl, view)
@@ -350,12 +354,21 @@ def rpc_commands(settings: Settings) -> list[tuple[str, str]]:
     if not settings.rpc_url or not settings.vault_account:
         return []
     commands = [
-        ("The vault's access keys (expect an empty list):", rpc_query(settings.rpc_url, "view_access_key_list", settings.vault_account)),
-        ("The vault's code hash (compare with base58 of sha256 of res/holdvault.wasm):", rpc_query(settings.rpc_url, "view_account", settings.vault_account)),
+        (
+            "The vault's access keys (expect an empty list):",
+            rpc_query(settings.rpc_url, "view_access_key_list", settings.vault_account),
+        ),
+        (
+            "The vault's code hash (compare with base58 of sha256 of res/holdvault.wasm):",
+            rpc_query(settings.rpc_url, "view_account", settings.vault_account),
+        ),
     ]
     for oracle in settings.oracle_accounts:
         commands.append(
-            (f"The oracle {oracle}'s keys (expect one function-call key for extend_hold):", rpc_query(settings.rpc_url, "view_access_key_list", oracle))
+            (
+                f"The oracle {oracle}'s keys (expect one function-call key for extend_hold):",
+                rpc_query(settings.rpc_url, "view_access_key_list", oracle),
+            )
         )
     return commands
 

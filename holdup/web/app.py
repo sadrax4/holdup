@@ -26,10 +26,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from telegram import Update
 from telegram.error import TelegramError
@@ -123,8 +124,8 @@ async def _start_bot(bot_app: Application, settings: Settings, stack: AsyncExitS
     """Initialize and start the bot for the app's lifetime; the web app keeps running without it."""
     try:
         await bot_app.initialize()
-    except Exception as exc:
-        log.warning("Telegram bot unavailable, webhook disabled: %r", exc)
+    except TelegramError:
+        log.warning("Telegram bot unavailable; the webhook is disabled", exc_info=True)
         return
     stack.push_async_callback(bot_app.shutdown)
     await bot_app.start()
@@ -187,17 +188,25 @@ def create_app(
     app.state.console = console
     app.add_middleware(SecurityHeaders)
 
-    @app.exception_handler(StarletteHTTPException)
-    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+    def error_response(request: Request, status: int, message: str) -> Response:
         path = request.url.path
         if path.startswith(JSON_PREFIXES) or path.endswith((".json", ".csv")):
-            return json_error(exc.status_code, str(exc.detail))
-        message = str(exc.detail) if exc.status_code < 500 else "Something went wrong on our side."
-        if exc.status_code == 404 and exc.detail == "Not Found":
-            message = "There is nothing at this address."
+            return json_error(status, message)
         return templates.TemplateResponse(
-            request, "error.html", {"status": exc.status_code, "message": message}, status_code=exc.status_code
+            request, "error.html", {"status": status, "message": message}, status_code=status
         )
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        message = str(exc.detail) if exc.status_code < 500 else "Something went wrong on our side."
+        if exc.status_code == 404 and exc.detail == "Not Found" and not request.url.path.endswith(".json"):
+            message = "There is nothing at this address."
+        return error_response(request, exc.status_code, message)
+
+    @app.exception_handler(Exception)
+    async def server_error(request: Request, exc: Exception) -> Response:
+        log.error("%s %s failed", request.method, request.url.path, exc_info=exc)
+        return error_response(request, 500, "Something went wrong on our side. Please try again in a moment.")
 
     async def telegram_webhook(secret_path: str, request: Request) -> Response:
         expected = settings.telegram_webhook_secret
@@ -228,7 +237,11 @@ def create_app(
             "guardrail": guard_router is not None,
         }
 
+    async def favicon() -> RedirectResponse:
+        return RedirectResponse("/static/favicon.svg", status_code=301)
+
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    app.add_api_route("/favicon.ico", favicon, methods=["GET"], include_in_schema=False)
     app.include_router(site.router())
     app.include_router(console.router())
     app.include_router(fixtures_router(templates, settings))
@@ -238,6 +251,7 @@ def create_app(
         app.include_router(guard_router)
     if mcp is not None:
         endpoint = mcp[0]
-        app.add_route("/mcp", endpoint, methods=["GET", "POST", "DELETE"])
+        # an exact route for "/mcp" and a mount for "/mcp/...": MCP clients do not follow redirects
+        app.router.routes.append(Route("/mcp", endpoint, methods=["GET", "POST", "DELETE"]))
         app.mount("/mcp", endpoint)
     return app

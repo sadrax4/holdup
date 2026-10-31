@@ -18,19 +18,17 @@ from .samples import Sample
 CURRENCY_HINT = "send 10 {symbol} to friend.testnet"
 
 
-def money(settings: Settings, amounts: Mapping[str, int], *, skip_zero: bool = True) -> str:
-    """``2 NEAR, 2000 HUSD`` in the settings' asset order."""
-    parts = [
-        fmt_amount(settings, asset_id, amounts.get(asset_id, 0))
-        for asset_id in settings.assets
-        if amounts.get(asset_id, 0) or not skip_zero
-    ]
+def money(settings: Settings, amounts: Mapping[str, int]) -> str:
+    """``2 NEAR, 2000 HUSD``: the non-zero amounts, in the settings' asset order."""
+    parts = [fmt_amount(settings, asset_id, amounts[asset_id]) for asset_id in settings.assets if amounts.get(asset_id)]
     return ", ".join(parts) or "nothing yet"
 
 
 def asset_notes(settings: Settings) -> list[str]:
-    """One line per token that is not NEAR, saying what it really is."""
-    return [f"{info.symbol} is {info.label}." for info in settings.assets.values() if info.symbol != "NEAR" and info.label]
+    """One line per token that is not NEAR, saying what it really is (``HUSD: HoldUp demo dollar (test token).``)."""
+    return [
+        f"{info.symbol}: {info.label}." for info in settings.assets.values() if info.symbol != "NEAR" and info.label
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -103,8 +101,10 @@ def welcome(
             "",
             "How it works:",
             f"- Pay with a message: {CURRENCY_HINT.format(symbol=symbol)}",
-            "- Payments to someone you have not trusted yet wait before they release. "
-            "Checks run during the wait and can only add time.",
+            (
+                "- Payments to someone you have not trusted yet wait before they release. "
+                "Checks run during the wait and can only add time."
+            ),
             "- Forward me the message that asked you to pay, and it gets checked too.",
             "- Only you, or a guardian you choose, can cancel a held payment. Nobody can release it early.",
             "",
@@ -148,7 +148,9 @@ def holds_text(settings: Settings, holds: Sequence[Hold], now_ms: int, symbol: s
     lines = ["Your recent payments:"]
     for hold in holds:
         status, _ = hold_status(hold, now_ms)
-        reasons = ", ".join(r.name.replace("_", " ").lower() for r in reasons_from_bits(hold.reason_bits))
+        reasons = ", ".join(
+            (r.name or str(int(r))).replace("_", " ").lower() for r in reasons_from_bits(hold.reason_bits)
+        )
         suffix = f" ({reasons})" if reasons else ""
         lines.append(f"#{hold.id} {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee} - {status}{suffix}")
     return "\n".join(lines)
@@ -157,7 +159,10 @@ def holds_text(settings: Settings, holds: Sequence[Hold], now_ms: int, symbol: s
 def why_text(settings: Settings, view: WhyView, now_ms: int, *, page: str = "", steps_page: str = "") -> str:
     hold = view.hold
     status, _ = hold_status(hold, now_ms)
-    lines = [f"Payment #{hold.id}: {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee}", status.capitalize() + "."]
+    lines = [
+        f"Payment #{hold.id}: {fmt_amount(settings, hold.asset, hold.amount)} to {hold.payee}",
+        status.capitalize() + ".",
+    ]
     findings = [f for f in view.findings if f.reason]
     if findings:
         lines.append("What the checks found:")
@@ -201,9 +206,7 @@ def confirm_text(
     return "\n".join(lines)
 
 
-def context_saved_text(
-    *, chars: int, has_image: bool, forwarded: bool, symbol: str, next_command: str = ""
-) -> str:
+def context_saved_text(*, chars: int, has_image: bool, forwarded: bool, symbol: str, next_command: str = "") -> str:
     if has_image and chars:
         what = "this image and its caption"
     elif has_image:
@@ -214,7 +217,10 @@ def context_saved_text(
     if next_command:
         lines += ["Now type the payment it asks for:", next_command]
     else:
-        lines += ["Nothing is sent until you type a payment and confirm it, for example:", CURRENCY_HINT.format(symbol=symbol)]
+        lines += [
+            "Nothing is sent until you type a payment and confirm it, for example:",
+            CURRENCY_HINT.format(symbol=symbol),
+        ]
     return "\n".join(lines)
 
 
@@ -236,8 +242,10 @@ def invite_text(code: str, links: Iterable[tuple[str, str]]) -> str:
     else:
         lines.append(f"Invite code: {code}")
     lines += [
-        "When they open it, they become your guardian: if a payment shows warning signs, "
-        "they get an alert and can cancel it for you.",
+        (
+            "When they open it, they become your guardian: if a payment shows warning signs, "
+            "they get an alert and can cancel it for you."
+        ),
         "The link works once and expires in 24 hours.",
     ]
     return "\n".join(lines)
@@ -247,10 +255,14 @@ def prove_text(settings: Settings) -> str:
     return "\n".join(
         [
             "HoldUp cannot move your money, and neither can its AI:",
-            f"- Your money sits in the vault contract {settings.vault_account}, which has no access keys: "
-            "nobody can upgrade it or take funds out.",
-            "- The AI's oracle key can call one method, extend_hold, which can only make a hold longer "
-            "(72 h after the payment at most).",
+            (
+                f"- Your money sits in the vault contract {settings.vault_account}, which has no access keys: "
+                "nobody can upgrade it or take funds out."
+            ),
+            (
+                "- The AI's oracle key can call one method, extend_hold, which can only make a hold longer "
+                "(72 h after the payment at most)."
+            ),
             "- The keeper's key can only call release, and only once a hold's time is up.",
             f"Checked live against the chain: {settings.public_base_url}/prove",
         ]
@@ -297,8 +309,10 @@ def budget_text(settings: Settings, stats: Mapping[str, Any]) -> str:
         [
             f"AI checks: {_MODES.get(settings.otari_mode, settings.otari_mode)}.",
             f"Spent so far on this server: ${cost:.4f} over {stats.get('ai_checks', 0)} checks.",
-            "The AI budget has a hard ceiling. If it runs out, payments stay on hold (fail-closed) "
-            "instead of going through without a check.",
+            (
+                "The AI budget has a hard ceiling. If it runs out, payments stay on hold (fail-closed) "
+                "instead of going through without a check."
+            ),
         ]
     )
 

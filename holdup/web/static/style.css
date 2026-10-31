@@ -568,6 +568,56 @@ main.page {
   border-bottom: 0;
 }
 
+.table td.mono {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 520px) {
+  .table th,
+  .table td {
+    padding: 9px 10px;
+  }
+}
+
+/* On a phone each attempt reads as two lines: who tries what, then how it was refused. */
+@media (max-width: 560px) {
+  .attempts thead {
+    display: none;
+  }
+
+  .attempts tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .attempts tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .attempts td {
+    padding: 0;
+    border: 0;
+  }
+
+  .attempts td:first-child {
+    font-weight: 700;
+  }
+
+  .attempts td:nth-child(2) {
+    flex: 1 1 60%;
+  }
+
+  .attempts td.mono {
+    overflow-wrap: normal;
+    word-break: normal;
+  }
+}
+
 /* ---------- landing ---------- */
 
 .hero {

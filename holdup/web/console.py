@@ -36,7 +36,7 @@ from .signing import (
     EXPORT_TTL_MS,
     console_user_key,
     export_token,
-    new_console_token,
+    new_console_identity,
 )
 
 log = logging.getLogger(__name__)
@@ -46,7 +46,15 @@ Buttons = list[list[tuple[str, str]]]
 COOKIE_MAX_AGE_S = 30 * 24 * 3600
 NAME_MAX = 32
 _BRAKE_PREFIXES = ("Brakes on", "Guardian alert", "Warning signs")
-_OK_PREFIXES = ("Released", "Paid instantly", "Cancelled", "Done:", "You received", "Checks finished", "Full check finished")
+_OK_PREFIXES = (
+    "Released",
+    "Paid instantly",
+    "Cancelled",
+    "Done:",
+    "You received",
+    "Checks finished",
+    "Full check finished",
+)
 
 
 def _wall_ms() -> int:
@@ -106,7 +114,13 @@ class ConsoleNotifier:
         self.post(user_key, "bot", text, buttons)
 
     def post(
-        self, user_key: str, role: str, text: str, buttons: Sequence[Sequence[tuple[str, str]]] | None = None, *, title: str = ""
+        self,
+        user_key: str,
+        role: str,
+        text: str,
+        buttons: Sequence[Sequence[tuple[str, str]]] | None = None,
+        *,
+        title: str = "",
     ) -> ConsoleMessage:
         conversation = self._conversations.pop(user_key, None)
         if conversation is None:
@@ -183,7 +197,11 @@ class Chip:
 def story_chips(samples: Sequence[Sample]) -> list[Chip]:
     """Quick actions that walk through the demo story, then everyday commands."""
     chips: list[Chip] = []
-    for sample_id, title in (("hero", "CoinHaven DM"), ("invoice", "Northwind invoice"), ("benign", "Dinner with a friend")):
+    for sample_id, title in (
+        ("hero", "CoinHaven DM"),
+        ("invoice", "Northwind invoice"),
+        ("benign", "Dinner with a friend"),
+    ):
         sample = find_sample(list(samples), sample_id)
         if sample is None:
             continue
@@ -312,7 +330,9 @@ class Console:
 
     def router(self) -> APIRouter:
         router = APIRouter()
-        router.add_api_route("/console", self.page, methods=["GET"], response_class=HTMLResponse, include_in_schema=False)
+        router.add_api_route(
+            "/console", self.page, methods=["GET"], response_class=HTMLResponse, include_in_schema=False
+        )
         router.add_api_route("/console/api/state", self.state, methods=["GET"])
         router.add_api_route("/console/api/messages", self.messages, methods=["GET"])
         router.add_api_route("/console/api/start", self.start, methods=["POST"])
@@ -354,9 +374,7 @@ class Console:
             client = request.client.host if request.client else "unknown"
             if not self.new_per_client.hit(client).allowed or not self.new_overall.hit("*").allowed:
                 raise HTTPException(429, "too many new console accounts right now; please try again later")
-            token = new_console_token()
-            key = console_user_key(self.secret, token)
-            assert key is not None
+            token, key = new_console_identity(self.secret)
         self._limit(key)
         payload = f"g_{body.invite}" if body.invite else ""
         replies = await self.dialog.start(key, display_name=_clean_name(body.name), payload=payload)
