@@ -83,7 +83,7 @@ class HoldView:
     evidence_published: str | None
     context_note: str
     account_urls: dict[str, str]
-    context: list[ReasonRow] = field(default_factory=list)  # noted by the rules, not a reason to hold
+    context: list[ReasonRow] = field(default_factory=list)  # noted by the checks, not a reason to hold
 
     @property
     def evidence_match(self) -> bool | None:

@@ -115,7 +115,7 @@ Dana: send 1250 USDC to northwind-paper.testnet
                1250 HUSD to northwind-paper.testnet. Quick checks found:
                - Payee account is brand new: created about 26 h ago [rules]
                - Payment details were changed by message: announces a new wallet or account [rules]
-               - Payee name looks like one of your trusted payees: looks like your trusted payee northwindpaper.testnet [rules]
+               - Payee name imitates a trusted payee or a known business: looks like your trusted payee northwindpaper.testnet [rules]
                - The numbers in the message do not add up: line items add up to 1,150.00 but the stated total is 1,250.00 [rules]
                The full check is still running. Cancel any time to get your money back.
                tx HCdpHq...onQz (simulated)
@@ -124,7 +124,7 @@ Dana: send 1250 USDC to northwind-paper.testnet
   bot -> Omar: Guardian alert: Dana's payment of 1250 HUSD to northwind-paper.testnet is held until 10:00 UTC.
                - Payee account is brand new: created about 26 h ago [rules]
                - Payment details were changed by message: announces a new wallet or account [rules]
-               - Payee name looks like one of your trusted payees: looks like your trusted payee northwindpaper.testnet [rules]
+               - Payee name imitates a trusted payee or a known business: looks like your trusted payee northwindpaper.testnet [rules]
                - The numbers in the message do not add up: line items add up to 1,150.00 but the stated total is 1,250.00 [rules]
                You can cancel it for them; the money goes back to Dana's HoldUp balance.
                [Cancel for Dana]  [Why?]
@@ -132,7 +132,7 @@ Dana: send 1250 USDC to northwind-paper.testnet
                1250 HUSD to northwind-paper.testnet:
                - Payment details were changed by message: announces a new wallet or account [rules] [triage gpt-oss-20b] [MCP near-intel] [reviewer deepseek-v4.1-flash-1017]
                - The numbers in the message do not add up: line items add up to 1,150.00 but the stated total is 1,250.00 [rules] [code execution] [reviewer deepseek-v4.1-flash-1017]
-               - Payee name looks like one of your trusted payees: looks like your trusted payee northwindpaper.testnet [rules] [MCP near-intel]
+               - Payee name imitates a trusted payee or a known business: looks like your trusted payee northwindpaper.testnet [rules] [MCP near-intel]
                - Matches public fraud warnings: the FBI warns that invoices announcing new payment details are a common business email compromise [web search, 1 source]
                - Payee account is brand new: created about 26 h ago [rules] [MCP near-intel]
                - Independent reviewer model also flagged it: it reviewed the payment without seeing the other steps' conclusions [reviewer deepseek-v4.1-flash-1017]
@@ -142,7 +142,7 @@ Dana: send 1250 USDC to northwind-paper.testnet
   bot -> Omar: Guardian alert: Dana's payment of 1250 HUSD to northwind-paper.testnet is held until 5 Nov 09:00 UTC.
                - Payment details were changed by message: announces a new wallet or account [rules] [triage gpt-oss-20b] [MCP near-intel] [reviewer deepseek-v4.1-flash-1017]
                - The numbers in the message do not add up: line items add up to 1,150.00 but the stated total is 1,250.00 [rules] [code execution] [reviewer deepseek-v4.1-flash-1017]
-               - Payee name looks like one of your trusted payees: looks like your trusted payee northwindpaper.testnet [rules] [MCP near-intel]
+               - Payee name imitates a trusted payee or a known business: looks like your trusted payee northwindpaper.testnet [rules] [MCP near-intel]
                - Matches public fraud warnings: the FBI warns that invoices announcing new payment details are a common business email compromise [web search, 1 source]
                - Payee account is brand new: created about 26 h ago [rules] [MCP near-intel]
                - Independent reviewer model also flagged it: it reviewed the payment without seeing the other steps' conclusions [reviewer deepseek-v4.1-flash-1017]

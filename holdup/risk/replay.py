@@ -201,7 +201,10 @@ class ReplayTransport(httpx.AsyncBaseTransport):
         for text in _texts(body):
             if match := _LINKS_FACT.search(text):
                 for link in match.group(1).split(","):
-                    parts = urlsplit(link.strip())
+                    try:
+                        parts = urlsplit(link.strip())
+                    except ValueError:  # a host Python refuses (a full-width ? or /): no base to take
+                        continue
                     if parts.scheme in ("http", "https") and parts.netloc:
                         return f"{parts.scheme}://{parts.netloc}"
         return self.base_url

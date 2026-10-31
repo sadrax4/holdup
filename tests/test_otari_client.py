@@ -193,6 +193,7 @@ async def test_gateway_fields_go_in_the_body_and_tool_calls_are_streamed() -> No
             "status": "completed",
             "query": "q",
             "sources": ["https://a.example/x?y=1"],
+            "titles": {"https://a.example/x?y=1": "A"},
         },
         {
             "name": "otari_web_fetch",

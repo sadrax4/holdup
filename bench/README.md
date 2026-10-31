@@ -55,6 +55,17 @@ recall, the false-hold rate, the median latency and the mean cost per check, as 
 `usage.cost_usd`. A `--replay` run only proves that the harness works: its answers are recorded per
 label, so its numbers mean nothing.
 
+This measures the prompt, not the pipeline's decision. The pipeline weighs what triage reports
+(`weigh_claims` in `holdup/risk/pipeline.py`): a request for a secret, text aimed at the checker,
+changed payment details or impossible returns brake alone, while impersonation and pressure brake
+only when something independent agrees: a strong finding, a reason of the rules, a weak signal of the
+rules for another reason (not a young payee), or the reviewer, a model of another family, answering
+that the payment should wait, whatever reasons it lists. The reviewer's own judgement needs a judgement
+of another family or a weak signal of the rules, a young payee included. On their own they are kept as
+context; when the reviewer they wait for fails, the check fails closed and, once the engine's retries
+are spent, holds the day such a judgement held for before. The bench facts also name the item's asset (USDC)
+where the pipeline names the HUSD demo token and says that it stands in for USDC.
+
 ## Dev and test
 
 Each item has a fixed `split`: 102 dev items (53 scam, 49 benign) and 68 test items (32 scam, 36

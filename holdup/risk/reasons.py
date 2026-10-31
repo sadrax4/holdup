@@ -46,7 +46,7 @@ SHORT_LABELS: dict[Reason, str] = {
     Reason.PAYEE_REPORTED: "reports from other senders",
     Reason.PHISHING_LINK: "phishing link",
     Reason.PUBLIC_WARNING: "public scam warnings",
-    Reason.LOOKALIKE_PAYEE: "look-alike of a trusted payee",
+    Reason.LOOKALIKE_PAYEE: "look-alike payee name",
     Reason.AMOUNT_MISMATCH: "numbers do not add up",
     Reason.SECRET_REQUEST: "asks for a secret",
     Reason.AI_UNAVAILABLE: "AI check unavailable",

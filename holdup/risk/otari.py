@@ -473,10 +473,12 @@ def _tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
     kind = str(call.get("type") or "tool")
     entry: dict[str, Any] = {"name": f"otari_{kind}", "id": call.get("id"), "status": call.get("status")}
     if kind == "web_search":
+        found = [s for s in call.get("sources") or [] if isinstance(s, dict) and isinstance(s.get("url"), str)]
         entry["query"] = call.get("query")
-        entry["sources"] = [
-            s["url"] for s in call.get("sources") or [] if isinstance(s, dict) and isinstance(s.get("url"), str)
-        ]
+        entry["sources"] = [s["url"] for s in found]
+        titles = {s["url"]: s["title"] for s in found if isinstance(s.get("title"), str)}
+        if titles:
+            entry["titles"] = titles
     elif kind == "web_fetch":
         entry["url"] = call.get("url")
     error = call.get("error")

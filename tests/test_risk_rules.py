@@ -33,6 +33,7 @@ from holdup.risk.rules import (
     RulesRisk,
     invoice_check,
     invoice_mismatch,
+    holds_name,
     lookalike_match,
     lookalike_of,
     looks_alike,
@@ -543,6 +544,19 @@ def test_a_name_with_an_added_word_looks_alike() -> None:
     # A sub-account can only be created by its parent, so it belongs to the trusted payee.
     assert not looks_alike("invoices.acmesupplies.testnet", "acmesupplies.testnet")
     assert lookalike_of("acme-supplies-billing.testnet", ["acme-supplies.testnet"]) == "acme-supplies.testnet"
+
+
+def test_a_trusted_name_held_in_a_longer_one_without_word_boundaries_looks_alike() -> None:
+    """Red-team review (I1a, I2a): moved separators or a typo defeated both the skeleton and the added-word check."""
+    trusted = ["northwind-paper.near"]
+    for payee in ("northwindpaperco.near", "northwindpaper-billing.near", "billing-northwindpaper.near",
+                  "nothwind-paper-co.near"):
+        assert lookalike_match(payee, trusted) == ("northwind-paper.near", ADDED_WORD), payee
+    assert holds_name("northwindpaperco.near", "northwind-paper.near")
+    assert not holds_name("northwind-paper.near", "northwindpaperco.near")  # the longer one holds the shorter
+    assert not holds_name("lucasmartinphoto.near", "lucas.near")  # too short a name to tell from a coincidence
+    assert lookalike_match("invoices.northwind-paper.near", trusted) is None  # a sub-account of the trusted payee
+    assert lookalike_match("southwind-supply.near", trusted) is None
 
 
 def test_a_unit_price_counts_times_its_quantity() -> None:

@@ -732,7 +732,7 @@ async def test_the_code_execution_tag_needs_a_sandbox_run_the_stream_shows(turns
     assert ran == ([{"name": "otari_code_execution", "status": "inferred", "rounds": 1}] if turns == 2 else [])
 
 
-async def test_a_stalled_investigator_ends_at_the_check_deadline_and_triage_still_counts(
+async def test_a_stalled_investigator_ends_at_the_check_deadline_and_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stalled stream used to get 150 s per model, so two stalls ran out the engine's five minutes."""
@@ -763,7 +763,11 @@ async def test_a_stalled_investigator_ends_at_the_check_deadline_and_triage_stil
     assert time.monotonic() - started < 3
     investigator = next(s for s in verdict.steps if s.step == "investigator")
     assert investigator.error == "timeout"
-    assert verdict.brake and [f.reason for f in verdict.findings] == [Reason.URGENCY]  # triage's finding stands
+    # A deadline alone is no reason to hold, so the failure keeps the brake on; triage's flag stays on record.
+    # It waited for the steps that failed, so the verdict asks for the day the engine applies once its retries
+    # are spent (tests/test_engine_fail_closed_waiting.py).
+    assert verdict.brake and verdict.hold_for_ms == 24 * HOUR and verdict.summary.startswith("fail-closed")
+    assert [(f.reason, f.context) for f in verdict.findings] == [(Reason.AI_UNAVAILABLE, False), (Reason.URGENCY, True)]
 
 
 def risk_over(transport: ReplayTransport, intel: Intel | None = None) -> P.OtariRisk:

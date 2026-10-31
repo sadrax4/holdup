@@ -776,6 +776,7 @@ def invoice_mismatch(text: str | None) -> tuple[Decimal, Decimal] | None:
 
 _NETWORK_SUFFIXES = (".testnet", ".near")
 MIN_ADDED_WORD_NAME = 5  # a trusted name this long or longer is not a coincidence inside a longer one
+MIN_HELD_NAME = 8  # a trusted name this long, held in a longer one without word boundaries, is no coincidence
 
 
 def osa_distance(a: str, b: str) -> int:
@@ -824,6 +825,26 @@ def adds_a_word(longer: str, shorter: str) -> bool:
     return big[: len(small)] == small or big[-len(small):] == small
 
 
+def holds_name(longer: str, shorter: str) -> bool:
+    """Whether the letters of ``longer`` hold those of ``shorter``, or a name one edit from it, with letters added.
+
+    ``northwindpaperco``, ``billing-northwindpaper`` and ``nothwind-paper-co`` hold ``northwind-paper``,
+    where moved separators or a typo leave no word boundary for ``adds_a_word``. Only a name of
+    ``MIN_HELD_NAME`` letters or more counts: ``lucasmartin`` in ``lucasmartinphoto`` is the owner's
+    second account as often as not, which is why this weighs as an added word.
+    """
+    big, small = skeleton(longer), skeleton(shorter)
+    if len(small) < MIN_HELD_NAME or len(big) <= len(small):
+        return False
+    if small in big:
+        return True
+    return any(
+        osa_distance(big[start : start + size], small) <= 1
+        for size in (len(small) - 1, len(small), len(small) + 1)
+        for start in range(len(big) - size + 1)
+    )
+
+
 # How a payee name resembles a trusted one.
 CLOSE = "close"  # the same letters, or an edit or two apart: brakes alone
 ADDED_WORD = "added word"  # the trusted name with a word added: brakes only with another signal
@@ -843,7 +864,7 @@ def resemblance(a: str, b: str) -> str | None:
     limit = 1 if min(len(left), len(right)) < 6 else 2
     if osa_distance(left, right) <= limit:
         return CLOSE
-    if adds_a_word(a, b) or adds_a_word(b, a):
+    if adds_a_word(a, b) or adds_a_word(b, a) or holds_name(a, b) or holds_name(b, a):
         return ADDED_WORD
     return None
 
@@ -932,6 +953,48 @@ def weigh(signals: Iterable[tuple[Finding, str]]) -> list[Finding]:
         replace(finding, context=weight == CONTEXT or (weight == WEAK and not brakes)) for finding, weight in signals
     ]
     return sorted(marked, key=lambda f: int(f.reason))
+
+
+_DESCRIBED = frozenset(p.reason for p in _PATTERNS if p.weight == DETAIL)
+"""Reasons some patterns only describe (approval words): a context finding of one is such a description."""
+
+
+def signal_weight(finding: Finding) -> str:
+    """The weight a finding that ``weigh`` returned had before it was weighed.
+
+    A context finding is either a weak signal that met no second one (a deadline, a young payee),
+    which still adds to what another check finds, or a fact that is context by nature (a busy
+    payee, approval words alone). A finding that is a reason weighs as its reason does, a busy
+    payee as a weak one: it is only a reason next to a new account.
+    """
+    if finding.context:
+        return CONTEXT if finding.reason in CONTEXT_REASONS | _DESCRIBED else WEAK
+    if finding.reason in CONTEXT_REASONS:
+        return WEAK
+    return weight_of(finding.reason)
+
+
+_FACT_SOURCES = {
+    Reason.NEW_ACCOUNT: frozenset({"fixture", "fastnear"}),
+    Reason.MULE_PATTERN: frozenset({"fixture", "fastnear"}),
+    Reason.PAYEE_REPORTED: frozenset({"vault"}),
+}
+
+
+def facts_read(steps: Iterable[StepRecord]) -> frozenset[Reason]:
+    """The payee facts a precheck could read: those whose source answered its payee lookup.
+
+    A fact it could not read (the transaction index timed out, the check failed) is one it can
+    neither confirm nor contradict.
+    """
+    for step in steps:
+        if step.step != "precheck" or step.error is not None:
+            continue
+        for call in step.tool_calls:
+            if call.get("name") == "payee_profile":
+                answered = set(str(call.get("sources") or "").split("+"))
+                return frozenset(reason for reason, sources in _FACT_SOURCES.items() if answered & sources)
+    return frozenset()
 
 
 def summary_for(findings: Iterable[Finding]) -> str:

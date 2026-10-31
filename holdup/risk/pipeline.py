@@ -13,16 +13,38 @@ through the Otari gateway:
    near-intel MCP server, web search and web fetch, and computes every number
    with code execution;
 5. a reviewer from another model family gives a blind second opinion on large
-   payments and when triage and the investigator disagree.
+   payments, when triage and the investigator disagree, and when a judgement
+   of theirs waits for a model of another family to agree.
 
-Findings merge with an OR rule: any step that flags keeps the brake on. Model
-claims are checked before they count: a web search citation must be a page the
-gateway reports the search returned, a fetched page one it reports fetching or
-one that near-intel logged reading with fetch_page for this hold, and an amount
-mismatch must hold when HoldUp redoes the arithmetic on numbers that appear in
-the message. A claim about what a linked page or the public web shows needs
-such a page: without one it is dropped. A gateway failure that leaves no brake
-fails closed: the payment waits another hour and the engine tries again.
+Model claims are checked before they count: a web search citation must be a
+page the gateway reports the search returned, a fetched page one it reports
+fetching or one that near-intel logged reading with fetch_page for this hold,
+and an amount mismatch must hold when HoldUp redoes the arithmetic on numbers
+that appear in the message. A claim about what a linked page or the public web
+shows needs such a page: without one it is dropped.
+
+What is left is weighed (see ``weigh_claims``). What a message or a read page
+says (a request for a secret, text aimed at the checker, changed payment
+details, impossible returns, a phishing page), a mismatch HoldUp's arithmetic
+confirms and a public warning whose cited result names this payee or a site the
+message links to brake on their own. A claim about the payee counts as far as
+the rules' reading of the same facts goes, and as a judgement when the rules
+could not read them. A judgement HoldUp cannot check (impersonation, pressure,
+a warning that names nothing of this payment, a payee that imitates a brand,
+the reviewer's reading of changed details) brakes only when something
+independent agrees: a strong finding, a reason of the rules, a weak signal of
+the rules for another reason, or the reviewer of another family answering that
+the payment should wait. The reviewer is the second opinion: two other steps
+of different families (vision and triage, or a step served by a fallback) do
+not settle a judgement between them, and the reviewer's own judgement needs a
+judgement of another family or a weak signal of the rules, a young payee
+included. A reviewer that answers that the payment needs no longer hold gives
+no judgement. The rest stays on record as context, except a payee claim the
+payee facts contradict, which is left out. A gateway failure that leaves no
+reason to brake fails closed: the payment waits another hour and the engine
+tries again; when a judgement waited for the step that failed, the verdict
+asks for the day a judgement held before, which the engine applies once its
+retries are spent.
 """
 
 from __future__ import annotations
@@ -37,10 +59,10 @@ import re
 import time
 import unicodedata
 from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, unquote, unquote_plus, urlsplit
 
 from ..config import Settings
 from ..models import (
@@ -87,6 +109,7 @@ from .prompts.contracts import (
     TriageResult,
     VisionResult,
 )
+from .rules import CONTEXT, STRONG, WEAK, facts_read, signal_weight
 
 log = logging.getLogger(__name__)
 
@@ -114,9 +137,64 @@ MAX_LINKS = 5
 REVIEW_STABLE_UNITS = 100
 REVIEW_NEAR = 10
 STABLECOINS = frozenset({"USDC", "HUSD", "USDT"})
-STRONG = frozenset({Reason.SECRET_REQUEST, Reason.CHECKER_INJECTION})
+STAND_INS = {"HUSD": "USDC"}
+"""Demo tokens and the token each stands in for: the messages people forward name the real one."""
+MAX_HOLD_REASONS = frozenset({Reason.SECRET_REQUEST, Reason.CHECKER_INJECTION})
+"""Reasons that hold a payment for the longest wait on their own."""
 PAGE_CLAIMS = frozenset({Reason.PHISHING_LINK, Reason.SECRET_REQUEST})
 """Reasons a linked page can show, so a finding of them cites the page."""
+
+JUDGEMENT = "judgement"
+"""The weight of a model's reading that HoldUp cannot check: a reason only once something independent agrees."""
+CONTRADICTED = "contradicted"
+"""The weight of a model's claim about the payee that the facts HoldUp read contradict: left out of the verdict."""
+REVIEWER = "reviewer"
+"""The step, and the source of its findings, that gives the second opinion."""
+JUDGEMENTS = frozenset({Reason.IMPERSONATION, Reason.URGENCY})
+"""Readings of a message that HoldUp cannot check. The models report them for honest payments too (a
+business that names itself, a real due date), so on their own they are context."""
+REVIEWER_JUDGEMENTS = frozenset({Reason.DETAILS_CHANGED})
+"""Reasons that are a judgement when the reviewer gives them: in the first live runs every changed-details
+claim of the reviewer misread the payment (a demo token, an overpayment), while triage's held up."""
+PAYEE_CLAIMS = frozenset({Reason.NEW_ACCOUNT, Reason.MULE_PATTERN, Reason.PAYEE_REPORTED, Reason.LOOKALIKE_PAYEE})
+"""Facts about the payee that the rules read too: a model's claim of one weighs as the rules weighed the fact."""
+SHARED_DOMAINS = frozenset({
+    "t.me", "telegram.me", "telegra.ph", "wa.me", "bit.ly", "tinyurl.com", "linktr.ee", "forms.gle", "google.com",
+    "github.io", "github.com", "notion.site", "medium.com", "youtube.com", "youtu.be", "x.com", "twitter.com",
+    "facebook.com", "instagram.com", "discord.gg", "discord.com",
+})
+"""Sites whose pages belong to whoever posts them: a warning that names one is not about a link to it."""
+PATH_SITES = frozenset({
+    "t.me", "telegram.me", "telegra.ph", "wa.me", "bit.ly", "tinyurl.com", "linktr.ee", "forms.gle", "github.com",
+    "medium.com", "youtube.com", "youtu.be", "x.com", "twitter.com", "facebook.com", "instagram.com", "discord.gg",
+})
+"""Shared sites whose first path segment names the poster's own page (t.me/<handle>, discord.gg/<invite>): a
+warning that names the site with that segment is about the link."""
+_GENERIC_SEGMENTS = frozenset({
+    "joinchat", "s", "c", "invite", "channel", "user", "u", "watch", "p", "share", "groups", "pages", "profile.php",
+    "view", "forms", "d", "shorts", "embed", "status", "reel", "story.php", "people",
+})
+USER_SITES = frozenset({
+    "github.io", "notion.site", "netlify.app", "vercel.app", "pages.dev", "web.app", "firebaseapp.com",
+    "herokuapp.com", "blogspot.com", "wordpress.com", "wixsite.com", "webflow.io", "gitbook.io", "glitch.me",
+    "replit.app", "repl.co", "carrd.co", "weebly.com", "framer.website", "square.site", "myshopify.com",
+    "substack.com", "medium.com", "trycloudflare.com", "ngrok-free.app", "ngrok.io", "onrender.com", "fly.dev",
+    "surge.sh", "azurewebsites.net", "appspot.com", "godaddysites.com", "mystrikingly.com", "tilda.ws",
+})
+"""Sites that give each user a subdomain of their own: there the site a link belongs to is that subdomain
+(ledger-live-sync.github.io), and the platform itself names nothing."""
+_FILE_SUFFIXES = frozenset({
+    "pdf", "jpg", "jpeg", "png", "gif", "heic", "webp", "bmp", "tif", "tiff", "doc", "docx", "xls", "xlsx", "csv",
+    "txt", "rtf", "odt", "ods", "ppt", "pptx", "key", "pages", "numbers", "zip", "rar", "mov", "mp4", "mp3", "wav",
+    "json", "xml", "html", "htm", "eml", "msg", "ics", "vcf", "apk", "exe",
+})
+"""File names that look like domains in a message (invoice.pdf): written without https://, they are no link."""
+_DOMAIN = re.compile(r"(?<![\w.-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24})(?![\w-])", re.IGNORECASE)
+_PATH_SEGMENT = re.compile(r"/+@?([^\s/?#<>()\[\]{}\"'`]+)")
+_SECOND_LEVELS = frozenset({"co", "com", "net", "org", "gov", "edu", "ac"})
+_NETWORKS = frozenset({"near", "testnet"})
+MIN_NAME_CHARS = 3
+"""A payee name shorter than this (a.near) appears in ordinary prose, so a warning cannot be shown to name it."""
 
 _SIGNALS = (
     ("urgency", Reason.URGENCY, "sets a deadline or threatens a loss"),
@@ -224,9 +302,25 @@ def untrusted(title: str, text: str) -> str:
     )
 
 
+def _split(url: str) -> SplitResult | None:
+    """``urlsplit(url)``, or None for an address it refuses.
+
+    Python refuses a host with a character that normalizes to / ? # @ or : (a full-width ？, say), which
+    a message can carry and a search result can return. Such a link is read as naming nothing.
+    """
+    try:
+        parts = urlsplit(url.strip())
+        parts.port  # noqa: B018  (raises for a port that is no number)
+    except ValueError:
+        return None
+    return parts
+
+
 def _url_key(url: str) -> str:
     """URLs compared the way the gateway reports them: no query string, fragment or trailing slash."""
-    parts = urlsplit(url.strip())
+    parts = _split(url)
+    if parts is None:
+        return url.strip().lower()  # still compares equal to itself
     return f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path.rstrip('/')}"
 
 
@@ -344,13 +438,15 @@ def hold_for(findings: Iterable[Finding]) -> int:
 
     Nothing without a reason to hold. Once there is one, what the rules passed on as context (a
     young or busy payee, a deadline) adds to it and counts towards the three signals, but never
-    as a strong one: approval words alone are no injection.
+    as a strong one: approval words alone are no injection. A model's claim that stayed context
+    (a judgement nothing agreed with, a payee claim the facts do not bear out) does not count.
     """
     findings = [f for f in findings if f.reason is not Reason.SECOND_OPINION]
     reasons = {f.reason for f in findings if not f.context}
     if not reasons:
         return 0
-    if reasons & STRONG or len({f.reason for f in findings}) >= 3:
+    counted = reasons | {f.reason for f in findings if f.context and f.source == "rules"}
+    if reasons & MAX_HOLD_REASONS or len(counted) >= 3:
         return MAX_HOLD_MS
     return DAY_MS
 
@@ -381,6 +477,165 @@ def merge_findings(findings: Iterable[Finding]) -> list[Finding]:
             if url not in kept.citations:
                 kept.citations.append(url)
     return sorted(merged.values(), key=_rank)
+
+
+def weigh_claims(
+    claims: Iterable[tuple[Finding, str]], rules: Iterable[Finding], votes: Iterable[str] = ()
+) -> list[Finding]:
+    """The models' findings in order, those that are no reason to hold marked as context.
+
+    Each claim comes with its weight on its own. ``STRONG`` claims are reasons. A ``JUDGEMENT`` is
+    one once something independent agrees:
+
+    - a strong claim, or a reason of the rules: the payment brakes anyway, and what the models
+      read beside it counts, as weak signals do next to a strong one in ``rules.weigh``;
+    - for a judgement of triage, vision or the investigator: a reviewer of another family that
+      answered that the payment should wait (``votes`` holds the model of each), whatever reasons
+      it lists or HoldUp kept. The reviewer is the step asked for the second opinion: two other
+      steps of different families reading one message (vision and triage, or a step that a
+      fallback model served) do not settle a judgement between them; the reviewer is asked then;
+    - for a judgement of the reviewer: a judgement of triage, vision or the investigator of
+      another family, whatever reason it names;
+    - a weak signal of the rules for another reason (see ``rules_agree``); for the reviewer's
+      judgement and for its answer that the payment should wait, a young payee too.
+
+    A ``WEAK`` payee fact is a reason once the payment brakes for something else, which includes
+    a reviewer that answered that it should wait with something independent backing it.
+    ``CONTEXT`` claims (and those the payee facts contradict) never are.
+    """
+    claims = list(claims)
+    rules = list(rules)
+    strong = any(weight == STRONG for _, weight in claims) or any(not f.context for f in rules)
+    voted = {family(model) for model in votes if model}
+    # A judgement of the reviewer stands for an answer that the payment should wait (see ``OtariRisk._claims``).
+    voted |= {family(f.model) for f, weight in claims if weight == JUDGEMENT and f.source == REVIEWER and f.model}
+    read = {family(f.model) for f, weight in claims if weight == JUDGEMENT and f.model and f.source != REVIEWER}
+
+    def backed(source: str, reason: Reason | None, own: str) -> bool:
+        if strong:
+            return True
+        if source == REVIEWER:
+            return rules_agree(reason, rules, young=True) or bool(read - {own})
+        return rules_agree(reason, rules) or bool(voted - {own})
+
+    def corroborated(finding: Finding) -> bool:
+        return backed(finding.source, finding.reason, family(finding.model or ""))
+
+    brakes = (
+        strong
+        or any(weight == JUDGEMENT and corroborated(f) for f, weight in claims)
+        or any(backed(REVIEWER, None, vote) for vote in voted)
+    )
+    marked = []
+    for finding, weight in claims:
+        if weight == JUDGEMENT:
+            stands = corroborated(finding)
+        else:
+            stands = weight == STRONG or (weight == WEAK and brakes)
+        marked.append(replace(finding, context=not stands))
+    return marked
+
+
+def rules_agree(finding: Finding | Reason | None, rules: Iterable[Finding], *, young: bool = False) -> bool:
+    """Whether a weak signal of the rules backs a model's judgement, as a second weak signal would.
+
+    As in ``rules.weigh``, only a signal of another reason counts: a deadline the rules' patterns
+    and a model both saw is one deadline (``None`` stands for an answer that names no reason). A
+    busy payee is no signal. A young payee backs only the reviewer (``young``): payments to new
+    accounts are what HoldUp holds, and triage reads impersonation into a third of honest
+    messages, so a young payee next to its reading is common in honest payments; the reviewer of
+    another family sees the payee's age itself and answered on the first live runs that honest
+    payments need no longer hold.
+    """
+    reason = finding.reason if isinstance(finding, Finding) else finding
+    return any(
+        f.reason != reason and (young or f.reason is not Reason.NEW_ACCOUNT) and signal_weight(f) == WEAK
+        for f in rules
+    )
+
+
+def payment_names(payee: str, links: Iterable[str], text: str) -> list[str]:
+    """What a public warning must name to be about this payment, each as lowercase words.
+
+    The payee account and the accounts above it (whoever holds coinhaven.near created
+    pay7.coinhaven.near), unless too short to tell from prose (a.near), and the site of each link
+    in the message: its host and its registered domain, links written without https:// included,
+    file names (invoice.pdf) not. On a site whose subdomains belong to its users the site is the
+    user's subdomain (ledger-live-sync.github.io); on one whose pages belong to whoever posts them
+    the site is the page (t.me/BinanceHelpDesk_247), and the platform itself names nothing. A brand
+    or a business name does not count: warnings about impostors name the real business too.
+    """
+    labels = payee.lower().split(".")
+    names = [_words(".".join(labels[i:])) for i in range(len(labels) - 1)] or [_words(payee)]
+    names = [n for n in names if _distinct(n)]
+    sites: list[tuple[str, str]] = []
+    for link in links:
+        parts = _split(link)
+        if parts is not None:
+            sites.append((parts.hostname or "", parts.path))
+    for match in _DOMAIN.finditer(text):
+        if match.group(1).rsplit(".", 1)[-1].lower() not in _FILE_SUFFIXES:
+            path = re.match(r"/[^\s]*", text[match.end() :])
+            sites.append((match.group(1), path.group(0) if path else ""))
+    for host, path in sites:
+        host = host.lower().removeprefix("www.")
+        domain = registered_domain(host)
+        if not domain or host.rsplit(".", 1)[-1] in _NETWORKS:
+            continue
+        if domain in PATH_SITES:
+            page = _page(path)
+            names += [_words(f"{domain}/{page}")] if page else []
+        elif domain not in SHARED_DOMAINS:
+            names += [_words(host), _words(domain)]
+    return [n for n in dict.fromkeys(names) if n]
+
+
+def _distinct(name: str) -> bool:
+    words = name.split()
+    if words and words[-1] in _NETWORKS:
+        words = words[:-1]
+    return len("".join(words)) >= MIN_NAME_CHARS
+
+
+def _page(path: str) -> str:
+    """The first path segment that names a poster's page on a shared site (a handle, an invite code)."""
+    for segment in _PATH_SEGMENT.findall(unquote(path)):
+        segment = segment.lstrip("@+")
+        if segment and segment.lower() not in _GENERIC_SEGMENTS:
+            return segment
+    return ""
+
+
+def registered_domain(host: str) -> str:
+    """The domain a host belongs to: claim.coinhaven-app.com is coinhaven-app.com, shop.example.co.uk example.co.uk.
+
+    On a site that gives each user a subdomain, the user's: ledger-live-sync.github.io.
+    """
+    labels = [label for label in host.lower().strip(".").split(".") if label]
+    if len(labels) < 2 or not (labels[-1].isalpha() or labels[-1].startswith("xn--")):
+        return ""  # a single name or an IP address
+    if len(labels) >= 3 and ".".join(labels[-2:]) in USER_SITES:
+        return ".".join(labels[-3:])
+    keep = 3 if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVELS else 2
+    return ".".join(labels[-keep:])
+
+
+def names_payment(url: str, title: str, names: Iterable[str]) -> bool:
+    """Whether a search result names one of ``names`` in its title or the path or query of its address.
+
+    The host does not count: a page on the same site as a link in the message is not about it. A
+    title that is itself an address, as the gateway gives when a page has none, counts by its path.
+    The title, each address in it, the path and the query are read apart, so that no name is
+    made up of the end of one and the start of the next.
+    """
+    parts = _split(url)
+    seen = [unquote(parts.path), unquote_plus(parts.query)] if parts is not None else []
+    seen += _URL.split(title)
+    for address in _URL.findall(title):
+        inner = _split(address)
+        seen.append(unquote(inner.path) if inner is not None else "")
+    words = [f" {_words(part)} " for part in seen]
+    return any(f" {name} " in part for part in words for name in names)
 
 
 # ----------------------------------------------------------------------
@@ -422,6 +677,7 @@ class _Outcome:
     result: Any = None
     blocked: bool = False  # a guardrail in block mode refused the request
     replaced: bool = False  # asked again on another model family; only its step record still counts
+    contradicted: int = 0  # claims about the payee that the facts HoldUp read contradict, left out
 
     @property
     def label(self) -> str:
@@ -429,8 +685,18 @@ class _Outcome:
             return f"failed ({getattr(self.failure, 'label', type(self.failure).__name__)})"
         if self.blocked:
             return "blocked by the guardrail"
-        n = len(self.findings)
-        return f"{n} finding{'s' if n != 1 else ''}" if n else "nothing found"
+        n = sum(not f.context for f in self.findings)
+        label = f"{n} finding{'s' if n != 1 else ''}" if n else "nothing found"
+        context = len(self.findings) - n
+        label = f"{label}, {context} as context" if context else label
+        if self.contradicted:
+            label += f", {self.contradicted} the payee facts contradict"
+        return label
+
+    @property
+    def voted(self) -> bool:
+        """Whether this is a reviewer that answered that the payment should hold longer."""
+        return isinstance(self.result, ReviewerResult) and self.result.brake
 
 
 @dataclass
@@ -438,6 +704,21 @@ class _Rules:
     findings: list[Finding]
     records: list[StepRecord]
     hold_for_ms: int
+
+
+def _votes(outcomes: Iterable[_Outcome]) -> list[str]:
+    """The model of each reviewer that answered that the payment should hold longer."""
+    return [o.record.model for o in outcomes if o.voted and o.record is not None and o.record.model]
+
+
+def _search_titles(outcomes: Iterable[_Outcome]) -> dict[str, str]:
+    """The title of every result the gateway's web searches returned, by address."""
+    titles: dict[str, str] = {}
+    for outcome in outcomes:
+        for call in outcome.record.tool_calls if outcome.record is not None else []:
+            if call.get("name") == WEB_SEARCH and isinstance(call.get("titles"), dict):
+                titles.update({_url_key(url): title for url, title in call["titles"].items()})
+    return titles
 
 
 def _systemic(failure: Exception | None) -> bool:
@@ -544,14 +825,16 @@ class OtariRisk:
                 case.withheld = True  # suspected, and no guardrail to clear it
 
         reviewing = case.large
+        earlier = [family(o.record.model) for o in outcomes if o.record is not None and o.record.model]
         investigator, reviewer = await asyncio.gather(
             self._guarded("investigator", self._investigate(case)),
-            self._guarded("reviewer", self._review(case, avoid=family(INVESTIGATOR_MODEL)))
+            self._guarded("reviewer", self._review(case, avoid=(family(INVESTIGATOR_MODEL), *earlier)))
             if reviewing
             else _nothing(),
         )
         outcomes.append(investigator)
         served = investigator.record.model if investigator.record and investigator.record.model else INVESTIGATOR_MODEL
+        avoid = (family(served), *earlier)
         if (
             reviewer is not None
             and reviewer.record is not None
@@ -560,9 +843,9 @@ class OtariRisk:
             # The investigator fell back to the family of the reviewer; ask a third family instead.
             # The first review was paid for, so its step stays on record.
             outcomes.append(_Outcome("reviewer", reviewer.record, replaced=True))
-            reviewer = await self._guarded("reviewer", self._review(case, avoid=family(served)))
-        if reviewer is None and self._disagree(triage, investigator, case):
-            reviewer = await self._guarded("reviewer", self._review(case, avoid=family(served)))
+            reviewer = await self._guarded("reviewer", self._review(case, avoid=avoid))
+        if reviewer is None and (self._disagree(triage, investigator, case) or self._unsettled(case, rules, outcomes)):
+            reviewer = await self._guarded("reviewer", self._review(case, avoid=avoid))
         if reviewer is not None:
             outcomes.append(reviewer)
         return self._decide(case, rules, outcomes)
@@ -669,10 +952,15 @@ class OtariRisk:
 
     def _facts(self, case: _Case, *, payee: dict[str, Any] | None = None, context: bool = False) -> str:
         trusted = ", ".join(case.ctx.trusted_payees) or "none"
+        amount = f"{case.amount_text} {case.symbol}"
+        if real := STAND_INS.get(case.symbol):
+            # Otherwise a message asking for USDC next to a payment in HUSD reads as changed payment details.
+            amount += f" ({case.symbol} is the HoldUp demo token that stands in for {real}: "
+            amount += f"a message asking for {real} means it)"
         lines = [
             "PAYMENT FACTS (looked up by HoldUp)",
             f"- payee account: {case.hold.payee}",
-            f"- amount: {case.amount_text} {case.symbol}",
+            f"- amount: {amount}",
             f"- payees this sender already trusts: {trusted}",
             f"- links in the message: {', '.join(case.links) or 'none'}",
         ]
@@ -901,9 +1189,18 @@ class OtariRisk:
         findings = self._investigator_findings(case, result, record, available)
         return _Outcome("investigator", record, findings + self._monitored(record), result=result)
 
-    async def _review(self, case: _Case, *, avoid: str) -> _Outcome:
-        model = next(m for m in (REVIEWER_MODEL, VISION_MODEL, INVESTIGATOR_MODEL) if family(m) != avoid)
-        fallbacks = tuple(m for m in FALLBACK_CHAIN if m != model and family(m) != avoid)
+    async def _review(self, case: _Case, *, avoid: tuple[str, ...]) -> _Outcome:
+        """A second opinion from a model of none of the families in ``avoid``, so that it can agree with any of them.
+
+        ``avoid`` names the investigator's family first, then those of the steps before it. When no
+        candidate is left, only the investigator's family is avoided.
+        """
+        candidates = (REVIEWER_MODEL, VISION_MODEL, INVESTIGATOR_MODEL)
+        model = next((m for m in candidates if family(m) not in avoid), None)
+        if model is None:
+            avoid = avoid[:1]
+            model = next(m for m in candidates if family(m) not in avoid)
+        fallbacks = tuple(m for m in FALLBACK_CHAIN if m != model and family(m) not in avoid)
         prompt = prompts.load("reviewer")
         payee = await self._payee(case)
         messages = [
@@ -1093,28 +1390,103 @@ class OtariRisk:
             return False  # nothing comparable: a step failed, or the investigator never saw the text
         return bool(triage.findings) != bool(investigator.findings)
 
+    def _unsettled(self, case: _Case, rules: _Rules, outcomes: list[_Outcome]) -> bool:
+        """Whether a judgement still waits for the reviewer of another family; the reviewer then decides."""
+        current = [o for o in outcomes if not o.replaced]
+        try:
+            claims = self._claims(case, rules, current)
+            marked = weigh_claims(claims, rules.findings, _votes(current))
+        except Exception:
+            log.exception("weighing the findings of hold %s failed; every finding counts", case.hold.id)
+            return False  # _decide counts every finding then, as before findings were weighed
+        return any(weight == JUDGEMENT and f.context for (_, weight), f in zip(claims, marked, strict=True))
+
+    def _claims(self, case: _Case, rules: _Rules, outcomes: list[_Outcome]) -> list[tuple[Finding, str]]:
+        """Every finding of the model steps with what it weighs on its own (see ``weigh_claims``)."""
+        facts = {f.reason: signal_weight(f) for f in rules.findings if f.reason in PAYEE_CLAIMS}
+        read = facts_read(rules.records)
+        titles = _search_titles(outcomes)
+        names = payment_names(case.hold.payee, case.links, case.message)
+        claims = []
+        for outcome in outcomes:
+            review = outcome.result if isinstance(outcome.result, ReviewerResult) else None
+            for finding in outcome.findings:
+                if finding.source == "guardrail":
+                    weight = STRONG
+                elif finding.reason in facts:
+                    weight = facts[finding.reason]  # the rules read the same fact
+                elif finding.reason in PAYEE_CLAIMS:
+                    # The facts HoldUp read say otherwise, or it could not read them.
+                    weight = CONTRADICTED if finding.reason in read else JUDGEMENT
+                elif finding.reason is Reason.PUBLIC_WARNING:
+                    named = any(names_payment(url, titles.get(_url_key(url), ""), names) for url in finding.citations)
+                    weight = STRONG if named else JUDGEMENT
+                elif finding.reason in JUDGEMENTS or (review is not None and finding.reason in REVIEWER_JUDGEMENTS):
+                    weight = JUDGEMENT
+                else:
+                    weight = STRONG
+                if review is not None and not review.brake and weight not in (STRONG, CONTRADICTED):
+                    weight = CONTEXT  # a reviewer that sees no reason to hold longer gives no judgement
+                claims.append((finding, weight))
+        return claims
+
+    def _weighed(self, case: _Case, rules: _Rules, outcomes: list[_Outcome]) -> tuple[list[_Outcome], bool]:
+        """The outcomes with their findings weighed, and whether a judgement still waits for something to agree.
+
+        Findings that are no reason to hold are marked as context; a claim about the payee that the facts
+        HoldUp read contradict is left out (the step's summary counts it), so that no page shows it as a fact.
+        """
+        claims = self._claims(case, rules, outcomes)
+        marked = iter(zip(claims, weigh_claims(claims, rules.findings, _votes(outcomes)), strict=True))
+        waiting = False
+        weighed = []
+        for outcome in outcomes:
+            kept, contradicted = [], 0
+            for _ in outcome.findings:
+                (_, weight), finding = next(marked)
+                if weight == CONTRADICTED:
+                    contradicted += 1
+                    continue
+                waiting = waiting or (weight == JUDGEMENT and finding.context)
+                kept.append(finding)
+            weighed.append(replace(outcome, findings=kept, contradicted=contradicted))
+        return weighed, waiting
+
     def _decide(self, case: _Case, rules: _Rules, outcomes: list[_Outcome], note: str = "") -> Verdict:
         steps = [*rules.records, *(o.record for o in outcomes if o.record is not None)]
-        outcomes = [o for o in outcomes if not o.replaced]
+        current = [o for o in outcomes if not o.replaced]
+        try:
+            outcomes, waiting = self._weighed(case, rules, current)
+        except Exception:
+            # Towards the brake: every finding of the models counts, as before findings were weighed.
+            log.exception("weighing the findings of hold %s failed; every finding counts", case.hold.id)
+            outcomes, waiting = current, False
         ai = [f for o in outcomes for f in o.findings]
-        reviewer = next((o for o in outcomes if o.step == "reviewer"), None)
+        reasons = [f for f in ai if not f.context]
+        reviewer = next((o for o in outcomes if o.step == REVIEWER), None)
         rules_flagged = any(not f.context for f in rules.findings)
-        others_flagged = rules_flagged or any(o.findings for o in outcomes if o.step != "reviewer")
-        if reviewer is not None and reviewer.findings and others_flagged:
+        models_flagged = any(not f.context for o in outcomes if o.step != REVIEWER for f in o.findings)
+        if (
+            reviewer is not None
+            and (rules_flagged or models_flagged)
+            and (any(not f.context for f in reviewer.findings) or (reviewer.voted and models_flagged))
+        ):
             model = reviewer.record.model if reviewer.record else None
             # The label already says what this is; the detail says how the reviewer worked.
             detail = "it reviewed the payment without seeing the other steps' conclusions"
-            ai.append(Finding(Reason.SECOND_OPINION, detail, "reviewer", model))
+            second = Finding(Reason.SECOND_OPINION, detail, REVIEWER, model)
+            ai.append(second)
+            reasons.append(second)
         findings = merge_findings([*rules.findings, *ai])  # context findings stay, marked as such
-        if not ai and any(o.failure is not None for o in outcomes):
-            return self._fail_closed(case, outcomes, findings, steps, rules.hold_for_ms)
+        if not reasons and any(o.failure is not None for o in outcomes):
+            return self._fail_closed(case, outcomes, findings, steps, rules.hold_for_ms, waiting=waiting)
         brake = any(not f.context for f in findings)
         if not brake:
             wait = 0
-        elif not ai:
-            wait = rules.hold_for_ms  # the AI steps added nothing, so the rules decide alone
+        elif not reasons:
+            wait = rules.hold_for_ms  # the models gave no reason of their own, so the rules decide alone
         else:
-            wait = max(hold_for(findings), rules.hold_for_ms)  # the rules' context adds to what the AI found
+            wait = max(hold_for(findings), rules.hold_for_ms)  # the rules' context adds to what the models found
         return Verdict(
             hold_id=case.hold.id,
             brake=brake,
@@ -1125,8 +1497,21 @@ class OtariRisk:
         )
 
     def _fail_closed(
-        self, case: _Case, outcomes: list[_Outcome], findings: list[Finding], steps: list[StepRecord], rules_wait: int
+        self,
+        case: _Case,
+        outcomes: list[_Outcome],
+        findings: list[Finding],
+        steps: list[StepRecord],
+        rules_wait: int,
+        *,
+        waiting: bool = False,
     ) -> Verdict:
+        """A verdict the engine reads as a failed check: it holds an hour more and tries again.
+
+        When a model's judgement waited for something to agree (the reviewer that failed, say), the
+        verdict asks for the day such a judgement held for before judgements were weighed; the engine
+        applies it once its retries are spent, so a failure never holds less than that.
+        """
         failed = [o for o in outcomes if o.failure is not None]
         budget = any(isinstance(o.failure, (BudgetExceeded, InsufficientFunds)) for o in failed)
         first = failed[0]
@@ -1138,13 +1523,16 @@ class OtariRisk:
             first.step,
             model,
         )
+        summary = "fail-closed: " + "; ".join(f"{o.step} {o.label}" for o in outcomes)
+        if waiting:
+            summary += "; a judgement waited for the failed step"
         return Verdict(
             hold_id=case.hold.id,
             brake=True,
-            hold_for_ms=max(FAIL_CLOSED_MS, rules_wait),
+            hold_for_ms=max(FAIL_CLOSED_MS, rules_wait, DAY_MS if waiting else 0),
             findings=[finding, *findings],
             steps=steps,
-            summary="fail-closed: " + "; ".join(f"{o.step} {o.label}" for o in outcomes),
+            summary=summary,
         )
 
     @staticmethod

@@ -52,7 +52,7 @@ REASON_LABELS: dict[Reason, str] = {
     Reason.PAYEE_REPORTED: "Other senders cancelled payments to this payee",
     Reason.PHISHING_LINK: "Linked page asks for secrets or imitates a login",
     Reason.PUBLIC_WARNING: "Matches public fraud warnings",
-    Reason.LOOKALIKE_PAYEE: "Payee name looks like one of your trusted payees",
+    Reason.LOOKALIKE_PAYEE: "Payee name imitates a trusted payee or a known business",
     Reason.AMOUNT_MISMATCH: "The numbers in the message do not add up",
     Reason.SECRET_REQUEST: "Asks for a recovery phrase, key or code",
     Reason.AI_UNAVAILABLE: "AI check could not run, so the brake stays on",

@@ -408,3 +408,47 @@ async def test_new_reasons_that_cannot_extend_are_still_reported_but_not_counted
     last = setup[2].last()
     assert last.startswith("Brakes on - held until") and "Pressure or an artificial deadline" in last
     assert (await engine.stats())["brakes"] == 0
+
+
+async def test_a_judgement_that_waited_for_a_failed_step_holds_a_day_once_the_retries_are_spent(  # type: ignore[no-untyped-def]
+    clock, setup
+) -> None:
+    """Review: with the reviewer down for good, triage's reading used to release at +6 h; it braked 24 h before."""
+    waited = Verdict(
+        0,
+        True,
+        24 * HOUR,
+        [
+            Finding(Reason.AI_UNAVAILABLE, "the reviewer step could not run (all_candidates_failed)", "reviewer"),
+            Finding(Reason.IMPERSONATION, "claims to come from a bank", "triage", "openai/gpt-oss-20b", context=True),
+        ],
+        summary="fail-closed: triage nothing found, 1 as context; reviewer failed; a judgement waited",
+    )
+    full = Scripted(waited)
+    engine, hold = await held_payment(clock, setup, Scripted(CLEAN), full)
+    # Retries first: the reviewer may be back within the hour, and an honest payment then goes on time.
+    assert (await current(engine, hold)).release_at_ms == hold.release_at_ms + HOUR
+    assert "We will try again." in setup[2].last()
+    for _ in range(5):
+        clock.advance(31 * MINUTE)
+        await engine.tick()
+        await engine.wait_idle()
+    assert full.calls == 6
+    fresh = await current(engine, hold)
+    assert fresh.release_at_ms == clock() + 24 * HOUR  # the day the judgement held before it was weighed
+    assert fresh.reason_bits == Reason.AI_UNAVAILABLE
+    assert "still failing after the extra waiting time" in setup[2].last()
+    assert await engine.tick() == 0
+
+
+async def test_a_retry_that_finds_the_reviewer_back_adds_no_more_time(clock, setup) -> None:  # type: ignore[no-untyped-def]
+    failed = Finding(Reason.AI_UNAVAILABLE, "the reviewer step could not run", "reviewer")
+    waited = Verdict(0, True, 24 * HOUR, [failed])
+    full = Scripted(waited, CLEAN)
+    engine, hold = await held_payment(clock, setup, Scripted(CLEAN), full)
+    clock.advance(5 * MINUTE)
+    await engine.tick()
+    await engine.wait_idle()
+    assert full.calls == 2
+    assert (await current(engine, hold)).release_at_ms == hold.release_at_ms + HOUR  # no longer than the failure
+    assert await engine.tick() == 0

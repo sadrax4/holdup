@@ -672,6 +672,11 @@ class Engine:
             )
             if asks_to_brake(fast):  # with the AI down, the rules verdict stands as final
                 target = max(target, now + fast.hold_for_ms)
+            spent = not slow and (state.failures >= MAX_FAILURES or target >= cap)
+            if spent and verdict is not None and verdict.hold_for_ms > FAIL_CLOSED_STEP_MS:
+                # The failed check asked for longer than the retries give (a model's reading waited for the
+                # step that kept failing): once they are spent, that wait stands, so a failure holds no less.
+                target = max(target, now + verdict.hold_for_ms)
             closed = Verdict(
                 hold_id=hold.id,
                 brake=True,
