@@ -1,0 +1,43 @@
+{
+  "description": "Fictional payee profiles for the offline demo. Ages are measured back from the moment a check runs; reputation adds to whatever the in-memory vault records during the demo.",
+  "fictional": true,
+  "payees": {
+    "safe-wallet-77.testnet": {
+      "label": "Wallet named in the fake CoinHaven Support DM",
+      "age_hours": 2,
+      "distinct_inbound_senders_24h": 14,
+      "tx_count": 31
+    },
+    "northwind-paper.testnet": {
+      "label": "Look-alike of the Northwind Paper Co. payout account",
+      "age_hours": 26,
+      "distinct_inbound_senders_24h": 1,
+      "tx_count": 2
+    },
+    "northwindpaper.testnet": {
+      "label": "Northwind Paper Co. usual payout account",
+      "age_hours": 17520,
+      "distinct_inbound_senders_24h": 3,
+      "tx_count": 412,
+      "reputation": {"holds": 6, "released": 6}
+    },
+    "ravi.testnet": {
+      "label": "A friend of Priya",
+      "age_hours": 26280,
+      "distinct_inbound_senders_24h": 1,
+      "tx_count": 88
+    },
+    "mum.testnet": {
+      "label": "Priya's mother",
+      "age_hours": 43800,
+      "distinct_inbound_senders_24h": 1,
+      "tx_count": 140
+    },
+    "attacker.testnet": {
+      "label": "Account a compromised server tries to pay",
+      "age_hours": 1,
+      "distinct_inbound_senders_24h": 0,
+      "tx_count": 1
+    }
+  }
+}

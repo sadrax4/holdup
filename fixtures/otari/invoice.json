@@ -1,0 +1,149 @@
+{
+  "scenario": "invoice",
+  "synthetic": true,
+  "description": "Dana pays the fictional Northwind Paper Co. invoice (1,250) to the new wallet northwind-paper.testnet instead of the trusted northwindpaper.testnet. Triage sees the changed wallet, the investigator finds through near-intel that six earlier payments went to the usual account, computes with code execution that the line items add up to 1,150, and cites a public warning; the reviewer from another model family independently flags the changed details and the mismatch. Includes a vision answer for the same invoice sent as a photo.",
+  "source": "Written by hand from the documented response shapes (api-reference: Web tool calls on Chat Completions; tools: Combining tools) and the headers and usage recorded from the hosted gateway on 2026-10-31. Request ids are marked replay.",
+  "steps": {
+    "triage": {
+      "expect": {
+        "guardrails": [{"profile": "checker-injection", "mode": "monitor"}],
+        "stream": false
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-invoice-triage",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-20b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "1022",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.02}]
+        },
+        "content": {
+          "categories": ["invoice", "payment_request"],
+          "urgency": false,
+          "impersonation": false,
+          "secret_request": false,
+          "details_changed": true,
+          "injection_suspected": false,
+          "impossible_returns": false,
+          "money_claims": [
+            {"label": "40 reams copy paper", "amount": "600.00", "currency": ""},
+            {"label": "25 boxes envelopes", "amount": "350.00", "currency": ""},
+            {"label": "delivery", "amount": "200.00", "currency": ""},
+            {"label": "total due", "amount": "1,250.00", "currency": "USDC"}
+          ],
+          "risk": "high",
+          "summary": "A supplier invoice announces a new wallet for payments and lists three line items with a total."
+        },
+        "usage": {"prompt_tokens": 1004, "completion_tokens": 318, "total_tokens": 1322, "cost_usd": "0.000075", "pricing_source": "deployment"}
+      }
+    },
+    "vision": {
+      "expect": {
+        "stream": false
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-invoice-vision",
+          "otari-provider": "deepinfra",
+          "otari-model": "zai-org/GLM-5.3-Flash",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "2410"
+        },
+        "content": {
+          "transcript": "Northwind Paper Co.\nWe have moved to a new USDC wallet: northwind-paper.testnet\nInvoice NP-2291\n40 reams copy paper 600.00\n25 boxes envelopes 350.00\nDelivery 200.00\nTotal due: 1,250.00 USDC",
+          "kind": "invoice",
+          "urgency": false,
+          "impersonation": false,
+          "secret_request": false,
+          "details_changed": true,
+          "injection_suspected": false,
+          "money_claims": [
+            {"label": "40 reams copy paper", "amount": "600.00", "currency": ""},
+            {"label": "25 boxes envelopes", "amount": "350.00", "currency": ""},
+            {"label": "delivery", "amount": "200.00", "currency": ""},
+            {"label": "total due", "amount": "1,250.00", "currency": "USDC"}
+          ],
+          "summary": "A photo of a supplier invoice that names a new wallet and lists three items with a total."
+        },
+        "usage": {"prompt_tokens": 1890, "completion_tokens": 402, "total_tokens": 2292, "cost_usd": "0.000485", "pricing_source": "deployment"}
+      }
+    },
+    "investigator": {
+      "expect": {
+        "tools": ["otari_web_search", "otari_code_execution"],
+        "mcp_servers": ["near-intel"],
+        "guardrails": [{"profile": "checker-injection", "mode": "monitor"}],
+        "stream": true
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-invoice-investigator",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-120b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "1304",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.02}]
+        },
+        "otari_tool_calls": [
+          {
+            "id": "otari_ws_replay_invoice_1",
+            "type": "web_search",
+            "status": "completed",
+            "query": "supplier invoice new wallet payment details changed fraud warning",
+            "sources": [
+              {"url": "https://www.fbi.gov/how-we-can-help-you/scams-and-safety/common-frauds-and-scams/business-email-compromise", "title": "Business Email Compromise", "published_date": null}
+            ]
+          }
+        ],
+        "content": {
+          "findings": [
+            {"reason": "DETAILS_CHANGED", "tool": "near-intel", "detail": "sender_history shows six earlier payments to northwindpaper.testnet and none to this account", "citations": [], "computation": ""},
+            {"reason": "NEW_ACCOUNT", "tool": "near-intel", "detail": "payee_profile shows the payee account was created about 26 hours ago", "citations": [], "computation": ""},
+            {"reason": "LOOKALIKE_PAYEE", "tool": "near-intel", "detail": "the payee name differs from the trusted northwindpaper.testnet by one hyphen", "citations": [], "computation": ""},
+            {"reason": "AMOUNT_MISMATCH", "tool": "code_execution", "detail": "the line items sum to 1150.00 while the total asks for 1250.00", "citations": [], "computation": "sum of the invoice line items"},
+            {"reason": "PUBLIC_WARNING", "tool": "web_search", "detail": "the FBI warns that invoices announcing new payment details are a common business email compromise", "citations": ["https://www.fbi.gov/how-we-can-help-you/scams-and-safety/common-frauds-and-scams/business-email-compromise"], "computation": ""}
+          ],
+          "computations": [
+            {"label": "sum of the invoice line items", "code": "from decimal import Decimal\nitems = [Decimal(600), Decimal(350), Decimal(200)]\nprint(sum(items))", "result": "1150"},
+            {"label": "difference to the stated total", "code": "print(1250 - 1150)", "result": "100"}
+          ],
+          "amount_check": {"line_items": ["600.00", "350.00", "200.00"], "stated_total": "1,250.00", "computed_total": "1150", "currency": "USDC"},
+          "brake": true,
+          "summary": "New look-alike wallet, a sender who always paid another account, and a total 100 above its line items."
+        },
+        "usage": {"prompt_tokens": 6880, "completion_tokens": 1210, "total_tokens": 8090, "cost_usd": "0.015460", "pricing_source": "deployment"}
+      }
+    },
+    "reviewer": {
+      "expect": {
+        "tools": ["otari_code_execution"],
+        "stream": true
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-invoice-reviewer",
+          "otari-provider": "deepinfra",
+          "otari-model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "866"
+        },
+        "content": {
+          "brake": true,
+          "reasons": [
+            {"reason": "DETAILS_CHANGED", "detail": "the supplier asks to be paid at a new wallet instead of its usual account"},
+            {"reason": "AMOUNT_MISMATCH", "detail": "the line items add up to less than the requested total"}
+          ],
+          "amount_check": {"line_items": ["600.00", "350.00", "200.00"], "stated_total": "1,250.00", "computed_total": "1150.00", "currency": "USDC"},
+          "confidence": "high",
+          "summary": "Changed wallet and an inflated total: classic invoice redirection."
+        },
+        "usage": {"prompt_tokens": 1844, "completion_tokens": 588, "total_tokens": 2432, "cost_usd": "0.010353", "pricing_source": "deployment"}
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+ "probe": "org-keys-list-own",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:22:42.842+00:00",
+ "summary": "organization key routes with an API key: 401 Invalid master key",
+ "endpoint": "https://api.otari.ai/api/v1/organizations/me/keys",
+ "request_body": null,
+ "status": 401,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy"
+ },
+ "response_body": {
+  "detail": "Invalid master key"
+ }
+}

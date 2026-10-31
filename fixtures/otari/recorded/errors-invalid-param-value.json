@@ -1,0 +1,29 @@
+{
+ "probe": "errors-invalid-param-value",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:10:52.487+00:00",
+ "summary": "out-of-range parameter on a catalog id: 400 all_candidates_rejected",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-20b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Hi"
+   }
+  ],
+  "max_tokens": 5,
+  "temperature": 7
+ },
+ "status": 400,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-error-code": "all_candidates_rejected",
+  "otari-request-id": "da09d2f6-c64b-4bad-a7e5-38c05dcae73a"
+ },
+ "response_body": {
+  "detail": "No model accepted the request (2 attempts). Check the request parameters.",
+  "code": "all_candidates_rejected"
+ }
+}

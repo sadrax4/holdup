@@ -1,0 +1,144 @@
+{
+  "scenario": "hero",
+  "synthetic": true,
+  "description": "Priya forwards the fictional CoinHaven Support DM and pays 50 to safe-wallet-77.testnet. Triage flags urgency, impersonation and the line aimed at the AI checker, the monitor guardrail flags the text, the blocking gate keeps it away from the tool-using models, and the investigator finds a two hour old payee collecting from 14 senders (near-intel), public warnings (web search, two sources), a phishing verify page (web fetch) and computes the account age with code execution.",
+  "source": "Written by hand from the documented response shapes: chat completion and stream chunks (api-reference: Web tool calls on Chat Completions), Otari-* headers and usage.cost_usd as recorded from the hosted gateway on 2026-10-31, the Otari-Guardrails list and the 403 guardrail_violation body as observed on the hosted gateway on 2026-10-30. The fetched link is the verify page of the offline demo message; in a live run it is the public URL of the HoldUp training fixture page. Request ids are marked replay.",
+  "steps": {
+    "triage": {
+      "expect": {
+        "guardrails": [{"profile": "checker-injection", "mode": "monitor"}],
+        "stream": false
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-hero-triage",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-20b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "934",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": false, "score": 0.97}]
+        },
+        "content": {
+          "categories": ["security_alert", "support_contact", "payment_request"],
+          "urgency": true,
+          "impersonation": true,
+          "secret_request": false,
+          "details_changed": false,
+          "injection_suspected": true,
+          "impossible_returns": false,
+          "money_claims": [],
+          "risk": "high",
+          "summary": "A message presented as exchange support urges moving funds to a new wallet before a short deadline."
+        },
+        "usage": {"prompt_tokens": 941, "completion_tokens": 274, "total_tokens": 1215, "cost_usd": "0.000067", "pricing_source": "deployment"}
+      }
+    },
+    "gate": {
+      "expect": {
+        "guardrails": [{"profile": "checker-injection", "mode": "block"}]
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "otari-request-id": "replay-hero-gate",
+          "otari-error-code": "guardrail_violation"
+        },
+        "body": {
+          "message": "Request blocked by guardrail policy.",
+          "code": "guardrail_violation",
+          "guardrails": [{"profile": "checker-injection", "explanation": null, "score": 0.99}]
+        }
+      }
+    },
+    "investigator": {
+      "expect": {
+        "tools": ["otari_web_search", "otari_code_execution"],
+        "mcp_servers": ["near-intel"],
+        "guardrails": [{"profile": "checker-injection", "mode": "monitor"}],
+        "stream": true
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-hero-investigator",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-120b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "1187",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.03}]
+        },
+        "otari_tool_calls": [
+          {
+            "id": "otari_ws_replay_hero_1",
+            "type": "web_search",
+            "status": "completed",
+            "query": "CoinHaven Support protected wallet transfer warning",
+            "sources": [
+              {"url": "https://consumer.ftc.gov/articles/what-know-about-cryptocurrency-and-scams", "title": "What To Know About Cryptocurrency and Scams", "published_date": null},
+              {"url": "https://www.consumerfinance.gov/consumer-tools/fraud/", "title": "Fraud and scams", "published_date": null}
+            ]
+          },
+          {
+            "id": "otari_ws_replay_hero_2",
+            "type": "web_search",
+            "status": "completed",
+            "query": "safe-wallet-77.testnet",
+            "sources": []
+          },
+          {
+            "id": "otari_wf_replay_hero_1",
+            "type": "web_fetch",
+            "status": "completed",
+            "url": "http://127.0.0.1:8000/fixtures/coinhaven/verify"
+          }
+        ],
+        "content": {
+          "findings": [
+            {"reason": "NEW_ACCOUNT", "tool": "near-intel", "detail": "payee_profile shows the payee account was created about 2 hours ago", "citations": [], "computation": ""},
+            {"reason": "MULE_PATTERN", "tool": "near-intel", "detail": "payee_profile shows 14 distinct senders paid this account in the last 24 hours", "citations": [], "computation": ""},
+            {"reason": "NEW_ACCOUNT", "tool": "code_execution", "detail": "account age computed as 2.0 hours from its creation time", "citations": [], "computation": "payee account age in hours"},
+            {"reason": "PUBLIC_WARNING", "tool": "web_search", "detail": "consumer protection agencies warn that requests to move funds into a protected wallet are a common scam", "citations": ["https://consumer.ftc.gov/articles/what-know-about-cryptocurrency-and-scams", "https://www.consumerfinance.gov/consumer-tools/fraud/"], "computation": ""},
+            {"reason": "PHISHING_LINK", "tool": "web_fetch", "detail": "the linked page imitates a wallet sign-in page", "citations": ["http://127.0.0.1:8000/fixtures/coinhaven/verify"], "computation": ""},
+            {"reason": "SECRET_REQUEST", "tool": "web_fetch", "detail": "the linked page asks for a 12 word recovery phrase", "citations": ["http://127.0.0.1:8000/fixtures/coinhaven/verify"], "computation": ""}
+          ],
+          "computations": [
+            {"label": "payee account age in hours", "code": "created_ms = 1793440800000\nnow_ms = 1793448000000\nprint(round((now_ms - created_ms) / 3600000, 1))", "result": "2.0"},
+            {"label": "senders per hour over the last day", "code": "print(round(14 / 24, 2))", "result": "0.58"}
+          ],
+          "amount_check": null,
+          "brake": true,
+          "summary": "A two hour old account paid by many senders, a phishing verify page and public warnings match a known pattern."
+        },
+        "usage": {"prompt_tokens": 7310, "completion_tokens": 1488, "total_tokens": 8798, "cost_usd": "0.021523", "pricing_source": "deployment"}
+      }
+    },
+    "reviewer": {
+      "expect": {
+        "tools": ["otari_code_execution"],
+        "stream": true
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-hero-reviewer",
+          "otari-provider": "deepinfra",
+          "otari-model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "702"
+        },
+        "content": {
+          "brake": true,
+          "reasons": [
+            {"reason": "IMPERSONATION", "detail": "the sender claims to be exchange support but writes from an unverified account"},
+            {"reason": "NEW_ACCOUNT", "detail": "the payee account is only about two hours old"}
+          ],
+          "amount_check": null,
+          "confidence": "high",
+          "summary": "Impersonated support pushing funds to a very new account."
+        },
+        "usage": {"prompt_tokens": 1630, "completion_tokens": 412, "total_tokens": 2042, "cost_usd": "0.010281", "pricing_source": "deployment"}
+      }
+    }
+  }
+}

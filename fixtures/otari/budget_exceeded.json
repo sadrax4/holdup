@@ -1,0 +1,23 @@
+{
+  "scenario": "budget_exceeded",
+  "synthetic": true,
+  "description": "The spend ceiling on the per-user key is used up: every request is refused with 403 budget_exceeded. The pipeline keeps the brake on (BUDGET_EXHAUSTED, one hour) and skips the remaining steps.",
+  "source": "Written by hand from api-reference: Error codes (budget_exceeded, Otari-Budget-Scope, Retry-After) and the detail wording documented for a spent budget.",
+  "steps": {
+    "*": {
+      "response": {
+        "status": 403,
+        "headers": {
+          "otari-request-id": "replay-budget-exceeded",
+          "otari-error-code": "budget_exceeded",
+          "otari-budget-scope": "api_token",
+          "retry-after": "43200"
+        },
+        "body": {
+          "detail": "API key holdup-u3kq7x2m9aa has exceeded budget limit",
+          "code": "budget_exceeded"
+        }
+      }
+    }
+  }
+}

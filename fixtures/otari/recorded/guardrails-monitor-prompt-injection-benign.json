@@ -1,0 +1,70 @@
+{
+ "probe": "monitor-prompt-injection-benign",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:26:35.546+00:00",
+ "summary": "monitor guardrail with no service behind it: Otari-Guardrails valid null",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word OK."
+   }
+  ],
+  "max_tokens": 60,
+  "reasoning_effort": "low",
+  "guardrails": [
+   {
+    "profile": "prompt-injection",
+    "mode": "monitor"
+   }
+  ]
+ },
+ "status": 200,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "6c0667c3-b554-48c6-b03c-3bea39046ca9",
+  "otari-guardrails": "[{\"profile\":\"prompt-injection\",\"mode\":\"monitor\",\"valid\":null,\"score\":null}]",
+  "otari-provider": "deepinfra",
+  "otari-model": "openai/gpt-oss-120b",
+  "otari-attempt-count": "1",
+  "otari-fallback": "false",
+  "otari-response-duration-ms": "2352"
+ },
+ "response_body": {
+  "id": "chatcmpl-RvHAXP9djJ90eoKMGitKBNbI",
+  "choices": [
+   {
+    "finish_reason": "stop",
+    "index": 0,
+    "message": {
+     "content": "OK",
+     "role": "assistant",
+     "tool_calls": [],
+     "reasoning": "We just need to reply \"OK\".",
+     "reasoning_content": "We just need to reply \"OK\".",
+     "provider_specific_fields": {
+      "reasoning_content": "We just need to reply \"OK\".",
+      "name": null
+     },
+     "refusal": null
+    },
+    "logprobs": null
+   }
+  ],
+  "created": 1793449598,
+  "model": "openai/gpt-oss-120b",
+  "object": "chat.completion",
+  "service_tier": "default",
+  "usage": {
+   "completion_tokens": 19,
+   "prompt_tokens": 61,
+   "total_tokens": 80,
+   "estimated_cost": 5.487e-06,
+   "cost_usd": "0.000005",
+   "pricing_source": "deployment"
+  }
+ }
+}

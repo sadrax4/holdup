@@ -1,0 +1,34 @@
+{
+ "probe": "chat-near-docs-404",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:23:03.946+00:00",
+ "summary": "unreachable MCP server: generic 502 for every offering",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Use the DeepWiki tool read_wiki_structure on the GitHub repository near/near-sdk-rs. Reply with only the exact title of top-level section 5 as the tool lists it."
+   }
+  ],
+  "mcp_servers": [
+   {
+    "name": "neardocs",
+    "url": "https://docs-mcp-f18b.onrender.com/mcp"
+   }
+  ],
+  "max_tool_iterations": 3,
+  "max_tokens": 600,
+  "reasoning_effort": "low"
+ },
+ "status": 502,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "4c63e9bb-1c91-491e-80cd-05f46786b7d1"
+ },
+ "response_body": {
+  "detail": "All upstream providers failed"
+ }
+}

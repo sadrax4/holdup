@@ -1,0 +1,91 @@
+{
+ "probe": "json-schema-gpt-oss-20b",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:10:27.807+00:00",
+ "summary": "response_format json_schema honoured on gpt-oss-20b",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-20b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Rate the scam risk of this message and give a reason under 12 words: 'Send 50 NEAR now to unlock your wallet.'"
+   }
+  ],
+  "max_tokens": 300,
+  "reasoning_effort": "low",
+  "response_format": {
+   "type": "json_schema",
+   "json_schema": {
+    "name": "risk_verdict",
+    "strict": true,
+    "schema": {
+     "type": "object",
+     "properties": {
+      "risk": {
+       "type": "string",
+       "enum": [
+        "low",
+        "medium",
+        "high"
+       ]
+      },
+      "reason": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "risk",
+      "reason"
+     ],
+     "additionalProperties": false
+    }
+   }
+  }
+ },
+ "status": 200,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "3ed49021-80f7-452e-a8ec-49698390a23f",
+  "otari-provider": "deepinfra",
+  "otari-model": "openai/gpt-oss-20b",
+  "otari-attempt-count": "1",
+  "otari-fallback": "false",
+  "otari-response-duration-ms": "792"
+ },
+ "response_body": {
+  "id": "chatcmpl-R3Eny7k8o56WWy79o89pT5v6",
+  "choices": [
+   {
+    "finish_reason": "stop",
+    "index": 0,
+    "message": {
+     "content": "{\"risk\":\"high\",\"reason\":\"Unsolicited request to send funds for 'unlock'—classic phishing.\"}",
+     "role": "assistant",
+     "tool_calls": [],
+     "reasoning": "Need to rate scam risk: likely high. Provide reason under 12 words.",
+     "reasoning_content": "Need to rate scam risk: likely high. Provide reason under 12 words.",
+     "provider_specific_fields": {
+      "reasoning_content": "Need to rate scam risk: likely high. Provide reason under 12 words.",
+      "name": null
+     },
+     "refusal": null
+    },
+    "logprobs": null
+   }
+  ],
+  "created": 1793448629,
+  "model": "openai/gpt-oss-20b",
+  "object": "chat.completion",
+  "service_tier": "default",
+  "usage": {
+   "completion_tokens": 50,
+   "prompt_tokens": 82,
+   "total_tokens": 132,
+   "estimated_cost": 9.460000000000001e-06,
+   "cost_usd": "0.000009",
+   "pricing_source": "deployment"
+  }
+ }
+}

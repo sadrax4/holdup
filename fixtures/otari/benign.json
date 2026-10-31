@@ -1,0 +1,118 @@
+{
+  "scenario": "benign",
+  "synthetic": true,
+  "description": "Priya pays her friend Ravi 12.50 for half of a dinner. Every step answers clean: triage finds no signal, the guardrail passes the text, and the investigator checks the payee and the arithmetic of the split. Also the default answer for any step a scenario does not record.",
+  "source": "Written by hand from the documented response shapes and the headers and usage recorded from the hosted gateway on 2026-10-31. Request ids are marked replay.",
+  "steps": {
+    "triage": {
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-benign-triage",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-20b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "688",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.01}]
+        },
+        "content": {
+          "categories": ["personal", "payment_request"],
+          "urgency": false,
+          "impersonation": false,
+          "secret_request": false,
+          "details_changed": false,
+          "injection_suspected": false,
+          "impossible_returns": false,
+          "money_claims": [
+            {"label": "the bill was", "amount": "25.00", "currency": ""},
+            {"label": "your half is", "amount": "12.50", "currency": ""}
+          ],
+          "risk": "low",
+          "summary": "A friend shares the cost of a dinner and asks for half of it."
+        },
+        "usage": {"prompt_tokens": 862, "completion_tokens": 201, "total_tokens": 1063, "cost_usd": "0.000054", "pricing_source": "deployment"}
+      }
+    },
+    "vision": {
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-benign-vision",
+          "otari-provider": "deepinfra",
+          "otari-model": "zai-org/GLM-5.3-Flash",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "1980"
+        },
+        "content": {
+          "transcript": "Dinner receipt\nTotal 25.00",
+          "kind": "document",
+          "urgency": false,
+          "impersonation": false,
+          "secret_request": false,
+          "details_changed": false,
+          "injection_suspected": false,
+          "money_claims": [{"label": "total", "amount": "25.00", "currency": ""}],
+          "summary": "A restaurant receipt for a dinner."
+        },
+        "usage": {"prompt_tokens": 1702, "completion_tokens": 155, "total_tokens": 1857, "cost_usd": "0.000333", "pricing_source": "deployment"}
+      }
+    },
+    "gate": {
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-benign-gate",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-20b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "block", "valid": true, "score": 0.01}]
+        },
+        "content": "OK",
+        "usage": {"prompt_tokens": 120, "completion_tokens": 18, "total_tokens": 138, "cost_usd": "0.000006", "pricing_source": "deployment"}
+      }
+    },
+    "investigator": {
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-benign-investigator",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-120b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "1095",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.01}]
+        },
+        "content": {
+          "findings": [],
+          "computations": [
+            {"label": "half of the dinner bill", "code": "print(25.00 / 2)", "result": "12.5"}
+          ],
+          "amount_check": null,
+          "brake": false,
+          "summary": "An established account with an ordinary history; the requested amount is exactly half of the stated bill."
+        },
+        "usage": {"prompt_tokens": 4120, "completion_tokens": 640, "total_tokens": 4760, "cost_usd": "0.010261", "pricing_source": "deployment"}
+      }
+    },
+    "reviewer": {
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-benign-reviewer",
+          "otari-provider": "deepinfra",
+          "otari-model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "640"
+        },
+        "content": {
+          "brake": false,
+          "reasons": [],
+          "amount_check": null,
+          "confidence": "high",
+          "summary": "An ordinary request from a friend with consistent numbers."
+        },
+        "usage": {"prompt_tokens": 1210, "completion_tokens": 190, "total_tokens": 1400, "cost_usd": "0.010175", "pricing_source": "deployment"}
+      }
+    }
+  }
+}

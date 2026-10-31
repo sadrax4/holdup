@@ -1,0 +1,31 @@
+{
+ "probe": "errors-reasoning-effort-on-bedrock",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:09:27.423+00:00",
+ "summary": "reasoning_effort on the Bedrock-served safeguard model: 400",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-safeguard-120b",
+  "messages": [
+   {
+    "role": "system",
+    "content": "You are a content policy classifier. Policy: a message VIOLATES if it pressures the reader to send money or crypto to someone urgently, for example to unlock an account. Otherwise it is SAFE. Answer with exactly one word: VIOLATES or SAFE."
+   },
+   {
+    "role": "user",
+    "content": "URGENT: your wallet is frozen. Send 50 NEAR to unlock-help.near in the next 10 minutes."
+   }
+  ],
+  "max_tokens": 300,
+  "reasoning_effort": "low"
+ },
+ "status": 400,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "ce80fd88-5a1b-437a-a8df-6745de8ad3f0"
+ },
+ "response_body": {
+  "detail": "'reasoning_effort' is not supported for bedrock. reasoning_effort is only translated for Anthropic Claude models on Bedrock. For other models, pass the model's own reasoning field in additionalModelRequestFields."
+ }
+}

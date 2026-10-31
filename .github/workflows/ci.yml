@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+# Actions are pinned to full commit SHAs; the comment names the release each SHA belongs to.
+jobs:
+  python:
+    name: Python tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python 3.12
+        uses: astral-sh/setup-uv@18d369b23da25a81e9458561248e1aafff6a70fa # v10.3.1
+        with:
+          # Same uv as deploy/requirements-uv.txt and the one that wrote uv.lock.
+          version: "0.11.32"
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      # --locked also fails the job when uv.lock no longer matches pyproject.toml.
+      - name: Install dependencies from uv.lock
+        run: uv sync --locked
+
+      - name: Run pytest
+        run: uv run --locked pytest -q
+
+  rust:
+    name: Rust contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the toolchain pinned in contracts/rust-toolchain.toml
+        id: toolchain
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib
+          import tomllib
+
+          path = pathlib.Path("contracts/rust-toolchain.toml")
+          spec = tomllib.loads(path.read_text()).get("toolchain", {}) if path.exists() else {}
+          print("channel=" + spec.get("channel", "stable"))
+          print("targets=" + ",".join(sorted(set(spec.get("targets", [])) | {"wasm32-unknown-unknown"})))
+          print("components=" + ",".join(spec.get("components", [])))
+          PY
+
+      - name: Install Rust ${{ steps.toolchain.outputs.channel }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master (tag v1)
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: ${{ steps.toolchain.outputs.targets }}
+          components: ${{ steps.toolchain.outputs.components }}
+
+      - name: Cache cargo registry and build output
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: contracts -> target
+
+      - name: Run cargo test
+        working-directory: contracts
+        run: cargo test --locked --workspace
+
+      - name: Build the wasm files and check them against nearcore's rules
+        run: bash scripts/build_contracts.sh --plain
+
+  deploy:
+    name: Deployment files and Docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the syntax of the deploy scripts
+        run: |
+          for script in deploy/*.sh; do bash -n "$script"; done
+          python3 -m py_compile deploy/credentials_to_env.py
+
+      - name: Validate docker-compose.yml with the example settings
+        working-directory: deploy
+        env:
+          HOLDUP_HOST: holdup.203-0-113-7.sslip.io
+          FIXTURE_HOST: fixtures.203-0-113-7.sslip.io
+          ACME_EMAIL: ci@example.com
+        run: |
+          install -d -m 700 ../../secrets
+          install -m 600 holdup.env.example ../../secrets/holdup.env
+          docker compose config --quiet
+
+      - name: Build the image
+        run: docker build --file deploy/Dockerfile --tag holdup:ci .
+
+      - name: Start the container (in-memory demo network) and wait until it is healthy
+        run: |
+          docker run --detach --name holdup-ci --publish 127.0.0.1:8000:8000 \
+            --env HOLDUP_NETWORK=offline holdup:ci
+          for _ in $(seq 1 45); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' holdup-ci)"
+            if [ "$status" = healthy ]; then
+              curl --fail --silent --show-error http://127.0.0.1:8000/health
+              echo
+              test "$(docker exec holdup-ci id -u)" = 10001
+              exit 0
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' holdup-ci)" != true ]; then
+              echo "The container stopped." >&2
+              break
+            fi
+            sleep 2
+          done
+          echo "The container did not become healthy (last status: ${status:-unknown})." >&2
+          exit 1
+
+      - name: Container logs
+        if: always()
+        run: docker logs holdup-ci 2>&1 || true

@@ -1,0 +1,33 @@
+{
+ "probe": "webfetch-chat-typeonly",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:06:52Z",
+ "summary": "web access off for the workspace: 403 without a code",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Fetch https://example.com and tell me the exact page title (the main heading). Fetch at most once."
+   }
+  ],
+  "tools": [
+   {
+    "type": "otari_web_fetch"
+   }
+  ],
+  "max_tokens": 800,
+  "reasoning_effort": "low",
+  "max_tool_iterations": 3
+ },
+ "status": 403,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "124e351d-6ff2-4041-b37e-a8b37c1ce970"
+ },
+ "response_body": {
+  "detail": "web access is not enabled for this workspace"
+ }
+}

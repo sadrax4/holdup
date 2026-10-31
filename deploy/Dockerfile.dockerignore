@@ -1,0 +1,14 @@
+# Build context filter for deploy/Dockerfile (BuildKit reads <Dockerfile>.dockerignore next to
+# the Dockerfile). Allow-list: only what the image needs is sent to the builder, so the
+# virtualenv, contract build output, .env files and .holdup/ credentials stay out.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!holdup/
+!fixtures/
+!res/
+!deploy/requirements-uv.txt
+**/__pycache__
+**/*.py[cod]
+**/.DS_Store

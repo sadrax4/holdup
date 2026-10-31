@@ -1,0 +1,13 @@
+Hello from Northwind Paper Co.
+
+Please note we've moved to a new USDC wallet: northwind-paper.testnet
+Please update your records; payments to the old wallet are no longer monitored.
+
+Invoice NP-2291 (October)
+- 40 reams copy paper ............ 600.00
+- 25 boxes envelopes ............. 350.00
+- Delivery ....................... 200.00
+Total due: 1,250.00 USDC
+
+Thank you,
+Accounts team, Northwind Paper Co.

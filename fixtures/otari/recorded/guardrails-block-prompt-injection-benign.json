@@ -1,0 +1,33 @@
+{
+ "probe": "block-prompt-injection-benign",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:26:52.118+00:00",
+ "summary": "block guardrail with no service: 502, no error code",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with the single word OK."
+   }
+  ],
+  "max_tokens": 60,
+  "reasoning_effort": "low",
+  "guardrails": [
+   {
+    "profile": "prompt-injection",
+    "mode": "block"
+   }
+  ]
+ },
+ "status": 502,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "024385a6-a692-4669-96b7-2b88808fc9a2"
+ },
+ "response_body": {
+  "detail": "guardrail profile 'prompt-injection' requested but no guardrails service is configured. Set OTARI_GUARDRAILS_URL on the gateway or pass `url` on the guardrail entry."
+ }
+}

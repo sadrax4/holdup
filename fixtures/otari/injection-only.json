@@ -1,0 +1,77 @@
+{
+  "scenario": "injection-only",
+  "synthetic": true,
+  "description": "An ordinary request from Ravi with one line aimed at the AI checker. Triage reports the injection, the monitor guardrail flags it, and the blocking gate answers 403 guardrail_violation, so the investigator only gets the facts HoldUp extracted and finds nothing wrong with the established payee. The brake stays on for the injection alone.",
+  "source": "Written by hand. The 403 body follows the guardrail_violation refusal observed on the hosted gateway on 2026-10-30; headers and usage follow the recordings of 2026-10-31. Request ids are marked replay.",
+  "steps": {
+    "triage": {
+      "expect": {
+        "guardrails": [{"profile": "checker-injection", "mode": "monitor"}]
+      },
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-injection-triage",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-20b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "712",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": false, "score": 0.98}]
+        },
+        "content": {
+          "categories": ["personal", "payment_request"],
+          "urgency": false,
+          "impersonation": false,
+          "secret_request": false,
+          "details_changed": false,
+          "injection_suspected": true,
+          "impossible_returns": false,
+          "money_claims": [{"label": "for the concert tickets", "amount": "15", "currency": ""}],
+          "risk": "high",
+          "summary": "A friendly payment request that also carries a line written for automated reviewers."
+        },
+        "usage": {"prompt_tokens": 873, "completion_tokens": 233, "total_tokens": 1106, "cost_usd": "0.000059", "pricing_source": "deployment"}
+      }
+    },
+    "gate": {
+      "expect": {
+        "guardrails": [{"profile": "checker-injection", "mode": "block"}]
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "otari-request-id": "replay-injection-gate",
+          "otari-error-code": "guardrail_violation"
+        },
+        "body": {
+          "message": "Request blocked by guardrail policy.",
+          "code": "guardrail_violation",
+          "guardrails": [{"profile": "checker-injection", "explanation": null, "score": 0.98}]
+        }
+      }
+    },
+    "investigator": {
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-injection-investigator",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-120b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-response-duration-ms": "990",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.01}]
+        },
+        "content": {
+          "findings": [],
+          "computations": [
+            {"label": "payee account age in days", "code": "print(round(26280 / 24))", "result": "1095"}
+          ],
+          "amount_check": null,
+          "brake": false,
+          "summary": "The payee account is about three years old with no reports; the message itself was withheld."
+        },
+        "usage": {"prompt_tokens": 3360, "completion_tokens": 512, "total_tokens": 3872, "cost_usd": "0.010211", "pricing_source": "deployment"}
+      }
+    }
+  }
+}

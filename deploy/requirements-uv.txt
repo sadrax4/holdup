@@ -1,0 +1,11 @@
+# uv for the Docker image, installed from PyPI with pip in hash-checking mode.
+#
+# 0.11.32 is the uv version that wrote uv.lock; CI (.github/workflows/ci.yml) uses the same one.
+# The hashes are the Linux wheels published on PyPI for that version, in this order:
+# manylinux2014 x86_64, manylinux2014 aarch64, manylinux_2_28 aarch64.
+# To upgrade, take the sha256 values of those wheels from https://pypi.org/pypi/uv/<version>/json
+# and change the version in ci.yml as well.
+uv==0.11.32 \
+    --hash=sha256:3da76cd4e2697de30928b8a8524bd39183ac1e08cb7e72833807c022b7cba6c4 \
+    --hash=sha256:125c142363d0842c8506a057da56bae182e2aa3957344f57dd9ef20ea10f06b0 \
+    --hash=sha256:be0799f1ad70c755d10de5aaf46af94199d4f16a992f90278f2662350cd3f4fe

@@ -1,0 +1,34 @@
+{
+ "probe": "webfetch-chat",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:06:39Z",
+ "summary": "max_uses on otari_web_fetch: 400",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Fetch https://example.com and tell me the exact page title (the main heading). Fetch at most once."
+   }
+  ],
+  "tools": [
+   {
+    "type": "otari_web_fetch",
+    "max_uses": 1
+   }
+  ],
+  "max_tokens": 800,
+  "reasoning_effort": "low",
+  "max_tool_iterations": 3
+ },
+ "status": 400,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "53995970-7020-45bd-90a7-801facdbac19"
+ },
+ "response_body": {
+  "detail": "otari_web_fetch declarations may contain only the type field"
+ }
+}

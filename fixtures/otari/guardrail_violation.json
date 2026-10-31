@@ -1,0 +1,22 @@
+{
+  "scenario": "guardrail_violation",
+  "synthetic": true,
+  "description": "A guardrail in block mode refuses every request, as when an organization mandates the injection check in block mode: 403 guardrail_violation and the provider is never called. A refusal like this is a finding, not a failure: the pipeline brakes with CHECKER_INJECTION from the guardrail.",
+  "source": "Written by hand. The body is the guardrail_violation refusal observed on the hosted gateway on 2026-10-30 (message, code, guardrails); guardrails: Modes documents the 403.",
+  "steps": {
+    "*": {
+      "response": {
+        "status": 403,
+        "headers": {
+          "otari-request-id": "replay-guardrail-violation",
+          "otari-error-code": "guardrail_violation"
+        },
+        "body": {
+          "message": "Request blocked by guardrail policy.",
+          "code": "guardrail_violation",
+          "guardrails": [{"profile": "checker-injection", "explanation": null, "score": 1.0}]
+        }
+      }
+    }
+  }
+}

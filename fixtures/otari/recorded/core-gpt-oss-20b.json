@@ -1,0 +1,62 @@
+{
+ "probe": "core-gpt-oss-20b",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:08:21.042+00:00",
+ "summary": "gpt-oss with a small max_tokens: finish_reason length and empty content",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-20b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "Reply with a short greeting of at most five words."
+   }
+  ],
+  "max_tokens": 30
+ },
+ "status": 200,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "b2e724e2-abb9-4403-96aa-68e267e64890",
+  "otari-provider": "deepinfra",
+  "otari-model": "openai/gpt-oss-20b",
+  "otari-attempt-count": "1",
+  "otari-fallback": "false",
+  "otari-response-duration-ms": "499"
+ },
+ "response_body": {
+  "id": "chatcmpl-RL1yY8gRUhmj6uvqXc5BnKVO",
+  "choices": [
+   {
+    "finish_reason": "length",
+    "index": 0,
+    "message": {
+     "content": "",
+     "role": "assistant",
+     "tool_calls": [],
+     "reasoning": "User: “Reply with a short greeting of at most five words.” So we should respond with a greeting. For example: \"Hello",
+     "reasoning_content": "User: “Reply with a short greeting of at most five words.” So we should respond with a greeting. For example: \"Hello",
+     "provider_specific_fields": {
+      "reasoning_content": "User: “Reply with a short greeting of at most five words.” So we should respond with a greeting. For example: \"Hello",
+      "name": null
+     },
+     "refusal": null
+    },
+    "logprobs": null
+   }
+  ],
+  "created": 1793448501,
+  "model": "openai/gpt-oss-20b",
+  "object": "chat.completion",
+  "service_tier": "default",
+  "usage": {
+   "completion_tokens": 30,
+   "prompt_tokens": 65,
+   "total_tokens": 95,
+   "estimated_cost": 6.1499999999999996e-06,
+   "cost_usd": "0.000006",
+   "pricing_source": "deployment"
+  }
+ }
+}

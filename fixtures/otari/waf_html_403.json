@@ -1,0 +1,55 @@
+{
+  "scenario": "waf_html_403",
+  "synthetic": true,
+  "description": "The CDN firewall in front of the hosted gateway answers any request whose text still holds a backtick or an ASCII quote with an HTML 403, before Otari sees it. The client retries once with look-alike characters (U+02CB, U+2019, U+201D) and the retry goes through; every step then answers clean.",
+  "source": "The HTML body is the one captured from the hosted gateway on 2026-10-31 (scratch probes p1 and p3, otari issue #2704). The answers after the retry are written by hand.",
+  "steps": {
+    "triage": {
+      "response": {
+        "waf": true,
+        "headers": {
+          "otari-request-id": "replay-waf-triage",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-20b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.02}]
+        },
+        "content": {
+          "categories": ["other"],
+          "urgency": false,
+          "impersonation": false,
+          "secret_request": false,
+          "details_changed": false,
+          "injection_suspected": false,
+          "impossible_returns": false,
+          "money_claims": [],
+          "risk": "low",
+          "summary": "A short technical note between colleagues."
+        },
+        "usage": {"prompt_tokens": 820, "completion_tokens": 180, "total_tokens": 1000, "cost_usd": "0.000050", "pricing_source": "deployment"}
+      }
+    },
+    "investigator": {
+      "response": {
+        "waf": true,
+        "headers": {
+          "otari-request-id": "replay-waf-investigator",
+          "otari-provider": "deepinfra",
+          "otari-model": "openai/gpt-oss-120b",
+          "otari-attempt-count": "1",
+          "otari-fallback": "false",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.02}]
+        },
+        "content": {
+          "findings": [],
+          "computations": [],
+          "amount_check": null,
+          "brake": false,
+          "summary": "Nothing in the payee record or the message points to a scam."
+        },
+        "usage": {"prompt_tokens": 3900, "completion_tokens": 420, "total_tokens": 4320, "cost_usd": "0.000216", "pricing_source": "deployment"}
+      }
+    }
+  }
+}

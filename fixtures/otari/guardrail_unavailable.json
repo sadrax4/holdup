@@ -1,0 +1,19 @@
+{
+  "scenario": "guardrail_unavailable",
+  "synthetic": true,
+  "description": "A guardrail in block mode cannot be evaluated (its service is down or not configured), so the gateway fails closed and answers 502 without calling the provider. The pipeline fails closed too: AI_UNAVAILABLE and one more hour, and the engine retries later.",
+  "source": "Written by hand from guardrails: When the guardrails service is unreachable (a block guardrail that cannot be evaluated is rejected with a 502). The detail paraphrases the message observed on the hosted gateway on 2026-10-30 for a profile with no service behind it.",
+  "steps": {
+    "*": {
+      "response": {
+        "status": 502,
+        "headers": {
+          "otari-request-id": "replay-guardrail-unavailable"
+        },
+        "body": {
+          "detail": "guardrail profile checker-injection requested but no guardrails service is configured. Set OTARI_GUARDRAILS_URL on the gateway or pass url on the guardrail entry."
+        }
+      }
+    }
+  }
+}

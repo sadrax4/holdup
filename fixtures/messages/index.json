@@ -1,0 +1,45 @@
+{
+  "description": "Fictional sample messages for demos and tests. Every brand, person and account in them is made up. Offline and testnet demos pay in the HUSD demo token unless Circle USDC is configured.",
+  "fictional": true,
+  "placeholders": {
+    "base_url": "PUBLIC_BASE_URL of the running HoldUp web app, which serves the training fixture pages"
+  },
+  "messages": [
+    {
+      "id": "hero",
+      "file": "coinhaven_dm.txt",
+      "sender": "CoinHaven Support",
+      "label": "Fake exchange support DM (training sample)",
+      "payment": {"payee": "safe-wallet-77.testnet", "amount": "50", "asset": "USDC"},
+      "trusted": [],
+      "rules_expect": ["NEW_ACCOUNT", "MULE_PATTERN", "IMPERSONATION", "URGENCY", "CHECKER_INJECTION"]
+    },
+    {
+      "id": "invoice",
+      "file": "northwind_invoice.txt",
+      "sender": "Northwind Paper Co.",
+      "label": "Supplier invoice with changed wallet details (training sample)",
+      "payment": {"payee": "northwind-paper.testnet", "amount": "1250", "asset": "USDC"},
+      "trusted": ["northwindpaper.testnet"],
+      "rules_expect": ["NEW_ACCOUNT", "DETAILS_CHANGED", "LOOKALIKE_PAYEE", "AMOUNT_MISMATCH"]
+    },
+    {
+      "id": "benign",
+      "file": "dinner_split.txt",
+      "sender": "Ravi",
+      "label": "Splitting a dinner bill with a friend",
+      "payment": {"payee": "ravi.testnet", "amount": "12.5", "asset": "HUSD"},
+      "trusted": [],
+      "rules_expect": []
+    },
+    {
+      "id": "injection-only",
+      "file": "injection_only.txt",
+      "sender": "Ravi",
+      "label": "Ordinary request with a line aimed at the AI checker (training sample)",
+      "payment": {"payee": "ravi.testnet", "amount": "15", "asset": "HUSD"},
+      "trusted": [],
+      "rules_expect": ["CHECKER_INJECTION"]
+    }
+  ]
+}

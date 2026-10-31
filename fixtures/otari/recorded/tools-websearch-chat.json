@@ -1,0 +1,34 @@
+{
+ "probe": "websearch-chat",
+ "synthetic": false,
+ "recorded_utc": "2026-10-31T12:06:26Z",
+ "summary": "web search off for the workspace: 403 without a code",
+ "endpoint": "https://api.otari.ai/api/v1/chat/completions",
+ "request_body": {
+  "model": "openai/gpt-oss-120b",
+  "messages": [
+   {
+    "role": "user",
+    "content": "What is the current NEAR Protocol testnet RPC URL according to docs.near.org? Use at most one web search. Answer in one or two sentences and cite the source URL."
+   }
+  ],
+  "tools": [
+   {
+    "type": "otari_web_search",
+    "max_uses": 1
+   }
+  ],
+  "max_tokens": 1200,
+  "reasoning_effort": "low",
+  "max_tool_iterations": 3
+ },
+ "status": 403,
+ "response_headers": {
+  "content-type": "application/json",
+  "server": "envoy",
+  "otari-request-id": "60a72ca0-7655-4f03-a468-981ec79ea118"
+ },
+ "response_body": {
+  "detail": "web search is not enabled for this workspace"
+ }
+}

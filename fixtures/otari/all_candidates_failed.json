@@ -1,0 +1,83 @@
+{
+  "scenario": "all_candidates_failed",
+  "synthetic": true,
+  "description": "Every hosted offering of gpt-oss-120b fails, then every offering of deepseek-v4.1-flash-1017; glm-5.3-flash answers. The investigator step records the cross-family fallback and three attempts, and the payment (a dinner split) comes out clean.",
+  "source": "Written by hand from routing: Failure behavior (a catalog id falls back across its offerings and answers a gateway error in its own words when all fail) and api-reference: Provider error details for the 502 wording.",
+  "steps": {
+    "triage": {
+      "response": {
+        "headers": {
+          "otari-request-id": "replay-acf-triage",
+          "otari-provider": "ovhcloud",
+          "otari-model": "gpt-oss-20b",
+          "otari-attempt-count": "2",
+          "otari-fallback": "true",
+          "otari-response-duration-ms": "2210",
+          "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.01}]
+        },
+        "content": {
+          "categories": ["personal", "payment_request"],
+          "urgency": false,
+          "impersonation": false,
+          "secret_request": false,
+          "details_changed": false,
+          "injection_suspected": false,
+          "impossible_returns": false,
+          "money_claims": [
+            {"label": "the bill was", "amount": "25.00", "currency": ""},
+            {"label": "your half is", "amount": "12.50", "currency": ""}
+          ],
+          "risk": "low",
+          "summary": "A friend shares the cost of a dinner and asks for half of it."
+        },
+        "usage": {"prompt_tokens": 862, "completion_tokens": 205, "total_tokens": 1067, "cost_usd": "0.000055", "pricing_source": "deployment"}
+      }
+    },
+    "investigator": {
+      "by_model": {
+        "openai/gpt-oss-120b": {
+          "status": 502,
+          "headers": {
+            "otari-request-id": "replay-acf-investigator-1",
+            "otari-error-provider": "together",
+            "otari-error-status": "503",
+            "otari-error-tag": "http_error",
+            "otari-error-retryable": "true"
+          },
+          "body": {"detail": "The provider failed the request with HTTP 503"}
+        },
+        "deepseek/deepseek-v4.1-flash-1017": {
+          "status": 502,
+          "headers": {
+            "otari-request-id": "replay-acf-investigator-2",
+            "otari-error-provider": "nebius",
+            "otari-error-tag": "network",
+            "otari-error-retryable": "true"
+          },
+          "body": {"detail": "The gateway could not connect to the provider"}
+        },
+        "*": {
+          "headers": {
+            "otari-request-id": "replay-acf-investigator-3",
+            "otari-provider": "deepinfra",
+            "otari-model": "zai-org/GLM-5.3-Flash",
+            "otari-attempt-count": "1",
+            "otari-fallback": "false",
+            "otari-response-duration-ms": "1544",
+            "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": true, "score": 0.01}]
+          },
+          "content": {
+            "findings": [],
+            "computations": [
+              {"label": "half of the dinner bill", "code": "print(25.00 / 2)", "result": "12.5"}
+            ],
+            "amount_check": null,
+            "brake": false,
+            "summary": "An established account and a request for exactly half of the stated bill."
+          },
+          "usage": {"prompt_tokens": 4302, "completion_tokens": 588, "total_tokens": 4890, "cost_usd": "0.011039", "pricing_source": "deployment"}
+        }
+      }
+    }
+  }
+}
