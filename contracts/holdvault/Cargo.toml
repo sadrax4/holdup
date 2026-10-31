@@ -1,0 +1,17 @@
+[package]
+name = "holdvault"
+version = "1.0.0"
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+near-sdk.workspace = true
+near-contract-standards.workspace = true
+
+[dev-dependencies]
+near-sdk = { workspace = true, features = ["unit-testing"] }
+# Same version near-sdk's unit-testing feature uses; lets the tests cache the VM config.
+near-parameters = "=0.37.4"
