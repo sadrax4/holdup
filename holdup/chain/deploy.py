@@ -1,18 +1,19 @@
 """Deploy HoldUp to the NEAR sandbox or testnet. Run by an operator, never by tests.
 
-Transactions, in order (signed by the root account unless noted):
+Both contracts initialise only when called by their own account (``new`` is
+private), so each gets a temporary key that is deleted at the end. In order:
 
-1. ``husd.<root>``: create, fund, deploy ``res/demo_token.wasm`` and call
-   ``new`` with the root as owner, which mints the demo supply to the treasury.
-   The token account gets no key.
-2. ``vault.<root>``: create with the storage reserve and a temporary key,
-   deploy ``res/holdvault.wasm`` and call ``new`` with the profile's config.
-3. Register the vault on each token (``storage_deposit``).
-4. ``oracle.<root>`` and ``keeper.<root>``: create, each with exactly one
-   function-call key on the vault (``extend_hold`` / ``release``, no allowance cap).
+1. ``husd.<root>``: the root creates and funds it with a temporary key; that
+   key deploys ``res/demo_token.wasm`` and calls ``new`` with the root as owner,
+   minting the demo supply to the treasury.
+2. ``vault.<root>``: the same, with the storage reserve, ``res/holdvault.wasm``
+   and the profile's configuration.
+3. The root registers the vault on each token (``storage_deposit``).
+4. ``oracle.<root>`` and ``keeper.<root>``: created by the root, each with exactly
+   one function-call key on the vault (``extend_hold`` / ``release``, no allowance cap).
 5. With the demo profile, the story's payees as keyless sub-accounts of the root.
-6. Delete the vault's temporary key (signed by that key), then check the
-   vault has no keys left.
+6. The token's and the vault's temporary keys delete themselves; the vault is
+   then checked to have no keys left.
 
 Credentials go to ``.holdup/credentials.json`` (git-ignored, mode 600).
 """
@@ -54,12 +55,23 @@ TOKEN_ACCOUNT_NEAR = "3"
 ROLE_ACCOUNT_NEAR = "1"
 DEMO_PAYEE_NEAR = "0.1"
 STORAGE_REGISTRATION_NEAR = "0.01"  # refunded above the token's minimum
+INIT_GAS = Gas.tgas(100)
+
+
+@dataclass
+class DeployKeys:
+    """Fresh keys for one deployment. The vault and token keys are deleted at the end."""
+
+    vault: Ed25519KeyPair = field(default_factory=generate_key)
+    token: Ed25519KeyPair = field(default_factory=generate_key)
+    oracle: Ed25519KeyPair = field(default_factory=generate_key)
+    keeper: Ed25519KeyPair = field(default_factory=generate_key)
 
 
 @dataclass
 class PlannedTx:
     label: str
-    signer: str  # "root" or "vault" (the vault's temporary key)
+    signer: str  # "root", or "vault" / "token" for that account's temporary key
     receiver: str
     actions: list[Any]
 
@@ -74,9 +86,7 @@ class DeployPlan:
     keeper_id: str
     token_id: str
     config: VaultConfig
-    vault_key: Ed25519KeyPair
-    oracle_key: Ed25519KeyPair
-    keeper_key: Ed25519KeyPair
+    keys: DeployKeys
     txs: list[PlannedTx] = field(default_factory=list)
 
 
@@ -106,101 +116,47 @@ def plan_deploy(
     vault_wasm: bytes,
     token_wasm: bytes,
     reserve_near: str = "5",
-    keys: tuple[Ed25519KeyPair, Ed25519KeyPair, Ed25519KeyPair] | None = None,
+    keys: DeployKeys | None = None,
 ) -> DeployPlan:
     """All deployment transactions for ``settings`` (from :func:`deploy_settings`)."""
     if profile not in PROFILES:
         raise ValueError(f"unknown profile {profile!r}; choose one of {sorted(PROFILES)}")
-    vault_key, oracle_key, keeper_key = keys or (generate_key(), generate_key(), generate_key())
+    keys = keys or DeployKeys()
     config = vault_config(settings, profile)
     root, vault, token = settings.root_account, settings.vault_account, settings.husd_token or ""
     oracle, keeper = settings.oracle_accounts[0], settings.keeper_account
-    plan = DeployPlan(
-        network=settings.network,
-        profile=profile,
-        root=root,
-        vault_id=vault,
-        oracle_id=oracle,
-        keeper_id=keeper,
-        token_id=token,
-        config=config,
-        vault_key=vault_key,
-        oracle_key=oracle_key,
-        keeper_key=keeper_key,
-    )
-    plan.txs.append(
-        PlannedTx(
-            "create HUSD demo token",
-            "root",
-            token,
-            [
-                create_account(),
-                transfer(Amount.near(TOKEN_ACCOUNT_NEAR)),
-                deploy_contract(token_wasm),
-                function_call(
-                    "new", {"owner_id": root, "total_supply": str(HUSD_SUPPLY)}, gas=Gas.tgas(100)
-                ),
-            ],
-        )
-    )
-    plan.txs.append(
-        PlannedTx(
-            "create and initialise the vault",
-            "root",
-            vault,
-            [
-                create_account(),
-                transfer(Amount.near(reserve_near)),
-                add_full_access_key(vault_key.public_key),
-                deploy_contract(vault_wasm),
-                function_call("new", {"config": config_input(config)}, gas=Gas.tgas(100)),
-            ],
-        )
-    )
+    plan = DeployPlan(settings.network, profile, root, vault, oracle, keeper, token, config, keys)
+    add = plan.txs.append
+
+    def self_initialised(name: str, account: str, near: str, key: Ed25519KeyPair, wasm: bytes, args: dict[str, Any]) -> None:
+        add(PlannedTx(f"create {name}", "root", account,
+                      [create_account(), transfer(Amount.near(near)), add_full_access_key(key.public_key)]))
+        add(PlannedTx(f"deploy and initialise {name}", name, account,
+                      [deploy_contract(wasm), function_call("new", args, gas=INIT_GAS)]))
+
+    self_initialised("token", token, TOKEN_ACCOUNT_NEAR, keys.token, token_wasm,
+                     {"owner_id": root, "total_supply": str(HUSD_SUPPLY)})
+    self_initialised("vault", vault, reserve_near, keys.vault, vault_wasm, {"config": config_input(config)})
     for token_id in config.tokens:
-        plan.txs.append(
-            PlannedTx(
-                f"register the vault on {token_id}",
-                "root",
-                token_id,
-                [
-                    function_call(
-                        "storage_deposit",
-                        {"account_id": vault, "registration_only": True},
-                        deposit=Amount.near(STORAGE_REGISTRATION_NEAR),
-                    )
-                ],
-            )
-        )
+        add(PlannedTx(f"register the vault on {token_id}", "root", token_id, [
+            function_call("storage_deposit", {"account_id": vault, "registration_only": True},
+                          deposit=Amount.near(STORAGE_REGISTRATION_NEAR)),
+        ]))
     for label, account, key, methods in (
-        ("oracle", oracle, oracle_key, ORACLE_METHODS),
-        ("keeper", keeper, keeper_key, KEEPER_METHODS),
+        ("oracle", oracle, keys.oracle, ORACLE_METHODS),
+        ("keeper", keeper, keys.keeper, KEEPER_METHODS),
     ):
-        plan.txs.append(
-            PlannedTx(
-                f"create the {label} with one {'/'.join(methods)} key",
-                "root",
-                account,
-                [
-                    create_account(),
-                    transfer(Amount.near(ROLE_ACCOUNT_NEAR)),
-                    add_function_call_key(key.public_key, vault, methods, allowance=None),
-                ],
-            )
-        )
+        add(PlannedTx(f"create the {label} with one {'/'.join(methods)} key", "root", account, [
+            create_account(),
+            transfer(Amount.near(ROLE_ACCOUNT_NEAR)),
+            add_function_call_key(key.public_key, vault, methods, allowance=None),
+        ]))
     if profile == "demo":
         for label in DEMO_PAYEES:
-            plan.txs.append(
-                PlannedTx(
-                    f"create demo payee {label}.{root}",
-                    "root",
-                    f"{label}.{root}",
-                    [create_account(), transfer(Amount.near(DEMO_PAYEE_NEAR))],
-                )
-            )
-    plan.txs.append(
-        PlannedTx("delete the vault's last key", "vault", vault, [delete_key(vault_key.public_key)])
-    )
+            add(PlannedTx(f"create demo payee {label}.{root}", "root", f"{label}.{root}",
+                          [create_account(), transfer(Amount.near(DEMO_PAYEE_NEAR))]))
+    add(PlannedTx("delete the token's last key", "token", token, [delete_key(keys.token.public_key)]))
+    add(PlannedTx("delete the vault's last key", "vault", vault, [delete_key(keys.vault.public_key)]))
     return plan
 
 
@@ -208,11 +164,14 @@ async def execute_plan(
     plan: DeployPlan, near: AsyncNear, root_signer: KeyPairSigner
 ) -> list[tuple[str, str]]:
     """Send the planned transactions in order; returns (label, tx hash) pairs."""
-    vault_signer = KeyPairSigner(account_id=plan.vault_id, key_pair=plan.vault_key)
+    signers = {
+        "root": root_signer,
+        "vault": KeyPairSigner(account_id=plan.vault_id, key_pair=plan.keys.vault),
+        "token": KeyPairSigner(account_id=plan.token_id, key_pair=plan.keys.token),
+    }
     done: list[tuple[str, str]] = []
     for tx in plan.txs:
-        signer = root_signer if tx.signer == "root" else vault_signer
-        result = await near.send_transaction(tx.receiver, tx.actions, signer=signer)
+        result = await near.send_transaction(tx.receiver, tx.actions, signer=signers[tx.signer])
         done.append((tx.label, result.transaction_hash or ""))
     remaining = await near.access_keys(plan.vault_id)
     if remaining:
@@ -241,8 +200,8 @@ def credentials_for(
         "keeper_account": plan.keeper_id,
         "husd_token": plan.token_id,
         "usdc_token": settings.usdc_token,
-        "oracle_private_key": plan.oracle_key.secret_key,
-        "keeper_private_key": plan.keeper_key.secret_key,
+        "oracle_private_key": plan.keys.oracle.secret_key,
+        "keeper_private_key": plan.keys.keeper.secret_key,
         "treasury_private_key": root_signer.key_pair.secret_key,
         "secret": settings.secret or secrets.token_urlsafe(32),
         "deployment": {"profile": plan.profile, "transactions": [list(t) for t in txs]},

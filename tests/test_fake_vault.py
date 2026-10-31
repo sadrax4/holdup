@@ -236,7 +236,8 @@ def test_extend_hold_checks_in_contract_order(vault: HoldVaultModel) -> None:
     cap = hold.created_ms + MAX_HOLD
     assert code_of(lambda: vault.extend_hold(ORACLE, hold.id, cap + 1, 1, "{}")) == E.E_ABOVE_MAX_HOLD
     assert code_of(lambda: vault.extend_hold(ORACLE, hold.id, later, 1, "x" * 4097)) == E.E_EVIDENCE_TOO_LONG
-    assert code_of(lambda: vault.extend_hold(ORACLE, hold.id, later, 1, "é" * 2049)) == E.E_EVIDENCE_TOO_LONG
+    two_byte_chars = "\u00e9" * 2049  # 4098 bytes in UTF-8
+    assert code_of(lambda: vault.extend_hold(ORACLE, hold.id, later, 1, two_byte_chars)) == E.E_EVIDENCE_TOO_LONG
     assert code_of(lambda: vault.extend_hold(ORACLE, hold.id, later, 0, "{}")) == E.E_NO_REASON
     assert code_of(lambda: vault.extend_hold(ORACLE, hold.id, later, 2**32, "{}")) == E.E_BAD_ARGS
     vault.extend_hold(ORACLE, hold.id, cap, 1, "x" * 4096)  # both limits are inclusive

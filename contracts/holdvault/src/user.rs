@@ -39,7 +39,7 @@ pub struct DailyUsage {
 }
 
 /// A guardian change that waits for `guardian_delay_ms`. `guardian: None` removes the guardian.
-#[near(serializers = [borsh, json])]
+#[near(serializers = [borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingGuardian {
     pub guardian: Option<AccountId>,

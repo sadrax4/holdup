@@ -111,6 +111,38 @@ def _is_failure(finding: Finding) -> bool:
     return finding.reason in FAILURE_REASONS
 
 
+def _keep_rules_decision(fast: Verdict | None, full: Verdict | None) -> Verdict | None:
+    """The AI step can add to a deterministic rules brake, never weaken it.
+
+    Only matters when the rules asked for more than the provisional hour (a
+    reported payee, a secret request): that wait stands even if the AI found nothing.
+    """
+    if full is None or not _flags(fast) or fast.hold_for_ms <= PROVISIONAL_HOLD_MS:
+        return full
+    extra = [f for f in fast.findings if f not in full.findings]
+    hold_for = max(fast.hold_for_ms, full.hold_for_ms if _flags(full) else 0)
+    return replace(full, brake=True, hold_for_ms=hold_for, findings=[*full.findings, *extra])
+
+
+def _is_budget_error(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    return "Budget" in name or "InsufficientFunds" in name
+
+
+def _describe_failure(exc: BaseException) -> str:
+    if _is_budget_error(exc):
+        return "the AI budget is used up"
+    return f"the AI service failed with {type(exc).__name__}"
+
+
+def _failure_verdict(hold: Hold, exc: BaseException) -> Verdict | None:
+    """A budget error raised by the pipeline is reported like a BUDGET_EXHAUSTED verdict."""
+    if not _is_budget_error(exc):
+        return None
+    finding = Finding(Reason.BUDGET_EXHAUSTED, _describe_failure(exc), source="fail_closed")
+    return Verdict(hold_id=hold.id, brake=True, hold_for_ms=HOUR_MS, findings=[finding])
+
+
 @dataclass
 class _Retry:
     """Fail-closed state of one hold whose check keeps failing."""
@@ -355,7 +387,7 @@ class Engine:
                 await self._fail_closed(user_key, hold, ctx, failure, fast=fast, verdict=verdict)
             else:
                 self._retries.pop(hold.id, None)
-                await self._finish(user_key, hold, verdict)
+                await self._finish(user_key, hold, _keep_rules_decision(fast, verdict))
         except Exception:
             log.exception("checks for hold %s crashed", hold.id)
             try:
@@ -396,7 +428,7 @@ class Engine:
         except Exception as exc:
             task.cancel()
             log.warning("full check failed for hold %s: %r", hold.id, exc)
-            return None, f"{type(exc).__name__}"
+            return _failure_verdict(hold, exc), _describe_failure(exc)
         failures = [f for f in verdict.findings if _is_failure(f)]
         if failures:
             return verdict, failures[0].detail or "the AI service is unavailable"
@@ -562,7 +594,7 @@ class Engine:
                 )
                 return
             self._retries.pop(state.hold_id, None)
-            await self._finish(state.user_key, hold, verdict)
+            await self._finish(state.user_key, hold, _keep_rules_decision(state.fast, verdict))
         except Exception:
             log.exception("retry for hold %s crashed", state.hold_id)
         finally:
@@ -702,6 +734,9 @@ class Engine:
         await self._notify(
             user_key, messages.trust_added(payee, effective, now_ms=now, tx_text=self._tx_text(tx))
         )
+        if effective > now:  # someone holding the server's keys could do this too: tell the guardian
+            text = messages.guardian_trust_notice(self._name(user_key), payee, effective, now_ms=now)
+            await self._notify_guardian_of(user_key, text)
         return tx
 
     async def untrust(self, user_key: str, payee: str) -> TxResult:
@@ -724,12 +759,20 @@ class Engine:
         if owner_key == guardian_user_key:
             raise VaultError(E.E_BAD_GUARDIAN, "you cannot be your own guardian")
         guardian, _ = await self.start(guardian_user_key)
-        tx = await self.vault.set_guardian(self.account_for(owner_key), guardian.account_id)
+        owner = self.account_for(owner_key)
+        before = await self.vault.get_user(owner.account_id)
+        tx = await self.vault.set_guardian(owner, guardian.account_id)
         now = await self.vault.now_ms()
         event = first_item(tx.events, "guardian_changed") or {}
         effective = int(event.get("effective_ms", now))
         self.store.record_tx(None, "set_guardian", tx.tx_hash)
         self.store.log_event("guardian_set", {"effective_ms": effective})
+        current = self.store.user_by_account(before.guardian) if before and before.guardian else None
+        if current is not None and current["user_key"] != guardian_user_key:
+            text = messages.guardian_change_notice(
+                self._name(owner_key), self._name(guardian_user_key), effective, now_ms=now
+            )
+            await self._notify(current["user_key"], text)
         await self._notify(
             owner_key,
             messages.guardian_set(
@@ -809,7 +852,7 @@ class Engine:
 
     async def stats(self) -> dict[str, Any]:
         verdicts = self.store.list_verdicts()
-        steps = [step for record in verdicts for step in record.get("steps", [])]
+        steps = [step for record in verdicts for step in record.get("steps", []) if step.get("model")]
         count = self.store.count_events
         return {
             "users": self.store.count_users(),
@@ -823,7 +866,8 @@ class Engine:
             "cancels_after_flag": count("cancel_after_flag"),
             "releases": count("release"),
             "payout_failures": count("payout_failed"),
-            "ai_checks": sum(1 for record in verdicts if record.get("steps")),
+            "ai_checks": sum(1 for record in verdicts if any(s.get("model") for s in record.get("steps", []))),
+            "ai_steps": len(steps),
             "fallbacks": sum(1 for step in steps if step.get("fallback")),
             "ai_cost_usd": round(sum(step.get("cost_usd") or 0.0 for step in steps), 6),
         }
@@ -840,6 +884,12 @@ class Engine:
             await self.notifier.notify(user_key, text, buttons)
         except Exception:
             log.exception("could not notify %s", user_key)
+
+    async def _notify_guardian_of(self, user_key: str, text: str) -> None:
+        view = await self.vault.get_user(self.account_for(user_key).account_id)
+        guardian = self.store.user_by_account(view.guardian) if view and view.guardian else None
+        if guardian is not None:
+            await self._notify(guardian["user_key"], text)
 
     def _name(self, user_key: str) -> str:
         row = self.store.get_user(user_key)

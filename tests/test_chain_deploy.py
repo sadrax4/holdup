@@ -11,7 +11,14 @@ import pytest
 from near import KeyPairSigner, generate_key
 from near.wire import Action
 
-from holdup.chain.deploy import credentials_for, deploy_settings, execute_plan, plan_deploy, write_credentials
+from holdup.chain.deploy import (
+    DeployKeys,
+    credentials_for,
+    deploy_settings,
+    execute_plan,
+    plan_deploy,
+    write_credentials,
+)
 from holdup.chain.profiles import PROFILES, config_input, vault_config
 from holdup.config import Settings
 
@@ -20,8 +27,7 @@ ROOT = "sandbox"
 
 def make_plan(profile: str = "demo") -> Any:
     settings = deploy_settings(Settings(), "sandbox", ROOT)
-    keys = (generate_key(), generate_key(), generate_key())
-    return plan_deploy(settings, profile=profile, vault_wasm=b"vault-wasm", token_wasm=b"token-wasm", keys=keys)
+    return plan_deploy(settings, profile=profile, vault_wasm=b"vault-wasm", token_wasm=b"token-wasm", keys=DeployKeys())
 
 
 def kinds(tx: Any) -> list[str]:
@@ -42,28 +48,35 @@ def test_profiles_match_the_spec() -> None:
     assert as_json["registration_fee"] == str(10**22)
 
 
-def test_the_vault_is_created_initialised_and_left_without_keys() -> None:
+def test_each_contract_initialises_itself_and_ends_without_keys() -> None:
     plan = make_plan()
     by_label = {tx.label: tx for tx in plan.txs}
-    vault_tx = by_label["create and initialise the vault"]
-    assert vault_tx.receiver == "vault.sandbox" and vault_tx.signer == "root"
-    assert kinds(vault_tx) == ["CreateAccount", "Transfer", "AddKey", "DeployContract", "FunctionCall"]
-    assert vault_tx.actions[3].code == b"vault-wasm"
-    init = vault_tx.actions[4]
-    config = json.loads(init.args)["config"]
-    assert init.method_name == "new" and config["oracles"] == ["oracle.sandbox"] and config["tokens"] == ["husd.sandbox"]
+    for name, account, key, wasm in (("vault", "vault.sandbox", plan.keys.vault, b"vault-wasm"),
+                                     ("token", "husd.sandbox", plan.keys.token, b"token-wasm")):
+        create = by_label[f"create {name}"]
+        assert (create.signer, create.receiver) == ("root", account)
+        assert kinds(create) == ["CreateAccount", "Transfer", "AddKey"]
+        assert create.actions[2].public_key.data == key.public_key.data
+        init = by_label[f"deploy and initialise {name}"]
+        assert (init.signer, init.receiver) == (name, account)  # new() is private: the account calls it itself
+        assert kinds(init) == ["DeployContract", "FunctionCall"]
+        assert init.actions[0].code == wasm and init.actions[1].method_name == "new"
+        delete = by_label[f"delete the {name}'s last key"]
+        assert (delete.signer, delete.receiver) == (name, account)
+        (action,) = delete.actions
+        assert isinstance(action, Action.DeleteKey) and action.public_key.data == key.public_key.data
 
-    last = plan.txs[-1]
-    assert (last.label, last.signer, last.receiver) == ("delete the vault's last key", "vault", "vault.sandbox")
-    (delete,) = last.actions
-    assert isinstance(delete, Action.DeleteKey)
-    assert delete.public_key.data == plan.vault_key.public_key.data
+    config = json.loads(by_label["deploy and initialise vault"].actions[1].args)["config"]
+    assert config["oracles"] == ["oracle.sandbox"] and config["tokens"] == ["husd.sandbox"]
+    assert json.loads(by_label["deploy and initialise token"].actions[1].args) == {
+        "owner_id": ROOT, "total_supply": str(1_000_000 * 10**6)}
+    assert plan.txs[-1].label == "delete the vault's last key"
 
 
 def test_oracle_and_keeper_get_one_narrow_key_each() -> None:
     plan = make_plan()
-    for account, method, key in (("oracle.sandbox", "extend_hold", plan.oracle_key),
-                                 ("keeper.sandbox", "release", plan.keeper_key)):
+    for account, method, key in (("oracle.sandbox", "extend_hold", plan.keys.oracle),
+                                 ("keeper.sandbox", "release", plan.keys.keeper)):
         (tx,) = [t for t in plan.txs if t.receiver == account]
         assert kinds(tx) == ["CreateAccount", "Transfer", "AddKey"]
         add_key = tx.actions[2]
@@ -72,17 +85,14 @@ def test_oracle_and_keeper_get_one_narrow_key_each() -> None:
         assert add_key.public_key.data == key.public_key.data
 
 
-def test_token_and_demo_payees() -> None:
+def test_vault_registration_and_demo_payees() -> None:
     plan = make_plan()
-    token = plan.txs[0]
-    assert token.receiver == "husd.sandbox" and kinds(token) == ["CreateAccount", "Transfer", "DeployContract", "FunctionCall"]
-    assert json.loads(token.actions[3].args) == {"owner_id": ROOT, "total_supply": str(1_000_000 * 10**6)}
     registration = [t for t in plan.txs if t.label.startswith("register the vault")]
     assert [t.receiver for t in registration] == ["husd.sandbox"]
     assert json.loads(registration[0].actions[0].args) == {"account_id": "vault.sandbox", "registration_only": True}
-    payees = [t.receiver for t in plan.txs if t.label.startswith("create demo payee")]
-    assert "safe-wallet-77.sandbox" in payees and "northwindpaper.sandbox" in payees
-    assert all(kinds(t) == ["CreateAccount", "Transfer"] for t in plan.txs if t.label.startswith("create demo payee"))
+    payees = [t for t in plan.txs if t.label.startswith("create demo payee")]
+    assert {t.receiver for t in payees} >= {"safe-wallet-77.sandbox", "northwindpaper.sandbox"}
+    assert all(kinds(t) == ["CreateAccount", "Transfer"] for t in payees)  # keyless
     assert not [t for t in make_plan("hosted").txs if t.label.startswith("create demo payee")]
     with pytest.raises(ValueError):
         make_plan("fast")
@@ -107,8 +117,10 @@ async def test_execution_signs_in_order_and_checks_the_vault_is_keyless() -> Non
     near = RecordingNear([])
     done = await execute_plan(plan, near, root)  # type: ignore[arg-type]
     assert [label for label, _ in done] == [tx.label for tx in plan.txs]
-    assert near.calls[-1][:2] == ("vault.sandbox", "vault.sandbox")
-    assert {signer for signer, _, _ in near.calls[:-1]} == {ROOT}
+    signers = {tx.label: call[0] for tx, call in zip(plan.txs, near.calls, strict=True)}
+    assert signers["deploy and initialise vault"] == signers["delete the vault's last key"] == "vault.sandbox"
+    assert signers["deploy and initialise token"] == "husd.sandbox"
+    assert signers["create the oracle with one extend_hold key"] == ROOT
     with pytest.raises(RuntimeError):
         await execute_plan(plan, RecordingNear(["still-a-key"]), root)  # type: ignore[arg-type]
 
@@ -122,7 +134,7 @@ def test_credentials_file_is_private(tmp_path: Path) -> None:
     write_credentials(path, data)
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     saved = json.loads(path.read_text())
-    assert saved["oracle_private_key"] == plan.oracle_key.secret_key
+    assert saved["oracle_private_key"] == plan.keys.oracle.secret_key
     assert saved["vault_account"] == "vault.sandbox" and saved["oracle_accounts"] == ["oracle.sandbox"]
     assert saved["secret"]
     assert "vault_private_key" not in saved  # the vault key is deleted, never saved

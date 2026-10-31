@@ -38,11 +38,16 @@ pub struct DemoToken {
 
 #[near]
 impl DemoToken {
-    /// Creates the token with `total_supply` owned by `owner_id`. Only the token account itself
-    /// can initialize it.
+    /// Creates the token with `total_supply` owned by `owner_id`. Only the token account or its
+    /// parent account (the deployer) can initialize it.
     #[init]
-    #[private]
     pub fn new(owner_id: AccountId, total_supply: U128) -> Self {
+        let token_account = env::current_account_id();
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == token_account || token_account.get_parent_account_id() == Some(caller.as_ref()),
+            "only the token account or its parent account can initialize it"
+        );
         let mut token = FungibleToken::new(StorageKey::Accounts);
         token.internal_register_account(&owner_id);
         token.internal_deposit(&owner_id, total_supply.0);
@@ -176,9 +181,20 @@ mod tests {
         builder
     }
 
+    fn deployer() -> AccountId {
+        "test.near".parse().unwrap()
+    }
+
     fn setup() -> DemoToken {
-        testing_env!(context(accounts(0), NearToken::from_near(0)).build());
+        testing_env!(context(deployer(), NearToken::from_near(0)).build());
         DemoToken::new(accounts(0), U128(SUPPLY))
+    }
+
+    #[test]
+    #[should_panic(expected = "only the token account or its parent account can initialize it")]
+    fn strangers_cannot_initialize() {
+        testing_env!(context(accounts(1), NearToken::from_near(0)).build());
+        DemoToken::new(accounts(1), U128(SUPPLY));
     }
 
     #[test]
@@ -203,6 +219,7 @@ mod tests {
     #[test]
     fn owner_mints_and_registers_new_accounts() {
         let mut token = setup();
+        testing_env!(context(accounts(0), NearToken::from_near(0)).build());
         token.mint(accounts(1), U128(5_000_000));
         assert_eq!(token.ft_balance_of(accounts(1)).0, 5_000_000);
         assert_eq!(token.ft_total_supply().0, SUPPLY + 5_000_000);

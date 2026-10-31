@@ -52,6 +52,15 @@ fn new_rejects_invalid_configurations() {
 }
 
 #[test]
+fn only_the_vault_or_its_deployer_can_initialize() {
+    assert_error(Sim::try_init_as(&mallory(), config(), DEFAULT_RESERVE).map(|_| ()), "E_BAD_CONFIG");
+    assert_error(Sim::try_init_as(&alice(), config(), DEFAULT_RESERVE).map(|_| ()), "E_BAD_CONFIG");
+    // The vault is `vault.holdup.near`: its parent deploys and initializes it in one transaction.
+    assert!(Sim::try_init_as(&treasury(), config(), DEFAULT_RESERVE).is_ok());
+    assert!(Sim::try_init_as(&vault(), config(), DEFAULT_RESERVE).is_ok());
+}
+
+#[test]
 fn edge_values_are_accepted() {
     let mut input = config();
     input.oracles = (0..3).map(|i| account(&format!("oracle{i}.near"))).collect();

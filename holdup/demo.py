@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .chain import links
-from .chain.profiles import DEMO_PAYEES, PROFILES
+from .chain.profiles import DEMO_PAYEES
 from .chain.prove import prove, prove_fake
 from .config import Settings
 from .engine import Engine
@@ -31,6 +31,7 @@ from .models import (
     PaymentContext,
     PaymentOutcome,
     UserAccount,
+    VaultConfig,
     parse_amount,
     reasons_from_bits,
 )
@@ -118,6 +119,7 @@ class Story:
     transcript: Transcript
     notifier: TranscriptNotifier
     stable: AssetInfo
+    config: VaultConfig
     holds: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -152,10 +154,12 @@ class Story:
         self.say("  chain: " + "; ".join(self.tx(t) for t in txs))
         return account
 
-    async def forward(self, key: str, text: str) -> None:
+    async def forward(self, key: str, text: str, *, sender: str | None = None) -> None:
         name = self.notifier.names.get(key, key)
-        self.say(f'{name} forwards a message: "{text}"')
-        self.engine.remember_context(key, PaymentContext(forwarded_text=text))
+        origin = f' from "{sender}"' if sender else ""
+        self.say(f'{name} forwards a message{origin}: "{text}"')
+        forwarded = f"Forwarded from {sender}:\n{text}" if sender else text
+        self.engine.remember_context(key, PaymentContext(forwarded_text=forwarded))
 
     async def pay(
         self, key: str, payee: str, amount_text: str, scenario: str, *, typed_symbol: str = "USDC"
@@ -217,14 +221,13 @@ def _stable_asset(settings: Settings) -> tuple[AssetInfo, str]:
 
 
 def _intro(story: Story, title: str, note: str) -> None:
-    settings = story.settings
-    profile = PROFILES["demo"]
+    settings, config = story.settings, story.config
     where = "offline: in-memory vault, simulated time and transactions" if story.engine.simulated else settings.network
     story.say(f"{title} ({where})")
     story.say(
         f"Vault {settings.vault_account}: no access keys, no upgrade path. New payees wait "
-        f"{fmt_duration(profile.new_payee_hold_ms)}; the oracle can only add time, up to "
-        f"{fmt_duration(profile.max_hold_ms)} in total."
+        f"{fmt_duration(config.new_payee_hold_ms)}; the oracle can only add time, up to "
+        f"{fmt_duration(config.max_hold_ms)} in total."
     )
     story.say(f"Checks: {story.runtime.risk.label}.")
     if note:
@@ -241,7 +244,7 @@ async def _hero(story: Story) -> None:
 
     wallet = story.payee("safe-wallet-77")
     url = f"{story.settings.public_base_url or 'http://127.0.0.1:8000'}/fixtures/coinhaven/verify"
-    await story.forward("demo:priya", HERO_DM.format(payee=wallet, url=url))
+    await story.forward("demo:priya", HERO_DM.format(payee=wallet, url=url), sender="CoinHaven Support")
     outcome = await story.pay("demo:priya", wallet, "50", "hero")
     if outcome.hold is None:
         return
@@ -259,7 +262,7 @@ async def _network_effect(story: Story) -> None:
     story.say("Leo got the same DM. He pays, is braked, and cancels (messages shortened).")
     await story.join("demo:leo", "Leo")
     story.notifier.quiet.add("demo:leo")
-    await story.forward("demo:leo", HERO_DM.format(payee=wallet, url="(same link)"))
+    await story.forward("demo:leo", HERO_DM.format(payee=wallet, url="(same link)"), sender="CoinHaven Support")
     leo = await story.pay("demo:leo", wallet, "30", "hero")
     if leo.hold is not None:
         await story.engine.cancel("demo:leo", leo.hold.id)
@@ -282,8 +285,8 @@ async def _invoice(story: Story) -> None:
     await story.engine.accept_guardian("demo:omar", code)
     story.say(f"Dana pays Northwind Paper Co. every month at {usual}, a trusted payee.")
     await story.engine.trust("demo:dana", usual)
-    await story.wait(PROFILES["demo"].trust_delay_ms)
-    await story.forward("demo:dana", INVOICE.format(payee=changed))
+    await story.wait(story.config.trust_delay_ms)
+    await story.forward("demo:dana", INVOICE.format(payee=changed), sender="Northwind Paper Co.")
     outcome = await story.pay("demo:dana", changed, "1250", "invoice")
     if outcome.hold is None:
         return
@@ -298,11 +301,11 @@ async def _everyday(story: Story) -> None:
     mum, ravi = story.payee("mum"), story.payee("ravi")
     story.say(f"Priya trusts {mum}. Trust takes effect after a short delay.")
     await story.engine.trust("demo:priya", mum)
-    await story.wait(PROFILES["demo"].trust_delay_ms)
+    await story.wait(story.config.trust_delay_ms)
     instant = await story.pay("demo:priya", mum, "20", "benign", typed_symbol="HUSD")
     if instant.hold is not None:
         story.holds["instant"] = instant.hold.id
-    await story.forward("demo:priya", DINNER)
+    await story.forward("demo:priya", DINNER, sender="Ravi")
     dinner = await story.pay("demo:priya", ravi, "12.5", "benign", typed_symbol="HUSD")
     if dinner.hold is None:
         return
@@ -339,14 +342,15 @@ class DemoResult:
     notifier: TranscriptNotifier
 
 
-def _story(runtime: Runtime, transcript: Transcript, notifier: TranscriptNotifier) -> tuple[Story, str]:
+async def _story(runtime: Runtime, transcript: Transcript, notifier: TranscriptNotifier) -> tuple[Story, str]:
     stable, note = _stable_asset(runtime.settings)
-    return Story(runtime, transcript, notifier, stable), note
+    config = await runtime.vault.get_config()
+    return Story(runtime, transcript, notifier, stable, config), note
 
 
 async def run_demo(runtime: Runtime, transcript: Transcript, notifier: TranscriptNotifier) -> DemoResult:
     """The whole story on ``runtime`` (whose notifier must be ``notifier``)."""
-    story, note = _story(runtime, transcript, notifier)
+    story, note = await _story(runtime, transcript, notifier)
     _intro(story, "HoldUp demo", note)
     await _hero(story)
     await _network_effect(story)
@@ -358,14 +362,14 @@ async def run_demo(runtime: Runtime, transcript: Transcript, notifier: Transcrip
 
 async def run_attack(runtime: Runtime, transcript: Transcript, notifier: TranscriptNotifier) -> DemoResult:
     """Three attacks, and why each one fails."""
-    story, note = _story(runtime, transcript, notifier)
+    story, note = await _story(runtime, transcript, notifier)
     _intro(story, "HoldUp attack walkthrough", note)
     await story.join("demo:priya", "Priya")
     await story.join("demo:sam", "Sam")
     await story.engine.accept_guardian("demo:sam", await story.engine.guardian_invite("demo:priya"))
 
     transcript.heading("Attack 1: a message that talks to the AI checker")
-    await story.forward("demo:priya", INJECTION)
+    await story.forward("demo:priya", INJECTION, sender="Ravi")
     injected = await story.pay("demo:priya", story.payee("ravi"), "15", "injection-only")
     if injected.hold is not None:
         story.holds["injection"] = injected.hold.id
@@ -386,7 +390,10 @@ async def run_attack(runtime: Runtime, transcript: Transcript, notifier: Transcr
 
     transcript.heading("Attack 3: a compromised server signs a payment")
     attacker = story.payee("attacker")
-    story.say(f"An attacker who controls the server signs a send of 500 from Priya's account to {attacker},")
+    story.say(
+        f"An attacker who controls the server signs a send of 500 {story.stable.symbol} "
+        f"from Priya's account to {attacker},"
+    )
     story.say("bypassing HoldUp's checks entirely.")
     forged = await runtime.vault.send(priya, attacker, story.stable.asset_id, parse_amount("500", story.stable.decimals))
     story.holds["forged"] = forged.hold.id

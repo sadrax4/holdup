@@ -8,6 +8,7 @@ nothing else.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -81,7 +82,5 @@ class Keeper:
         stop = stop or asyncio.Event()
         while not stop.is_set():
             await self.run_once()
-            try:
+            with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=self.interval_s)
-            except TimeoutError:
-                pass

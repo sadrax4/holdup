@@ -94,8 +94,19 @@ async def test_a_crashing_check_keeps_the_brake_on_and_says_so(clock, setup) -> 
     assert fresh.reason_bits == Reason.AI_UNAVAILABLE
     text = setup[2].last()
     assert text.startswith("Brakes on - held until")
-    assert "The AI check could not run (RuntimeError)" in text and "We will try again." in text
+    assert "The AI check could not run (the AI service failed with RuntimeError)" in text
+    assert "We will try again." in text
     assert (await engine.stats())["fail_closed"] == 1
+
+
+async def test_a_budget_error_from_the_pipeline_is_reported_as_budget(clock, setup) -> None:  # type: ignore[no-untyped-def]
+    class BudgetExceeded(Exception):
+        pass
+
+    engine, hold = await held_payment(clock, setup, Scripted(CLEAN), Scripted(BudgetExceeded("403 budget_exceeded")))
+    fresh = await current(engine, hold)
+    assert fresh.reason_bits == Reason.BUDGET_EXHAUSTED
+    assert "The AI check budget is used up" in setup[2].last()
 
 
 @pytest.mark.parametrize(

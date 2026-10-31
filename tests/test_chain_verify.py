@@ -13,7 +13,14 @@ import httpx
 import respx
 
 from holdup.chain.fake import SimClock
-from holdup.chain.verify import build_report, code_hash, expected_code_hash, verify_deploy, verify_fake
+from holdup.chain.verify import (
+    build_report,
+    code_hash,
+    code_hash_from_listing,
+    expected_code_hash,
+    verify_deploy,
+    verify_fake,
+)
 from holdup.config import Settings
 from holdup.workers.runtime import offline_settings, offline_vault
 
@@ -57,6 +64,13 @@ def test_expected_hash_reads_the_local_build(tmp_path: Path) -> None:
     wasm.write_bytes(WASM)
     assert expected_code_hash(wasm) == code_hash(WASM)
     assert expected_code_hash(tmp_path / "missing.wasm") is None
+
+
+def test_code_hash_listing_in_either_column_order() -> None:
+    digest = code_hash(WASM)
+    assert code_hash_from_listing(f"{digest}  holdvault.wasm\nother  demo_token.wasm") == digest
+    assert code_hash_from_listing(f"demo_token.wasm abc\nholdvault.wasm: {digest}") == digest
+    assert code_hash_from_listing("holdvault.wasm not-a-hash") is None
 
 
 def test_a_correct_deployment_passes() -> None:

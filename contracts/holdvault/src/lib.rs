@@ -31,7 +31,7 @@ pub use crate::holds::{GAS_FOR_FT_TRANSFER, GAS_FOR_ON_PAYOUT, GAS_FOR_STORAGE_D
 pub use crate::user::{BalanceView, PendingGuardianView, TrustedView, UserView};
 
 use crate::config::Config;
-use crate::errors::{fail, SafeMath};
+use crate::errors::{ensure, fail, SafeMath};
 use crate::hold::{Hold, PayeeStats};
 use crate::user::User;
 
@@ -92,13 +92,19 @@ pub struct SolvencyView {
 
 #[near]
 impl HoldVault {
-    /// Initializes the vault. Callable once, and only by the vault account itself, so nobody can
-    /// front-run the deployer between `DeployContract` and `new`.
+    /// Initializes the vault. Callable once, by the vault account itself or by its parent account
+    /// (the deployer, usually batching `DeployContract` and `new` in one transaction), so a
+    /// stranger cannot initialize a freshly deployed vault with their own oracles.
     #[init]
-    #[private]
     pub fn new(config: ConfigInput) -> Self {
+        let vault = env::current_account_id();
+        ensure(
+            is_self_or_parent(&env::predecessor_account_id(), &vault),
+            Error::BadConfig,
+            "only the vault account or its parent account can initialize it",
+        );
         HoldVault {
-            config: Config::from_input(config, &env::current_account_id()),
+            config: Config::from_input(config, &vault),
             users: LookupMap::new(StorageKey::Users),
             holds: LookupMap::new(StorageKey::Holds),
             sent_holds: LookupMap::new(StorageKey::SentHolds),
@@ -183,6 +189,11 @@ impl HoldVault {
             );
         }
     }
+}
+
+/// Whether `caller` is `account` itself or the account that created it (its parent).
+fn is_self_or_parent(caller: &AccountId, account: &AccountId) -> bool {
+    caller == account || account.get_parent_account_id() == Some(caller.as_ref())
 }
 
 /// NEAR reserved for a new hold until it settles.

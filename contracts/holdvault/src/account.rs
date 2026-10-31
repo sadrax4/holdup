@@ -8,7 +8,7 @@ use crate::asset::Asset;
 use crate::errors::{ensure, fail, Error, SafeMath};
 use crate::events;
 use crate::user::{PendingGuardian, TrustedView, User, UserView, MAX_TRUSTED};
-use crate::{HoldVault, HoldVaultExt};
+use crate::{is_self_or_parent, HoldVault, HoldVaultExt};
 
 /// `msg` accepted by `ft_on_transfer` to credit an account other than the token sender.
 #[near(serializers = [json])]
@@ -33,10 +33,7 @@ impl HoldVault {
         let (mut user, credit) = if newly_registered {
             // Registration turns later payouts to this account into internal credits, so only the
             // account itself or its parent (the onboarding treasury) may opt it in.
-            let caller = env::predecessor_account_id();
-            let consents =
-                caller == account_id || account_id.get_parent_account_id() == Some(caller.as_ref());
-            if !consents {
+            if !is_self_or_parent(&env::predecessor_account_id(), &account_id) {
                 fail(
                     Error::NotRegistered,
                     &format!("{account_id} is not registered; only it or its parent account can register it"),

@@ -24,6 +24,7 @@ from ..models import UserAccount
 from .errors import rejection_name
 from .fake import FakeVault
 
+
 @dataclass(frozen=True)
 class Attempt:
     actor: str  # "oracle", "keeper" or "user"

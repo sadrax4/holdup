@@ -343,6 +343,20 @@ def guardian_set(guardian_name: str, effective_ms: int, *, now_ms: int, tx_text:
     return _with_footer([first], tx_text=tx_text)
 
 
+def guardian_trust_notice(owner_name: str, payee: str, effective_ms: int, *, now_ms: int) -> str:
+    return (
+        f"{owner_name} added {payee} as a trusted payee; payments to it become instant from "
+        f"{fmt_utc(effective_ms, now_ms)}. If that looks wrong, check with {owner_name}."
+    )
+
+
+def guardian_change_notice(owner_name: str, new_guardian: str, effective_ms: int, *, now_ms: int) -> str:
+    return (
+        f"{owner_name} asked to make {new_guardian} their guardian instead of you, from "
+        f"{fmt_utc(effective_ms, now_ms)}. Until then you stay in charge. If that looks wrong, check with {owner_name}."
+    )
+
+
 def guardian_accepted(owner_name: str, effective_ms: int, *, now_ms: int) -> str:
     when = "now" if effective_ms <= now_ms else f"from {fmt_utc(effective_ms, now_ms)}"
     return (

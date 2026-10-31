@@ -71,11 +71,27 @@ def expected_code_hash(wasm_path: Path | None = None) -> str | None:
     if path.exists():
         return code_hash(path.read_bytes())
     if wasm_path is None and CODE_HASHES_PATH.exists():
-        for line in CODE_HASHES_PATH.read_text().splitlines():
-            parts = line.split()
-            if len(parts) >= 2 and "holdvault" in parts[-1]:
-                return parts[0]
+        return code_hash_from_listing(CODE_HASHES_PATH.read_text())
     return None
+
+
+def code_hash_from_listing(text: str, name: str = "holdvault") -> str | None:
+    """The base58 hash on the line naming ``name``, in either column order."""
+    for line in text.splitlines():
+        tokens = line.replace(":", " ").split()
+        if not any(name in token for token in tokens):
+            continue
+        for token in tokens:
+            if _is_base58_digest(token):
+                return token
+    return None
+
+
+def _is_base58_digest(token: str) -> bool:
+    try:
+        return len(base58.b58decode(token)) == 32
+    except ValueError:
+        return False
 
 
 def check_code_hash(account_view: dict[str, Any] | None, expected: str | None) -> Check:

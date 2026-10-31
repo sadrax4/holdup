@@ -195,6 +195,17 @@ async def test_a_clean_full_check_cannot_shorten_the_provisional_brake(world: Wo
     assert world.notifier.texts("tg:1")[-1].startswith("Full check finished: no further warning signs.")
 
 
+async def test_a_clean_ai_check_cannot_weaken_a_strong_rules_brake(world: World, husd: str) -> None:
+    engine = world.engine(StubRisk(verdict(Reason.PAYEE_REPORTED, hold_for=24 * HOUR)), StubRisk(CLEAN))
+    await engine.start("tg:1", "Priya")
+    outcome = await engine.pay("tg:1", WALLET, husd, 5 * HUSD)
+    await engine.wait_idle()
+    hold = await world.vault.get_hold(outcome.hold.id)  # type: ignore[union-attr]
+    assert hold is not None and hold.release_at_ms == world.clock() + 24 * HOUR
+    final = world.notifier.texts("tg:1")[-1]
+    assert final.startswith("Brakes on - held until 3 Nov 09:00 UTC") and "[rules]" in final
+
+
 async def test_trusted_payees_are_paid_instantly(world: World, husd: str) -> None:
     fast = StubRisk(CLEAN)
     engine = world.engine(fast)
@@ -405,3 +416,23 @@ def test_a_real_network_needs_a_secret() -> None:
     settings = Settings(network="testnet", secret="")
     with pytest.raises(ValueError):
         Engine(settings, RealVault(), StubRisk(CLEAN), None, Store(":memory:"), Recorder())  # type: ignore[arg-type]
+
+
+async def test_the_guardian_hears_about_new_trust_and_guardian_changes(world: World, husd: str) -> None:
+    engine = world.engine(StubRisk(CLEAN))
+    await engine.start("tg:1", "Priya")
+    await engine.start("tg:2", "Sam")
+    await engine.start("tg:3", "Leo")
+    await engine.accept_guardian("tg:2", await engine.guardian_invite("tg:1"))
+
+    await engine.trust("tg:1", "mum.testnet")
+    assert world.notifier.texts("tg:2")[-1].startswith(
+        "Priya added mum.testnet as a trusted payee; payments to it become instant from 09:00:30 UTC."
+    )
+
+    await engine.accept_guardian("tg:3", await engine.guardian_invite("tg:1"))
+    assert world.notifier.texts("tg:2")[-1].startswith("Priya asked to make Leo their guardian instead of you")
+    assert world.notifier.texts("tg:3")[-1].startswith("You are Priya's guardian from 09:00:30 UTC.")
+    view = await world.vault.get_user(engine.account_for("tg:1").account_id)
+    assert view is not None and view.guardian == engine.account_for("tg:2").account_id
+    assert view.pending_guardian == engine.account_for("tg:3").account_id

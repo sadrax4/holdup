@@ -134,6 +134,10 @@ impl Sim {
     }
 
     pub fn try_init(config: ConfigInput, reserve: u128) -> Result<Self, String> {
+        Self::try_init_as(&vault(), config, reserve)
+    }
+
+    pub fn try_init_as(caller: &AccountId, config: ConfigInput, reserve: u128) -> Result<Self, String> {
         let code_cost = u128::from(CODE_STORAGE_BYTES) * env::storage_byte_cost().as_yoctonear();
         let mut sim = Sim {
             now_ms: START_MS,
@@ -142,7 +146,7 @@ impl Sim {
             logs: Vec::new(),
             receipts: Vec::new(),
         };
-        sim.install(&vault(), 0, Vec::new(), HashMap::new());
+        sim.install(caller, 0, Vec::new(), HashMap::new());
         let outcome = catch_unwind(AssertUnwindSafe(|| {
             let contract = HoldVault::new(config);
             env::state_write(&contract);

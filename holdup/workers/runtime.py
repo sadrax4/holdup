@@ -185,6 +185,7 @@ class RiskSetup:
     label: str
     resolver: ScenarioResolver | None = None
     intel: Any = None  # holdup.intel.PayeeIntel when the risk package is installed
+    client: Any = None  # holdup.risk.otari.OtariClient when the AI step is on
 
 
 def _payee_fixtures() -> dict[str, Any] | None:
@@ -254,7 +255,7 @@ def load_risk(
         log.warning("Otari pipeline failed to start (%r); rules only", exc)
         return RiskSetup(fast, None, "rules; AI step failed to start", resolver, intel)
     mode = "recorded responses" if settings.otari_mode == "replay" else "live"
-    return RiskSetup(fast, full, f"rules, then the Otari pipeline ({mode})", resolver, intel)
+    return RiskSetup(fast, full, f"rules, then the Otari pipeline ({mode})", resolver, intel, client)
 
 
 # ----------------------------------------------------------------------

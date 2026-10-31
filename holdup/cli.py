@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -105,7 +107,7 @@ def _print_checks(rows: Sequence[tuple[bool, str, str]], *, simulated: bool) -> 
 def cmd_prove(args: argparse.Namespace) -> int:
     from .chain.keys import derive_user
     from .chain.prove import prove, prove_fake
-    from .demo import TranscriptNotifier, Transcript
+    from .demo import Transcript, TranscriptNotifier
     from .workers.runtime import offline_runtime
 
     settings = _settings_for(args)
@@ -286,8 +288,10 @@ class Console:
         for finding in view.findings:
             self.out(f"- {finding.reason.name} [{finding.source}{' ' + finding.model if finding.model else ''}] {finding.detail}")
         for step in view.steps:
-            self.out(f"  step {step.step}: model {step.model}, provider {step.provider}, "
-                     f"fallback {step.fallback}, attempts {step.attempts}, cost {step.cost_usd}")
+            fields = (("model", step.model), ("provider", step.provider), ("fallback", step.fallback),
+                      ("attempts", step.attempts), ("cost USD", step.cost_usd), ("latency ms", step.latency_ms))
+            details = ", ".join(f"{name} {value}" for name, value in fields if value is not None)
+            self.out(f"  step {step.step}: {details}".rstrip(": "))
         if view.evidence_hash:
             self.out(f"  evidence sha256 {view.evidence_hash}")
         for label, url in view.tx_links:
@@ -343,10 +347,8 @@ def cmd_keeper(args: argparse.Namespace) -> int:
         return 2
     runtime = live_runtime(settings, LogNotifier())
     print(f"Keeper running on {settings.network} every {args.interval} s (Ctrl-C to stop).")
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(runtime.engine.make_keeper(args.interval).run())
-    except KeyboardInterrupt:
-        pass
     return 0
 
 
@@ -370,8 +372,13 @@ def _channel_notifier(bot_app: Any) -> Any:
 def cmd_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
-    from .web.app import create_app
     from .workers.runtime import LogNotifier, live_runtime, offline_runtime
+
+    try:
+        from .web.app import create_app
+    except ImportError as exc:
+        print(f"The web app is not available ({exc}).", file=sys.stderr)
+        return 2
 
     settings = _settings_for(args)
     base = settings.public_base_url
@@ -398,7 +405,12 @@ def cmd_serve(args: argparse.Namespace) -> int:
     try:
         from .guard import build_router
 
-        guard_router = build_router(runtime.settings)
+        classifier = None
+        if runtime.settings.otari_mode == "live" and runtime.risk.client is not None:
+            from .risk.guard_models import make_classifier
+
+            classifier = make_classifier(runtime.risk.client)
+        guard_router = build_router(runtime.settings, classifier)
     except Exception as exc:
         log.warning("guardrail endpoint not mounted (%s)", exc)
 
@@ -485,7 +497,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=logging.INFO if args.verbose else logging.WARNING,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except BrokenPipeError:  # output piped into a command that stopped reading, e.g. head
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
 
 
 if __name__ == "__main__":
