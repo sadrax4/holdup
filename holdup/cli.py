@@ -229,7 +229,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_deploy(args: argparse.Namespace) -> int:
     from pathlib import Path
 
-    from .chain.deploy import DeployRefused, deploy
+    from .chain.deploy import DeployRefused, DeployStopped, deploy
 
     # Settings of the target network: never the offline world's (its secret is public).
     base = load_settings(network=args.network)
@@ -248,13 +248,17 @@ def cmd_deploy(args: argparse.Namespace) -> int:
                 credentials_path=credentials,
             )
         )
-    except DeployRefused as exc:  # the root cannot pay for everything; the message says how short it is
+    except DeployRefused as exc:  # nothing was sent; the message says why (how short the root is, for one)
         print(f"holdup deploy: {exc}", file=sys.stderr)
         return 2
+    except DeployStopped as exc:
+        print(f"holdup deploy: {exc}\nThe keys and what was sent are saved in {credentials}; "
+              "run the same command again to carry on from there.", file=sys.stderr)
+        return 1
     print(f"Deployed to {data['network']}: vault {data['vault_account']}, oracle {data['oracle_accounts'][0]}, "
           f"keeper {data['keeper_account']}, token {data['husd_token']}.")
     for label, tx_hash in data["deployment"]["transactions"]:
-        print(f"  {label}: {tx_hash}")
+        print(f"  {label}: {tx_hash or '(by an earlier run)'}")
     print(f"Credentials written to {credentials}. Run `holdup verify-deploy --network {data['network']}` next.")
     return 0
 

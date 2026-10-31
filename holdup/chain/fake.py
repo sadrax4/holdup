@@ -1252,13 +1252,22 @@ class FakeVault:
         }
 
     def check_transaction(
-        self, signer_id: str, receiver_id: str, actions: list[dict[str, Any]]
+        self, signer_id: str, receiver_id: str, actions: list[dict[str, Any]], *, cost: int = 0
     ) -> dict[str, Any] | None:
-        """Apply nearcore's access-key rules; return the RPC error payload or None if allowed."""
+        """Apply nearcore's checks in its order; return the RPC error payload or None if allowed.
+
+        The key must exist, then the signer must hold ``cost`` (what the transaction buys up
+        front), and only then does the key's permission count.
+        """
         keys = self.keys.get(signer_id, [])
         if not keys:
             return _invalid_tx(
                 {"InvalidAccessKeyError": {"AccessKeyNotFound": {"account_id": signer_id, "public_key": ""}}}
+            )
+        balance = self.model.world.near.get(signer_id, 0)
+        if balance < cost:
+            return _invalid_tx(
+                {"NotEnoughBalance": {"signer_id": signer_id, "balance": str(balance), "cost": str(cost)}}
             )
         key = keys[0]
         if key.full_access:

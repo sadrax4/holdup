@@ -192,11 +192,12 @@ clean_env() {
 }
 
 # Run a command of this project through uv, in a clean environment that holds only what it needs.
-# Secrets reach it as environment variables set by builtins, never on a command line.
+# Secrets reach it as environment variables set by builtins, never on a command line. Output is
+# unbuffered, so progress shows line by line even when it is piped (install | tee).
 project() {
   (
     clean_env
-    export HOLDUP_CREDENTIALS="$CREDS" HOLDUP_NETWORK=testnet
+    export HOLDUP_CREDENTIALS="$CREDS" HOLDUP_NETWORK=testnet PYTHONUNBUFFERED=1
     if [[ -n ${PROJECT_SECRET:-} ]]; then
       export HOLDUP_SECRET="$PROJECT_SECRET"
     fi
@@ -452,7 +453,8 @@ This step puts HoldUp on NEAR testnet, NEAR's public test network. It will:
   5. ask the faucet for a little more test NEAR for onboarding the first users.
 Testnet NEAR is free test money with no value: no real money is involved at any point.
 The keys are saved in $CREDS (mode 600) and never printed.
-It takes a few minutes; the faucet requests are 20 seconds apart.
+It takes a few minutes; the faucet requests are 20 seconds apart. If the faucet says it is
+rate limited, this stops and says when to run it again; it then carries on where it stopped.
 
 EOF
 }
@@ -514,9 +516,13 @@ cmd_testnet() {
   step "1/5 Test money and the root account $root (NEAR faucet)"
   project python scripts/testnet_tools.py bootstrap "$root" || die "the account setup did not finish; $resume"
   step "2/5 Deploying the contracts (holdup deploy --network testnet --profile hosted)"
-  project holdup deploy --network testnet --profile hosted --root "$root" ||
-    die "the deployment did not finish; $resume." \
-      "If it stops again because accounts under $root already exist, start over: bash scripts/server.sh testnet --force-new"
+  local deployed=0
+  project holdup deploy --network testnet --profile hosted --root "$root" || deployed=$?
+  if ((deployed == 2)); then # deploy refused before sending anything; its message says why
+    die "the deployment did not start and nothing was sent; see the message above."
+  elif ((deployed != 0)); then
+    die "the deployment did not finish; $resume (its keys and progress are saved in $CREDS)."
+  fi
   chmod 600 -- "$CREDS"
   step "3/5 Checking the deployment (holdup verify-deploy)"
   project holdup verify-deploy --network testnet ||

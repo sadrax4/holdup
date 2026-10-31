@@ -10,6 +10,9 @@ documented faucet API (5 testnet NEAR per request).
     bootstrap <root>                   create root with faucet money, then top it up to the hosted budget
     topup <account> --min <NEAR>       ask the faucet until the account holds that much
     faucet <account>                   one faucet request
+
+A faucet that answers it is rate limited is not asked again: the command stops at once and says
+when to try again.
 """
 
 from __future__ import annotations
@@ -28,8 +31,8 @@ import httpx
 from near import AccountNotFoundError, Near, generate_key
 
 from holdup.chain.budget import available_balance, near_text, near_to_yocto
-from holdup.chain.deploy import DeployRefused, budget_for
-from holdup.chain.faucet import FAUCET_URL, faucet_account_ok, request_drop
+from holdup.chain.deploy import DeployRefused, budget_for, recorded_steps
+from holdup.chain.faucet import FAUCET_URL, FaucetReply, faucet_account_ok, request_drop, retry_hint
 from holdup.config import RPC_URLS, load_settings
 
 CREDS = Path(os.environ.get("HOLDUP_CREDENTIALS") or ".holdup/credentials.json")
@@ -38,6 +41,7 @@ MAX_REQUESTS = 4  # faucet requests per topup run
 PAUSE_S = 20.0  # between two faucet requests
 SETTLE_TRIES, SETTLE_S = 5, 2.0  # re-reading the balance after a request
 ROOT_DEPOSIT = "4.8"  # what the registrar call gives a new root out of the funder's 5 NEAR
+ROOT_CREATION_GAS_NEAR = "0.1"  # the registrar call buys 100 Tgas up front
 
 Sleep = Callable[[float], None]
 
@@ -92,6 +96,15 @@ def _settled_balance(http: httpx.Client, account_id: str, before: int, sleep: Sl
 # ----------------------------------------------------------------------
 
 
+def stop_if_rate_limited(reply: FaucetReply) -> None:
+    """Stop at once when the faucet refused for its rate limit: more requests only add to the count."""
+    if reply.rate_limited:
+        raise SystemExit(
+            f"the faucet is rate limited ({reply.message}); it was not asked again. "
+            f"Try again {retry_hint(reply)}."
+        )
+
+
 def topup(
     account_id: str,
     minimum: int,
@@ -104,8 +117,9 @@ def topup(
 ) -> int:
     """Ask the faucet until ``account_id`` holds ``minimum`` yoctoNEAR; return what it holds.
 
-    At most ``max_requests`` requests, 20 s apart. The balance is re-read after each one,
-    because a request that timed out may still have funded the account.
+    At most ``max_requests`` requests, 20 s apart, and none after a rate-limited answer. The
+    balance is re-read after each one, because a request that timed out may still have funded
+    the account.
     """
     if not faucet_account_ok(account_id):
         raise SystemExit("topup: the account must be a .testnet account or a 64-hex implicit account")
@@ -123,6 +137,7 @@ def topup(
         print(f"faucet request {requests}/{max_requests}: HTTP {reply.status or 'no answer'} {reply.message}")
         if reply.status == 400:
             raise SystemExit(f"the faucet refused {account_id}")
+        stop_if_rate_limited(reply)
         balance = _settled_balance(http, account_id, balance, sleep, url=url)
         print(f"{account_id}: {near_text(balance, up=False)} NEAR")
     if balance < minimum:
@@ -138,6 +153,7 @@ def faucet(account_id: str, *, http: httpx.Client) -> None:
         raise SystemExit("faucet: account must be a .testnet account or a 64-hex implicit account")
     reply = request_drop(http, account_id)
     print(f"faucet {account_id[:20]}: HTTP {reply.status or 'no answer'} {reply.message}")
+    stop_if_rate_limited(reply)
     if not reply.ok:
         raise SystemExit(1)
 
@@ -164,16 +180,32 @@ def _save(data: dict) -> None:
     tmp.replace(CREDS)
 
 
-def hosted_budget(root: str) -> int:
+def hosted_budget(root: str, done: list[str] | None = None) -> int:
     """What deploying the hosted profile under ``root`` takes, in yoctoNEAR.
 
+    ``done`` names the transactions an unfinished deployment already sent; they are left out.
     Planning it also checks every account id the deployment would create under ``root``.
     """
     settings = load_settings(network="testnet")
     try:
-        return budget_for(settings, network="testnet", profile="hosted", root=root).total
+        return budget_for(settings, network="testnet", profile="hosted", root=root, done=done or ()).total
     except DeployRefused as exc:
         raise SystemExit(f"bootstrap: {exc}") from None
+
+
+def _saved_funder(http: httpx.Client, data: dict) -> tuple[str, str] | None:
+    """The funding account in the credentials file, if it still holds enough to create the root.
+
+    A run that stopped after the faucet funded it would otherwise lose those 5 NEAR to a new
+    funding account, and ask the faucet once more.
+    """
+    implicit, key = data.get("funder_implicit_account"), data.get("funder_private_key")
+    if not implicit or not key:
+        return None
+    needed = near_to_yocto(ROOT_DEPOSIT) + near_to_yocto(ROOT_CREATION_GAS_NEAR)
+    if (balance_of(http, implicit) or 0) < needed:
+        return None
+    return implicit, key
 
 
 def _wait_for(http: httpx.Client, account_id: str, sleep: Sleep, tries: int = 30) -> int:
@@ -195,21 +227,27 @@ def bootstrap(root: str, *, http: httpx.Client, sleep: Sleep = time.sleep) -> No
     if exists and not (data.get("root_account") == root and data.get("treasury_private_key")):
         raise SystemExit(f"{root} already exists and is not ours; pick another root name")
     if not exists:
-        funder = generate_key()
-        implicit = funder.public_key.data.hex()
-        data.update({"network": "testnet", "funder_implicit_account": implicit,
-                     "funder_private_key": funder.secret_key})
-        _save(data)  # keep the funder key even if a later step fails
-        reply = request_drop(http, implicit)
-        print(f"faucet {implicit[:20]}: HTTP {reply.status or 'no answer'} {reply.message}")
-        if not reply.maybe_funded:
-            raise SystemExit("the faucet refused the funding account; try again later")
-        _wait_for(http, implicit, sleep)
+        saved = _saved_funder(http, data)
+        if saved is not None:
+            implicit, funder_key = saved
+            print(f"The funding account {implicit[:20]} from {CREDS} still holds its test NEAR; using it.")
+        else:
+            funder = generate_key()
+            implicit, funder_key = funder.public_key.data.hex(), funder.secret_key
+            data.update({"network": "testnet", "funder_implicit_account": implicit,
+                         "funder_private_key": funder_key})
+            _save(data)  # keep the funder key even if a later step fails
+            reply = request_drop(http, implicit)
+            print(f"faucet {implicit[:20]}: HTTP {reply.status or 'no answer'} {reply.message}")
+            stop_if_rate_limited(reply)
+            if not reply.maybe_funded:
+                raise SystemExit("the faucet refused the funding account; try again later")
+            _wait_for(http, implicit, sleep)
 
         root_key = generate_key()
         data.update({"root_account": root, "treasury_private_key": root_key.secret_key})
         _save(data)
-        signer = Near("testnet", rpc_url=RPC_URL, account_id=implicit, private_key=funder.secret_key)
+        signer = Near("testnet", rpc_url=RPC_URL, account_id=implicit, private_key=funder_key)
         result = signer.call(
             "testnet",
             "create_account",
@@ -224,7 +262,13 @@ def bootstrap(root: str, *, http: httpx.Client, sleep: Sleep = time.sleep) -> No
         print(f"{root} has our full-access key: {str(root_key.public_key) in keys}")
     else:
         print(f"{root} is already set up in {CREDS}")
-    print(f"The hosted deployment needs {near_text(budget)} NEAR (scripts/testnet.sh budget shows the details).")
+    done = recorded_steps(data, network="testnet", profile="hosted", root=root)
+    if done:
+        budget = hosted_budget(root, done)
+        print(f"An unfinished deployment under {root} already sent {len(done)} transactions; "
+              f"the rest needs {near_text(budget)} NEAR.")
+    else:
+        print(f"The hosted deployment needs {near_text(budget)} NEAR (scripts/testnet.sh budget shows the details).")
     topup(root, budget, http=http, sleep=sleep)
 
 
@@ -239,7 +283,7 @@ def status() -> None:
         except AccountNotFoundError:
             print(f"{name}: not found")
             continue
-        print(f"{name}: {client.balance(name)}, {len(keys)} access key(s)")
+        print(f"{name}: {near_text(int(client.balance(name)), up=False)} NEAR, {len(keys)} access key(s)")
 
 
 def budget(root: str, profile: str) -> None:

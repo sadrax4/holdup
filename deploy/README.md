@@ -190,8 +190,8 @@ run `bash scripts/server.sh start`.
 **Test money.** The treasury (the root account, whose full-access key is in
 `holdup-credentials.json`) funds each new user and tops up the gas of users, the oracle and the
 keeper when the network refuses one of their transactions for lack of balance. HoldUp asks the
-faucet for more test NEAR by itself when the treasury runs low. `bash scripts/server.sh topup 10`
-does it by hand; `status` shows the balances.
+faucet for more test NEAR by itself when the treasury runs low (not before the time a rate-limited
+faucet names). `bash scripts/server.sh topup 10` does it by hand; `status` shows the balances.
 
 ## Backups
 
@@ -279,11 +279,16 @@ bash scripts/server.sh start
   session with that name on HoldUp's tmux server. HoldUp leaves it alone; rename it
   (`tmux -L holdup rename-session -t =holdup old-holdup`) or close it, then `start`.
 - **The testnet step stops half-way**: run `bash scripts/server.sh testnet` again; it resumes with
-  the same root account (a dry faucet, for example, only needs another try later). If the
-  deployment itself stopped after creating some accounts, the next try says they already exist:
-  then `bash scripts/server.sh testnet --force-new` starts over under a new root account (the old
-  credentials file is kept as `.old`). `holdup deploy` prints its budget before sending anything
-  and refuses, sending nothing, when the root account cannot pay for all of it.
+  the same root account, and the deployment carries on from the transaction where it stopped (its
+  keys and progress are in `holdup-credentials.json`). `holdup deploy` prints its budget before
+  sending anything and refuses, sending nothing, when the root account cannot pay for what is left;
+  the testnet step then says `nothing was sent; see the message above`.
+  Only when it says an account under the root `already exists, but without this deployment's key`
+  does `bash scripts/server.sh testnet --force-new` help: it starts over under a new root account
+  (the old credentials file is kept as `.old`) and needs three more faucet drops.
+- **`the faucet is rate limited`**: NEAR's faucet refuses for hours after a few requests (10 hours
+  after six, on 2026-10-31). The message says when to try again; run `testnet` or `topup` again
+  after that time, not before.
 - **`uv sync failed`**: `uv.lock needs to be updated` means the checkout differs from what was
   committed (`git -C ~/work/holdup status`). `uv lock --check` tells, without changing anything.
 - **A process seems left over**: `stop` again; it finds HoldUp's processes from their records.

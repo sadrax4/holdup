@@ -74,7 +74,8 @@ demo-sandbox: ## the story on a local NEAR sandbox: deploys there first if neede
 	@test -n "$${NEAR_SANDBOX_URL:-}" || { echo "Set NEAR_SANDBOX_URL to the RPC of a running NEAR sandbox \
 	(protocol 85 or later), e.g. http://127.0.0.1:3030. Its root account 'sandbox' deploys everything." >&2; exit 2; }
 	@export NEAR_RPC_URL="$$NEAR_SANDBOX_URL" HOLDUP_CREDENTIALS="$(SANDBOX_CREDENTIALS)"; \
-	if [ ! -f "$(SANDBOX_CREDENTIALS)" ]; then $(HOLDUP) deploy --network sandbox --profile demo; fi; \
+	if [ ! -f "$(SANDBOX_CREDENTIALS)" ] || grep -q '"unfinished_deployment"' "$(SANDBOX_CREDENTIALS)"; then \
+	  $(HOLDUP) deploy --network sandbox --profile demo; fi; \
 	$(HOLDUP) verify-deploy --network sandbox; \
 	$(HOLDUP) demo --network sandbox
 

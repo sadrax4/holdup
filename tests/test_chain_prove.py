@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from near import AccountNotFoundError
 from near.errors import ContractPanicError, RpcError
+from near.units import Gas
 from near.wire import Action
 
+from holdup.chain.budget import GAS, call_upfront, near_to_yocto
 from holdup.chain.errors import error_path, rejection_name
 from holdup.chain.fake import SimClock
-from holdup.chain.keys import derive_user
-from holdup.chain.prove import plan_attempts, prove, prove_fake, to_near_actions
-from holdup.config import offline_settings
+from holdup.chain.keys import USER_METHODS, derive_user
+from holdup.chain.prove import attempt_cost, plan_attempts, prove, prove_fake, to_near_actions
+from holdup.config import DEMO_USER_GAS_NEAR, offline_settings
 from holdup.runtime import offline_vault
 
 
@@ -161,3 +164,36 @@ async def test_live_proof_leaves_out_a_user_nobody_has_onboarded_yet() -> None:
     node = AccountsNode([RpcError("rejected", data=RECORDED[a.expected[0]]) for a in everyone], {user.account_id})
     report = await prove(settings, near=node, user=user)  # type: ignore[arg-type]
     assert report.ok and [r.actor for r in report.results].count("user") == 4 and report.notes == []
+
+
+async def test_every_attempt_reaches_the_key_check_of_a_user_with_little_gas_left() -> None:
+    """On testnet a user held 0.0286 NEAR, and 30 Tgas attempts got NotEnoughBalance instead.
+
+    nearcore charges the gas a transaction buys up front before it looks at the key's
+    permission, so an attempt the signer cannot pay for proves nothing.
+    """
+    settings = offline_settings()
+    fake = offline_vault(settings, SimClock())
+    user = derive_user(settings.secret, "demo:priya", settings.root_account)
+    await fake.onboard_user(user, {})
+    fake.model.world.near[user.account_id] = near_to_yocto("0.0286")
+    report = prove_fake(fake, settings, user=user)
+    assert report.ok, [(r.description, r.observed) for r in report.results if not r.passed]
+    assert [r.observed for r in report.results if r.actor == "user"] == [
+        "MethodNameMismatch", "RequiresFullAccess", "DepositWithFunctionCall", "ReceiverMismatch"]
+
+    # The attempts as they were: 30 Tgas cost about 0.031 NEAR up front, more than the user held.
+    attempt = next(a for a in plan_attempts(settings, user) if a.actor == "user")
+    (call,) = attempt.actions
+    old = replace(attempt, actions=({"FunctionCall": {**call["FunctionCall"], "gas": str(int(Gas.tgas(30)))}},))
+    error = fake.check_transaction(user.account_id, attempt.receiver_id, list(old.actions), cost=attempt_cost(old))
+    assert rejection_name(error) == "NotEnoughBalance"
+
+
+def test_attempts_cost_less_than_any_call_a_user_can_make() -> None:
+    """A user who can still use HoldUp can always pay for the proof's attempts."""
+    settings = offline_settings()
+    user = derive_user(settings.secret, "demo:priya", settings.root_account)
+    cheapest_call = min(call_upfront(method, {"hold_id": "1"}, GAS[method]) for method in USER_METHODS)
+    assert max(attempt_cost(a) for a in plan_attempts(settings, user)) < cheapest_call / 5
+    assert cheapest_call < near_to_yocto(DEMO_USER_GAS_NEAR)

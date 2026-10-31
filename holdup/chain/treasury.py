@@ -4,9 +4,11 @@ A new user costs the treasury about a quarter of a NEAR (``budget.onboarding_cos
 testnet it refills itself from the NEAR faucet, 5 NEAR a request: before each onboarding, and
 every ten minutes while the keeper runs, a balance below ``FaucetPolicy.threshold`` starts one
 faucet request in the background, at most once every ``interval_s`` and ``per_day`` times a day
-(counted in the store, so restarts do not reset them). When the treasury cannot pay for a new
-user, onboarding stops with ``TREASURY_EMPTY`` before any transaction, the log says why, and the
-bot and the web console tell the person to try again later.
+(counted in the store, so restarts do not reset them). A faucet that answers it is rate limited is
+not asked again before the time it names (an hour when it names none, a day at most), also kept
+in the store. When the treasury cannot pay for a new user, onboarding stops with ``TREASURY_EMPTY``
+before any transaction, the log says why, and the bot and the web console tell the person to try
+again later.
 
 Only the configured treasury account is ever sent to the faucet, and only on testnet: the
 sandbox has money of its own, and the offline world has no network.
@@ -38,7 +40,9 @@ log = logging.getLogger(__name__)
 
 TREASURY_EMPTY = "TREASURY_EMPTY"  # the treasury cannot pay for what was asked; nothing was sent
 FAUCET_EVENT = "faucet_request"
+FAUCET_REPLY = "faucet_reply"
 DAY_MS = 86_400_000
+MAX_FAUCET_WAIT_S = 86_400.0  # the longest a rate-limited faucet is left alone, whatever it asks for
 
 
 @dataclass(frozen=True)
@@ -151,6 +155,8 @@ class Treasury:
         if self._task is not None and not self._task.done():
             return False
         now = self.clock()
+        if now < self._rate_limited_until():
+            return False
         recent = self._recent_requests(now)
         if len(recent) >= self.policy.per_day:
             log.warning("treasury %s is low but the faucet was asked %d times today", self.account_id, len(recent))
@@ -161,6 +167,12 @@ class Treasury:
         self.store.log_event(FAUCET_EVENT, {"account_id": self.account_id, "at_ms": now, "balance": str(balance)})
         self._task = asyncio.create_task(self._request(), name="holdup-faucet")
         return True
+
+    def _rate_limited_until(self) -> int:
+        """Until when (ms) the faucet's last answer asked to be left alone; 0 if it did not."""
+        for event in self.store.events(FAUCET_REPLY, limit=1):
+            return int(event["data"].get("retry_at_ms") or 0)
+        return 0
 
     def _recent_requests(self, now: int) -> list[int]:
         times = []
@@ -176,13 +188,19 @@ class Treasury:
         else:
             async with httpx.AsyncClient() as http:
                 reply = await request_drop_async(http, self.account_id, url=self.policy.url)
+        data: dict[str, Any] = {"account_id": self.account_id, "ok": reply.ok, "status": reply.status}
         if reply.ok:
             log.info("faucet funded treasury %s: %s", self.account_id, reply.message)
+        elif reply.rate_limited:
+            wait_s = min(reply.wait_s, MAX_FAUCET_WAIT_S)
+            data["retry_at_ms"] = self.clock() + int(wait_s * 1000)
+            log.warning(
+                "faucet refused treasury %s for its rate limit (HTTP %s %s); not asking again for %.1f h",
+                self.account_id, reply.status, reply.message, wait_s / 3600,
+            )
         else:
             log.warning("faucet request for treasury %s: HTTP %s %s", self.account_id, reply.status, reply.message)
-        self.store.log_event(
-            "faucet_reply", {"account_id": self.account_id, "ok": reply.ok, "status": reply.status}
-        )
+        self.store.log_event(FAUCET_REPLY, data)
         return reply
 
     async def wait_idle(self) -> None:

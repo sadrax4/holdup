@@ -8,6 +8,12 @@ exact error the network returned. Every attempt is harmless even if a key
 were misconfigured: transfers go to the signer itself, and calls carry
 1 yoctoNEAR at most.
 
+nearcore checks the key's permission only after charging the signer for the
+gas the transaction buys up front, so a signer that cannot pay gets
+``NotEnoughBalance`` instead and proves nothing. Calls therefore attach 1 Tgas
+(about 0.002 NEAR up front), which a user account can pay at any time: it
+starts with 0.03 NEAR, and 30 Tgas would cost more than that.
+
 The user's attempts need a user account. On a fresh deployment nobody has
 onboarded yet, so they are left out, and the report says why.
 """
@@ -24,9 +30,12 @@ from near.units import Amount, Gas
 
 from ..config import Settings
 from ..models import UserAccount
+from .budget import tx_cost
 from .errors import rejection_name
 from .fake import FakeVault
 from .rpc import make_client
+
+ATTEMPT_GAS = Gas.tgas(1)  # enough to reach the permission check; a call never runs with it
 
 
 @dataclass(frozen=True)
@@ -78,7 +87,7 @@ class ProveReport:
 
 
 def _call(method: str, args: dict[str, Any], deposit: str = "0") -> dict[str, Any]:
-    return {"FunctionCall": {"method_name": method, "args": args, "gas": str(int(Gas.tgas(30))), "deposit": deposit}}
+    return {"FunctionCall": {"method_name": method, "args": args, "gas": str(int(ATTEMPT_GAS)), "deposit": deposit}}
 
 
 def plan_attempts(settings: Settings, user: UserAccount | None = None) -> list[Attempt]:
@@ -213,11 +222,18 @@ async def _exists(near: AsyncNear, account_id: str) -> bool:
     return True
 
 
+def attempt_cost(attempt: Attempt) -> int:
+    """What the signer must hold for nearcore to look at the attempt's key at all, in yoctoNEAR."""
+    return tx_cost(to_near_actions(attempt.actions), sir=attempt.signer_id == attempt.receiver_id).at_hand
+
+
 def prove_fake(fake: FakeVault, settings: Settings, *, user: UserAccount | None = None) -> ProveReport:
     """The same attempts against the in-memory vault's access-key model (simulated)."""
     report = ProveReport(settings.network, settings.vault_account, simulated=True)
     for attempt in plan_attempts(settings, user):
-        error = fake.check_transaction(attempt.signer_id, attempt.receiver_id, list(attempt.actions))
+        error = fake.check_transaction(
+            attempt.signer_id, attempt.receiver_id, list(attempt.actions), cost=attempt_cost(attempt)
+        )
         if error is None:
             report.results.append(_result(attempt, "accepted", "the key was allowed to do this"))
         else:

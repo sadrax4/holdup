@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -17,8 +18,16 @@ from holdup.chain.faucet import (
     faucet_account_ok,
     request_drop,
     request_drop_async,
+    retry_hint,
 )
-from holdup.chain.treasury import FAUCET_EVENT, TREASURY_EMPTY, FaucetPolicy, Treasury
+from holdup.chain.treasury import (
+    FAUCET_EVENT,
+    FAUCET_REPLY,
+    MAX_FAUCET_WAIT_S,
+    TREASURY_EMPTY,
+    FaucetPolicy,
+    Treasury,
+)
 from holdup.config import Settings
 from holdup.store import Store
 
@@ -56,11 +65,12 @@ class Faucet:
         self.requests: list[dict[str, Any]] = []
         self.status = status
         self.body = body if body is not None else {"success": True, "message": "Funded with 5 NEAR"}
+        self.headers: dict[str, str] = {}
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         assert str(request.url) == FAUCET_URL and request.method == "POST"
         self.requests.append(json.loads(request.content))
-        return httpx.Response(self.status, json=self.body)
+        return httpx.Response(self.status, json=self.body, headers=self.headers)
 
 
 def treasury(
@@ -198,3 +208,81 @@ async def test_faucet_replies() -> None:
         assert request_drop(http, ROOT).maybe_funded
     with pytest.raises(ValueError):
         request_drop(httpx.Client(), "someone.near")
+
+
+# What the faucet answered on testnet on 2026-10-31, after six drops in five minutes.
+RATE_LIMITED = {"error": "Failed to create holdup-rh-9zpxfb-testnet-1793477067191.testnet: 429 Rate limit exceeded, "
+                         "retry in 10 hours."}
+
+
+async def test_a_rate_limited_faucet_is_left_alone_until_the_time_it_names() -> None:
+    """The service would have asked every ten minutes, up to thirty times a day, all refused."""
+    found, _, faucet, clock = treasury(1.0)
+    faucet.status, faucet.body = 500, RATE_LIMITED
+    assert found.request_top_up() is True
+    await found.wait_idle()
+    [reply] = found.store.events(FAUCET_REPLY)
+    assert reply["data"]["retry_at_ms"] == clock.now + 10 * 60 * MINUTE
+    for _ in range(59):  # ten hours of keeper ticks and onboardings
+        clock.now += 10 * MINUTE
+        assert found.request_top_up() is False
+        await found.check_onboarding(COST)
+    again = Treasury(found.settings, found.vault, found.store, policy=found.policy, clock=clock, http=found.http)
+    assert again.request_top_up() is False  # a restart remembers it
+    assert len(faucet.requests) == 1
+    clock.now += 10 * MINUTE
+    faucet.status, faucet.body = 200, {"success": True, "message": "Funded with 5 NEAR"}
+    assert again.request_top_up() is True
+    await again.wait_idle()
+    assert len(faucet.requests) == 2 and "retry_at_ms" not in found.store.events(FAUCET_REPLY)[0]["data"]
+
+
+async def test_a_rate_limit_without_a_time_keeps_the_faucet_alone_for_an_hour() -> None:
+    found, _, faucet, clock = treasury(1.0, interval_s=0)
+    faucet.status, faucet.body = 429, {"error": "Too many requests"}
+    assert found.request_top_up() is True
+    await found.wait_idle()
+    clock.now += 59 * MINUTE
+    assert found.request_top_up() is False
+    clock.now += MINUTE
+    assert found.request_top_up() is True
+    await found.wait_idle()
+
+
+@pytest.mark.parametrize("asked", [{"error": "429 Rate limit exceeded, retry in 30 days."}, {"error": "slow down"}])
+async def test_the_service_leaves_a_rate_limited_faucet_alone_for_a_day_at_most(asked: dict[str, str]) -> None:
+    """Neither a reply nor a Retry-After header can switch the top-ups off for longer than a day."""
+    found, _, faucet, clock = treasury(1.0, interval_s=0)
+    faucet.status, faucet.body = 429, asked
+    faucet.headers = {} if "retry in" in asked["error"] else {"Retry-After": str(90 * 86_400)}
+    assert found.request_top_up() is True
+    await found.wait_idle()
+    [reply] = found.store.events(FAUCET_REPLY)
+    assert MAX_FAUCET_WAIT_S == 86_400 and reply["data"]["retry_at_ms"] == clock.now + 24 * 60 * MINUTE
+    clock.now += 24 * 60 * MINUTE - 1
+    assert found.request_top_up() is False
+    clock.now += 1
+    assert found.request_top_up() is True
+    await found.wait_idle()
+    assert len(faucet.requests) == 2
+
+
+async def test_rate_limited_replies() -> None:
+    def answer(status: int, body: Any, headers: dict[str, str] | None = None) -> httpx.MockTransport:
+        return httpx.MockTransport(lambda request: httpx.Response(status, json=body, headers=headers))
+
+    async with httpx.AsyncClient(transport=answer(500, RATE_LIMITED)) as http:
+        reply = await request_drop_async(http, ROOT)
+    # The faucet's upstream refused before any money moved: not a maybe.
+    assert (reply.ok, reply.status, reply.rate_limited, reply.maybe_funded) == (False, 500, True, False)
+    assert reply.retry_after_s == 10 * 3600 and "Rate limit exceeded" in reply.message
+    assert retry_hint(reply, datetime(2026, 10, 31, 20, 4, tzinfo=UTC)) == "after 06:04 UTC on 2026-11-01"
+    async with httpx.AsyncClient(transport=answer(429, {"error": "slow down"}, {"Retry-After": "120"})) as http:
+        reply = await request_drop_async(http, ROOT)
+    assert (reply.rate_limited, reply.retry_after_s, reply.wait_s) == (True, 120.0, 120.0)
+    async with httpx.AsyncClient(transport=answer(429, {"error": "slow down"})) as http:
+        reply = await request_drop_async(http, ROOT)
+    assert (reply.retry_after_s, reply.wait_s, retry_hint(reply)) == (None, 3600.0, "later (it did not say when)")
+    async with httpx.AsyncClient(transport=answer(500, {"error": "funding failed"})) as http:
+        reply = await request_drop_async(http, ROOT)
+    assert (reply.rate_limited, reply.maybe_funded) == (False, True)  # an ordinary failure may still have paid

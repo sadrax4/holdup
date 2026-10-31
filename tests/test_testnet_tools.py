@@ -11,11 +11,17 @@ from typing import Any
 
 import httpx
 import pytest
+from near import AccountNotFoundError, generate_key
+from near.units import Amount
 
+from holdup.chain.deploy import UNFINISHED, DeployKeys
 from holdup.chain.faucet import FAUCET_URL
 
 NEAR = 10**24
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "testnet_tools.py"
+# What the faucet answered on testnet on 2026-10-31, after six drops in five minutes.
+RATE_LIMITED = {"error": "Failed to create me-testnet-1793477067191.testnet: 429 Rate limit exceeded, "
+                         "retry in 10 hours."}
 
 
 def load_tools() -> Any:
@@ -36,7 +42,7 @@ class FakeTestnet:
         self.balances = {name.replace("_", "."): int(Decimal(str(near)) * NEAR) for name, near in balances.items()}
         self.requests: list[str] = []
         self.fund = True  # the faucet's transfer arrives
-        self.answer: str = "ok"  # "ok", "timeout", "refuse"
+        self.answer: str = "ok"  # "ok", "timeout", "refuse", "rate limited"
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -45,6 +51,8 @@ class FakeTestnet:
             self.requests.append(account)
             if self.answer == "refuse":
                 return httpx.Response(400, json={"error": "invalid accountId"})
+            if self.answer == "rate limited":
+                return httpx.Response(500, json=RATE_LIMITED)
             if self.fund:
                 self.balances[account] = self.balances.get(account, 0) + 5 * NEAR
             if self.answer == "timeout":
@@ -172,3 +180,113 @@ def test_the_command_line(capsys: pytest.CaptureFixture[str]) -> None:
     assert "Budget of the demo deployment under me.testnet on testnet" in out and "create 16 demo payees" in out
     with pytest.raises(SystemExit):
         tools.main(["topup", "me.testnet", "--min", "lots"], http=chain.client(), sleep=Sleeps())
+
+
+def test_status_shows_each_balance_in_near_with_four_decimals(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class StatusNear:
+        def __init__(self, network: str, *, rpc_url: str) -> None:
+            assert network == "testnet"
+
+        def access_keys(self, account_id: str) -> list[Any]:
+            if account_id == "keeper.me.testnet":
+                raise AccountNotFoundError(account_id)
+            return [] if account_id == "vault.me.testnet" else [object()]
+
+        def balance(self, account_id: str) -> Amount:
+            return Amount.yocto(4_799_912_345_678_901_234_567_891)
+
+    monkeypatch.setattr(tools, "Near", StatusNear)
+    tools._save({"root_account": "me.testnet", "vault_account": "vault.me.testnet",
+                 "keeper_account": "keeper.me.testnet"})
+    tools.main(["status"])
+    assert capsys.readouterr().out.splitlines() == [
+        "me.testnet: 4.7999 NEAR, 1 access key(s)",
+        "vault.me.testnet: 4.7999 NEAR, 0 access key(s)",
+        "keeper.me.testnet: not found",
+    ]
+
+
+def test_a_rate_limited_faucet_is_asked_once_and_the_run_says_when_to_try_again(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """On testnet, topup asked four times, 20 s apart, a faucet that had said to wait 10 hours."""
+    chain, sleeps = FakeTestnet(me_testnet=4.7338), Sleeps()
+    chain.answer = "rate limited"
+    with pytest.raises(SystemExit) as info:
+        tools.topup("me.testnet", 5 * NEAR, http=chain.client(), sleep=sleeps)
+    assert chain.requests == ["me.testnet"] and sleeps == []
+    message = str(info.value)
+    assert "rate limited" in message and "retry in 10 hours" in message and "it was not asked again" in message
+    assert "Try again after " in message and " UTC on " in message
+    assert "HTTP 500 Failed to create" in capsys.readouterr().out
+
+
+class FakeNear:
+    """near-kit's sync client as bootstrap uses it: the registrar call creates the root on the fake chain."""
+
+    chain: FakeTestnet
+    created: list[tuple[str, str]] = []
+
+    def __init__(self, network: str, *, rpc_url: str, account_id: str = "", private_key: str = "") -> None:
+        self.signer = (account_id, private_key)
+
+    def call(self, contract: str, method: str, args: dict[str, Any], **kwargs: Any) -> Any:
+        assert (contract, method) == ("testnet", "create_account")
+        type(self).created.append(self.signer)
+        self.chain.balances[self.signer[0]] -= 48 * NEAR // 10
+        self.chain.balances[args["new_account_id"]] = 48 * NEAR // 10
+        self.key = args["new_public_key"]
+        type(self).keys = [type("Key", (), {"public_key": self.key})()]
+        return type("Result", (), {"transaction_hash": "create-root"})()
+
+    def access_keys(self, account_id: str) -> list[Any]:
+        return type(self).keys
+
+
+@pytest.fixture
+def registrar(monkeypatch: pytest.MonkeyPatch) -> type[FakeNear]:
+    FakeNear.created = []
+    monkeypatch.setattr(tools, "Near", FakeNear)
+    return FakeNear
+
+
+def test_bootstrap_stops_at_once_when_the_faucet_is_rate_limited(registrar: type[FakeNear]) -> None:
+    chain, sleeps = FakeTestnet(), Sleeps()
+    chain.answer = "rate limited"
+    with pytest.raises(SystemExit, match="rate limited .*Try again after"):
+        tools.bootstrap("me.testnet", http=chain.client(), sleep=sleeps)
+    assert len(chain.requests) == 1 and sleeps == []  # no minute of waiting for money that cannot come
+    saved = json.loads(tools.CREDS.read_text())
+    assert saved["funder_implicit_account"] == chain.requests[0] and saved["funder_private_key"]
+    assert registrar.created == []
+
+
+def test_bootstrap_reuses_a_funding_account_that_still_holds_its_test_near(registrar: type[FakeNear]) -> None:
+    """A run that stopped after the faucet funded the funding account must not ask for it again."""
+    funder = generate_key()
+    implicit = funder.public_key.data.hex()
+    tools._save({"network": "testnet", "funder_implicit_account": implicit, "funder_private_key": funder.secret_key})
+    chain, sleeps = FakeTestnet(), Sleeps()
+    chain.balances[implicit] = 5 * NEAR
+    registrar.chain = chain
+    tools.bootstrap("me.testnet", http=chain.client(), sleep=sleeps)
+    assert registrar.created == [(implicit, funder.secret_key)]
+    assert chain.requests == ["me.testnet"] * 2  # the two drops for the budget; none for a new funding account
+    saved = json.loads(tools.CREDS.read_text())
+    assert saved["funder_private_key"] == funder.secret_key and saved["root_account"] == "me.testnet"
+
+
+def test_bootstrap_tops_up_only_what_an_unfinished_deployment_still_needs() -> None:
+    """After a deployment that stopped halfway, the root needs less than the whole budget."""
+    done = ["create token", "deploy and initialise token", "create vault", "deploy and initialise vault"]
+    unfinished = {"network": "testnet", "profile": "hosted", "root_account": "me.testnet",
+                  "keys": DeployKeys().secret_keys(), "transactions": [[label, "h"] for label in done]}
+    tools._save({"network": "testnet", "root_account": "me.testnet", "treasury_private_key": "ed25519:x",
+                 UNFINISHED: unfinished})
+    full, rest = tools.hosted_budget("me.testnet"), tools.hosted_budget("me.testnet", done)
+    assert 5 * NEAR < full - rest < 6 * NEAR  # the token's and the vault's funding
+    chain = FakeTestnet(me_testnet=7)  # less than the whole budget, more than the rest
+    tools.bootstrap("me.testnet", http=chain.client(), sleep=Sleeps())
+    assert chain.requests == []

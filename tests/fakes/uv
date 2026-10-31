@@ -8,8 +8,9 @@ receives SIGTERM, SIGINT and SIGHUP from uv, whose exit code uv returns.
 
 The NEAR testnet commands (scripts/testnet_tools.py bootstrap, topup and status,
 holdup deploy, verify-deploy and prove) are simulated without any network access;
-they read and write a fake credentials file at $HOLDUP_CREDENTIALS. No other
-command is run.
+they read and write a fake credentials file at $HOLDUP_CREDENTIALS. A test makes
+`holdup deploy` refuse (exit status 2) or stop halfway (1) by writing "refused" or
+"stopped" to ../deploy-outcome next to this file. No other command is run.
 
 Each call is recorded (arguments, directory and the names of the environment
 variables, never their values) in ../records/ next to this file when that
@@ -119,6 +120,18 @@ def holdup_testnet(args: list[str]) -> int:
             fail("deploy needs the root account and its key in HOLDUP_CREDENTIALS", 1)
         if "--profile" not in args or args[args.index("--profile") + 1] != "hosted":
             fail("expected --profile hosted", 3)
+        outcome = HERE.parent / "deploy-outcome"
+        how = outcome.read_text().strip() if outcome.exists() else ""
+        if how == "refused":
+            print(f"holdup deploy: husd.{root} already exists, but without this deployment's key (simulated). "
+                  "Nothing was sent.", file=sys.stderr)
+            return 2
+        if how == "stopped":
+            data["unfinished_deployment"] = {"network": "testnet", "profile": "hosted", "root_account": root,
+                                             "keys": {}, "transactions": [["create token", "fake-hash"]]}
+            save(data)
+            print("holdup deploy: deploy and initialise token failed: RpcError (simulated)", file=sys.stderr)
+            return 1
         data = {
             "network": "testnet", "root_account": root, "vault_account": f"vault.{root}",
             "oracle_accounts": [f"oracle.{root}"], "keeper_account": f"keeper.{root}",

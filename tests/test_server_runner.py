@@ -978,6 +978,7 @@ def test_testnet_step_and_backup_with_a_simulated_network() -> None:
         assert any(f"testnet_tools.py topup {root} --min 5" in line for line in ran)
         deploy = next(c for c in calls if "deploy" in c["argv"])
         assert "HOLDUP_SECRET" in deploy["env_keys"] and "HOLDUP_CREDENTIALS" in deploy["env_keys"]
+        assert all("PYTHONUNBUFFERED" in c["env_keys"] for c in calls if c["argv"][0] == "run")
         for name in ("TELEGRAM_BOT_TOKEN", "OTARI_API_KEY", "HOLDUP_TELEGRAM_BOT_TOKEN", "HOLDUP_OTARI_API_KEY"):
             assert name not in deploy["env_keys"]
 
@@ -1019,6 +1020,33 @@ def test_force_new_also_starts_over_from_an_unfinished_setup() -> None:
         assert data["root_account"] == "my-fresh-root.testnet" and data["vault_account"] == "vault.my-fresh-root.testnet"
         old = list(box.secrets.glob("holdup-credentials.json.*.old"))
         assert len(old) == 1 and json.loads(old[0].read_text()) == unfinished
+    finally:
+        destroy_box(box)
+
+
+@apply(runner)
+def test_the_testnet_step_tells_a_refused_deployment_from_one_that_stopped_halfway() -> None:
+    box = make_box()
+    try:
+        box.run("setup")
+        creds = box.secrets / "holdup-credentials.json"
+        outcome = box.root / "deploy-outcome"
+        outcome.write_text("refused")
+        box.chown(outcome)
+        refused = box.run("testnet", stdin="yes\n\n", check=False)
+        assert refused.returncode != 0 and "Nothing was sent." in refused.stderr
+        assert "the deployment did not start and nothing was sent; see the message above" in refused.stderr
+        assert "continue where it stopped" not in refused.stderr and "3/5" not in refused.stdout
+
+        outcome.write_text("stopped")
+        stopped = box.run("testnet", stdin="yes\n", check=False)
+        assert stopped.returncode != 0 and "Resuming the unfinished setup" in stopped.stdout
+        assert "run 'bash scripts/server.sh testnet' again to continue where it stopped" in stopped.stderr
+        assert f"its keys and progress are saved in {creds}" in stopped.stderr
+
+        outcome.unlink()
+        box.run("testnet", stdin="yes\n")
+        assert json.loads(creds.read_text())["vault_account"].startswith("vault.holdup-")
     finally:
         destroy_box(box)
 

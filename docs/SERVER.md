@@ -206,11 +206,32 @@ account with faucet money, then a top-up to the hosted deployment's budget), `ho
 faucet top-up of the treasury to 5 NEAR, all with `HOLDUP_CREDENTIALS` pointing at
 `~/work/secrets/holdup-credentials.json` (bootstrap writes the root account's key there, and
 deploy reads it from there). `holdup deploy` prints the budget line by line and refuses, before
-sending anything, when the root holds less. A credentials file without a deployment is resumed
-with the same root account; a complete one is never replaced without `--force-new`, which renames
-it instead of deleting it (and also starts over from an unfinished one, for a deployment that
-stopped after creating some of its accounts). `prove` leaves out the user-key attempts while no
-user has been onboarded, because that account does not exist yet.
+sending anything, when the root holds less. A credentials file without a complete deployment is
+resumed with the same root account: `holdup deploy` writes the deployment's fresh keys there
+before its first transaction (under `unfinished_deployment`, with each transaction once it ran),
+and a rerun checks on chain which steps are done and carries on from the first one that is not,
+so a transaction that ran just before an interruption is not sent twice. The temporary keys of
+the token and the vault leave the file once they are deleted; the funding account's key stays. An
+account under the root that exists without the deployment's key (left by an attempt that did not
+save its keys) is refused before anything is sent. `holdup deploy` exits with status 2 when it
+refused before sending anything and 1 when it stopped halfway; the testnet step tells the two
+apart and points to a rerun only for the second. A complete file is never replaced without
+`--force-new`, which renames it instead of deleting it.
+
+The token's and the vault's first transactions wait until their new keys are final: near-kit
+returns from a transaction once it ran, but reads the nonce of a key it has not used yet at final
+finality, a few blocks later, and finds nothing until then. `prove` leaves out the user-key
+attempts while no user has been onboarded, because that account does not exist yet; its calls
+attach 1 Tgas, because nearcore charges the gas a transaction buys up front before it looks at the
+key's permission, and a user's account holds only about 0.03 NEAR.
+
+NEAR's faucet is rate limited although its documentation does not say so. On 2026-10-31 it
+answered `Failed to create <account>.testnet: 429 Rate limit exceeded, retry in 10 hours.` (HTTP
+500) after six drops in five minutes. A clean testnet step takes three drops. A rate-limited
+answer stops `bootstrap` and `topup` at once, saying when to try again, and the running service
+does not ask again before that time (an hour when the faucet names none, and never more than a
+day, whatever it names). A funding account the faucet already paid is used again by the next
+`bootstrap` instead of asking for another drop.
 
 The deployment also creates the payees of the training samples, among them ten practice friends
 (`ravi-0` ... `ravi-9`); each person's ordinary practice payments go to one of them, chosen from
