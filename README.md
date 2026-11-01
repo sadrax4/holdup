@@ -25,17 +25,38 @@ then `/demo`. Without Telegram: `make setup`, then `make demo-offline`, `make at
 `make prove` (no network after setup, about two seconds each). Judges:
 [docs/JUDGES.md](docs/JUDGES.md) is the five-minute path.
 
-**What has run live** (dates are UTC). The AI checks ran on Otari on 2026-10-31: the scripted
-story, then six payments through the hosted server's public URL, both on the in-memory vault
-([docs/OTARI.md](docs/OTARI.md)). The same day a rehearsal with throwaway accounts deployed the
-contracts to NEAR testnet and ran three held payments on them with the AI checks off: one
-cancelled, one braked by the oracle and then cancelled, one released by the keeper. The only hosted
-run in the saved evidence used offline network mode (in-memory vault, simulated transactions, live
-Otari); each web page's footer and `/health` say which network the bot is on. What has not run
-live yet: [Status](#status).
+**What has run live** (dates are UTC). On 2026-11-01 the bot's own deployment on NEAR testnet
+(below) took its first two real payments through Telegram, with the AI checks live on Otari. A
+payment made after the fake exchange-support sample was braked by the rules within a second, then
+held for 72 hours by the full check, which had read the linked scam page through Otari's web fetch;
+its sender later cancelled it. An ordinary payment to a practice friend was released by the keeper
+after the 5-minute wait. On 2026-10-31 the AI checks ran on Otari for the scripted story and for
+six payments through the hosted server's public URL, both on the in-memory vault, and a rehearsal
+with throwaway accounts ran three held payments on testnet with the AI checks off. Each web page's
+footer and `/health` say which network the bot is on. Details:
+[docs/OTARI.md](docs/OTARI.md#the-live-evidence); what has not run live yet: [Status](#status).
 
-**Owner's NEAR testnet deployment (2026-11-01): the vault, oracle, keeper and token account ids
-will be listed here once it is done.**
+**The bot's deployment on NEAR testnet**, live since 2026-11-01 09:08 UTC (commit 9e03a8b, hosted
+profile: new payees wait 5 minutes):
+
+| Account | Role | Access keys |
+|---|---|---|
+| [`vault.holdup-soleimani.testnet`](https://testnet.nearblocks.io/address/vault.holdup-soleimani.testnet) | HoldVault | none; code hash `HRS9GfZHExGfarPm4H8deFfhrNr9wpkECohBfZtb9JTy`, as in `res/CODE_HASHES` |
+| [`oracle.holdup-soleimani.testnet`](https://testnet.nearblocks.io/address/oracle.holdup-soleimani.testnet) | oracle | one function-call key, for `extend_hold` on the vault |
+| [`keeper.holdup-soleimani.testnet`](https://testnet.nearblocks.io/address/keeper.holdup-soleimani.testnet) | keeper | one function-call key, for `release` on the vault |
+| [`husd.holdup-soleimani.testnet`](https://testnet.nearblocks.io/address/husd.holdup-soleimani.testnet) | HUSD demo token | none |
+| [`holdup-soleimani.testnet`](https://testnet.nearblocks.io/address/holdup-soleimani.testnet) | root and treasury | one full-access key, on the server |
+
+The payees of the bot's practice samples are keyless accounts under the root: `safe-wallet-77`,
+`northwind-paper`, `northwindpaper`, `ravi` and `ravi-0` to `ravi-9`, each followed by
+`.holdup-soleimani.testnet`. Deploy transactions include
+[creating the vault](https://testnet.near.rocks/tx/8uCTx8PZnSa5mDyUNTVdsj6xxXhtg7ZSR8jgQaAujoZv),
+[deploying and initialising it](https://testnet.near.rocks/tx/F886xnobuVV8wMS6ogzfpM3TCn3HBWuJvgEQMUHiGopC),
+[deleting its last key](https://testnet.near.rocks/tx/4SDy5Pq3mgDArDFeJyFRHUSyTdRj3574TcZEBZ8GFcHy)
+and [creating the token](https://testnet.near.rocks/tx/FnEgaseHhQZWnVuUi2uFqeD9swugv6ubGWhkvzGfEBVJ).
+At install `verify-deploy` passed all five checks and `prove` saw the network refuse every
+forbidden oracle and keeper transaction. To check the deployment yourself with a public RPC
+endpoint: [docs/JUDGES.md](docs/JUDGES.md#check-the-deployment-on-chain).
 
 More: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (keys, attacks and limits),
 [docs/OTARI.md](docs/OTARI.md) (each rubric item, where it is in the code and what has run live),
@@ -90,19 +111,19 @@ Details, error codes, events and the tests behind each property: [contracts/READ
 ## Otari features used
 
 One row per item of the Otari "Devs Wilding" rubric. "Live" means a saved record of the app
-running against the hosted gateway on 2026-10-31; request ids, costs and what is still open are in
-[docs/OTARI.md](docs/OTARI.md).
+running against the hosted gateway on 2026-10-31 or 2026-11-01; request ids, costs and what is
+still open are in [docs/OTARI.md](docs/OTARI.md).
 
 | Rubric item | What HoldUp does | Live | Where |
 |---|---|---|---|
 | Open-weight models | `openai/gpt-oss-20b` (triage and the guardrail gate), `openai/gpt-oss-120b` (investigator), `deepseek/deepseek-v4.1-flash-1017` (reviewer, another model family), `z-ai/glm-5.3-flash` (images); `gpt-oss-safeguard-120b` classifies text behind HoldUp's guardrail endpoint | Yes: 3 models in 4 roles. Images: not yet | `holdup/risk/otari.py`, `holdup/risk/pipeline.py` |
 | Model routing and fallbacks | Catalog ids, so the gateway picks the provider; provider, fallback, attempts and request id recorded per step, shown on `/why` and put in the evidence whose sha256 goes on-chain; HoldUp's own fallback chain across model families | Routing: yes. A fallback: not yet | `otari.py` |
-| MCP integrations | HoldUp's `near-intel` MCP server, passed per request with a bearer token that only covers one hold's sender and payee | Yes | `pipeline.py`, `holdup/mcp_server.py` |
-| Web search or web fetch | `otari_web_search` and, when the message has links, `otari_web_fetch` for the investigator | Search: yes. Fetch: not yet shown working | `pipeline.py` |
+| MCP integrations | HoldUp's `near-intel` MCP server, passed per request with a bearer token that only covers one hold's sender and payee | Yes, also on testnet | `pipeline.py`, `holdup/mcp_server.py` |
+| Web search or web fetch | `otari_web_search` and, when the message has links, `otari_web_fetch` for the investigator | Fetch: yes (2026-11-01). Search: yes (2026-10-31), not used since | `pipeline.py` |
 | Code execution | `otari_code_execution` for the investigator and the reviewer, asked to compute every number they rely on; HoldUp redoes the arithmetic | Yes | `pipeline.py`, `otari.py` |
 | Budgets and spending limits | A budget refusal from the gateway becomes a fail-closed brake (`BUDGET_EXHAUSTED`); `/budget` and `/stats` show the spend | Not yet | `otari.py`, `holdup/engine.py` |
 | Multiple models serving distinct roles | Triage, gate, investigator, reviewer, vision and the guardrail classifier | Yes: 4 roles | `pipeline.py` |
-| Guardrails | `checker-injection`, served by HoldUp's `/validate`: monitor mode on triage and the investigator, block mode on a gate that keeps flagged text away from the models with tools | Monitor: yes. Block: partly | `pipeline.py`, `holdup/guard.py`, `holdup/risk/guard_models.py` |
+| Guardrails | `checker-injection`, served by HoldUp's `/validate`: monitor mode on triage and the investigator, block mode on a gate that keeps flagged text away from the models with tools | Monitor: yes. Block: yes, including a block (2026-11-01) | `pipeline.py`, `holdup/guard.py`, `holdup/risk/guard_models.py` |
 | Per-user budgets | Each account is mapped to one key in `OTARI_USER_KEYS`, each meant to carry its own spend ceiling. The ceilings are set in the Otari dashboard, because the API answers 401 to an ordinary key | Not yet | `holdup/risk/budgets.py` |
 
 ## Try it offline
@@ -224,22 +245,37 @@ Checked on 2026-11-01 at commit 9e03a8b unless a line gives another date. Dates 
 - What that run showed, and what commit 9e03a8b changed: the payee's reputation counted the hold
   under check, the 20-second demo hold was shorter than the check, an empty model answer ended the
   step, the web tools went unused once MCP was attached, and a guardrail block was shown as a
-  failure. 9e03a8b fixes these; the fixes have not run live yet. One honest brake in that run has
-  no fix yet (the open issue below).
+  failure. 9e03a8b fixes these. In its live run on 2026-11-01 (next item) three of the fixes showed:
+  the check ended well within the 5-minute wait, the investigator used Otari's web fetch with MCP
+  attached, and the guardrail's block was recorded as a block. The reputation and empty-answer
+  fixes have not come up live yet. One honest brake in the 2026-10-31 run has no fix yet (the open
+  issue below).
+- NEAR testnet with live AI checks (2026-11-01): the bot's deployment (accounts near the top of
+  this page) has run commit 9e03a8b with the hosted profile since 09:08. The public faucet was rate
+  limited, so the treasury was funded with test NEAR from NEAR's account helper; no code changed.
+  `verify-deploy` and `prove` passed at install. At about 09:58 two payments went through Telegram:
+  50 HUSD to `safe-wallet-77` after the fake exchange-support sample, braked by the rules one
+  second after the payment (for an hour), then held for 72 hours by the full check about a minute
+  later, on a scam page read through Otari's web fetch; and 12.5 HUSD to the practice friend
+  `ravi-6`, sent without a message, so no model was asked, released by the keeper after the
+  5-minute wait. `/stats` at 10:05: 1 user, 2 holds, 1 brake, 1 release, 0 fail-closed, 3 model
+  steps, 0 fallbacks, USD 0.0108 of AI. The vault shows that the sender cancelled the braked
+  payment at 10:05, after those pages were saved. Transactions and request ids:
+  [docs/OTARI.md](docs/OTARI.md#the-live-evidence).
 - Hosted bot: one machine, a home server, reached only through two Cloudflare quick tunnels, with
-  the bot long-polling Telegram (`scripts/server.sh`). During the 2026-10-31 run its `/health`
-  showed the Telegram poller running for `@HoldUp_HoldUp_bot` with no error; the saved evidence of
-  that run comes from the web console, not from a Telegram chat. On 2026-11-01 the hosted server
-  still ran a build from before 9e03a8b: its pages said new payees wait 20 seconds.
-- NEAR testnet (2026-10-31, a rehearsal with throwaway accounts): the deploy (the root spent 9.57
-  test NEAR), `verify-deploy` and `prove`, then onboarding and three held payments (a cancel, an
-  oracle brake followed by a cancel, a keeper release), all as real transactions with the AI checks
-  off. A new key was not visible at final finality for a block or two; commit 65d3b96 fixed that,
-  and a deploy stopped on purpose then resumed where it stopped. `make demo` on testnet has not
-  run. The owner's own deployment: see the line near the top of this page.
+  the bot long-polling Telegram (`scripts/server.sh`). During the 2026-10-31 run, in offline network
+  mode, its `/health` showed the Telegram poller running for `@HoldUp_HoldUp_bot` with no error,
+  but the saved evidence of that run comes from the web console. The 2026-11-01 payments on testnet
+  were made in a Telegram chat with the bot.
+- NEAR testnet rehearsal (2026-10-31, throwaway accounts): the deploy (the root spent 9.57 test
+  NEAR), `verify-deploy` and `prove`, then onboarding and three held payments (a cancel, an oracle
+  brake followed by a cancel, a keeper release), all as real transactions with the AI checks off.
+  A new key was not visible at final finality for a block or two; commit 65d3b96 fixed that, and a
+  deploy stopped on purpose then resumed where it stopped. `make demo` on testnet has not run.
 - Not yet run: the sandbox tests (`tests/test_contract_sandbox.py`, `tests/test_chain_sandbox.py`;
   they need a running NEAR sandbox). Not yet shown live: the image step, a model fallback, a budget
-  refusal, per-user keys and the `safety` guardrail profile.
+  refusal, per-user keys and the `safety` guardrail profile. Web search has run live once
+  (2026-10-31); the 2026-11-01 run made none.
 - Known open issue: a model's claim of text aimed at the checker still brakes for 72 hours on its
   own, even when the guardrail passed the text (seen live on 2026-10-31 on an honest message that
   said "pre-approved"). A change that let the guardrail's pass override the models was rejected in

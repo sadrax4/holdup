@@ -14,19 +14,20 @@ labels:
 
 ## Summary
 
-Dates are UTC. Request ids are shortened to their first 8 characters; the full ids are in the
-sections below.
+Dates are UTC. Runs 1 and 2 were on 2026-10-31 on the in-memory vault; run 3 was on 2026-11-01 on
+NEAR testnet (see the next section). Request ids are shortened to their first 8 characters; the
+full ids are in the sections below.
 
-| Rubric item | Status | Evidence (2026-10-31) | Code |
+| Rubric item | Status | Evidence | Code |
 |---|---|---|---|
-| Open-weight models (20, +10 for two or more) | Verified live: three open-weight models | triage `77016f08`, investigator `7a358dcb`, reviewer `72b3f1d9`, all served by deepinfra | `holdup/risk/otari.py`, `holdup/risk/pipeline.py` |
-| Model routing and fallbacks | Routing and headers verified live; a fallback not yet shown | run 2: provider, served model, fallback and attempts on every step a provider served | `FALLBACK_CHAIN`, `fallbacks_for` in `otari.py` |
-| MCP integrations | Verified live | run 2: the gateway called near-intel on every hold; an out-of-scope call refused on hold 1 | `holdup/mcp_server.py`, `_mcp_servers` in `pipeline.py` |
-| Web search or web fetch | Search verified live (run 1); fetch not yet shown working | search in `17299991`; a failed fetch in `8ff967c9` | `_investigate` in `pipeline.py` |
+| Open-weight models (20, +10 for two or more) | Verified live: three open-weight models | 2026-10-31: triage `77016f08`, investigator `7a358dcb`, reviewer `72b3f1d9`; run 3: triage `07cf8e8a`, investigator `c24673f3`; all served by deepinfra | `holdup/risk/otari.py`, `holdup/risk/pipeline.py` |
+| Model routing and fallbacks | Routing and headers verified live; a fallback not yet shown | runs 2 and 3: provider, served model, fallback and attempts on every step a provider served; 0 fallbacks | `FALLBACK_CHAIN`, `fallbacks_for` in `otari.py` |
+| MCP integrations | Verified live, again on testnet in run 3 | run 2: the gateway called near-intel on every hold; an out-of-scope call refused on hold 1. Run 3: three near-intel calls in `c24673f3` | `holdup/mcp_server.py`, `_mcp_servers` in `pipeline.py` |
+| Web search or web fetch | Web fetch verified live (run 3); web search verified live (run 1) | fetch in `c24673f3`, with three findings resting on the fetched page; search in `17299991`; no search in run 3 | `_investigate` in `pipeline.py` |
 | Code execution | Verified live | `17299991` (run 1), `72b3f1d9` (run 2) | `pipeline.py`, `_fill` in `otari.py` |
 | Budgets and spending limits | Implemented, not yet shown live | none | `BudgetExceeded` in `otari.py`, `_fail_closed` in `holdup/engine.py` |
-| Multiple models serving distinct roles | Verified live: 4 roles on 3 models | as for open-weight models, plus the gate `1db2c093` | `_review` in `pipeline.py` |
-| Guardrails | Monitor mode verified live; block mode partly | monitor `77016f08`, `26e0860c`; block passed `1db2c093` | `holdup/guard.py`, `_gate` in `pipeline.py` |
+| Multiple models serving distinct roles | Verified live: 4 roles on 3 models | run 2, as for open-weight models, plus the gate `1db2c093`; run 3: triage and investigator on two models, and a gate blocked before any model ran | `_review` in `pipeline.py` |
+| Guardrails | Verified live: monitor mode, and block mode both passing and blocking | monitor `77016f08`, `26e0860c` (run 2), `07cf8e8a` (run 3); block passed `1db2c093` (run 2); block blocked `fad581a8` (run 3) | `holdup/guard.py`, `_gate` in `pipeline.py` |
 | Per-user budgets | Implemented, not yet shown live | none | `KeyPool` in `holdup/risk/budgets.py` |
 
 ## The live evidence
@@ -48,7 +49,33 @@ Times are UTC.
   are not in this repository. A quick-tunnel URL changes whenever the server restarts, so these
   docs do not give it.
 - Run 2 ran code older than 009c73e (inferred from the wording on its pages), so it predates all
-  the 9e03a8b fixes; none of those fixes has run live yet.
+  the 9e03a8b fixes. Run 3 is the first live run of 9e03a8b.
+- **Run 3, 2026-11-01, 09:58 to 10:05.** The bot's own deployment on NEAR testnet (accounts and
+  deploy transactions in the [README](../README.md)), commit 9e03a8b with the hosted profile (new
+  payees wait 5 minutes), driven through Telegram: two payments as real transactions, 3 model
+  steps, 0 fallbacks, 0 fail-closed, USD 0.0108 in total (`/stats.json`, saved at 10:05). The
+  gateway called HoldUp's MCP server and guardrail endpoint. Saved copies of `/h`, `/why`, `/v`
+  and `/stats` for both payments, and of `/prove`, are kept by the author. Transactions open on
+  testnet.near.rocks.
+  - Hold 0: 50 HUSD to `safe-wallet-77.holdup-soleimani.testnet` after the fake exchange-support
+    sample was forwarded
+    ([send](https://testnet.near.rocks/tx/EBygqPpQ1FysLb84HetG8XdapU5hehnz8rxZAs41AZe8) at
+    09:58:54). The rules braked it at 09:58:55 for an hour
+    ([extend_hold](https://testnet.near.rocks/tx/4Siszk8k6mXXf7xmczkvhP76dxKvD2pdGMH6YxxKvFDN));
+    the full check held it at 09:59:59 for 72 hours after the payment
+    ([extend_hold](https://testnet.near.rocks/tx/3NusUfChJ83m53LiqLsAnrreu7e2ZVjudthZP9KtZyBr)).
+    Steps: triage (`openai/gpt-oss-20b`), a gate that the guardrail blocked, and the investigator
+    (`openai/gpt-oss-120b`, 56 seconds). Findings are tagged `[rules]`, `[triage gpt-oss-20b]`,
+    `[guardrail]`, `[MCP near-intel]` and `[web fetch]`. The hold's on-chain evidence hash,
+    `69cf4ae8f3d9d6aa7280639a51ba6fa85dbeb37c48b3d337dac22d0fbc4faf48`, equals the sha256 of the
+    published `/v/0.json`. The vault's `get_hold` shows that the sender cancelled the payment at
+    10:05:27, after the pages were saved.
+  - Hold 1: 12.5 HUSD to the practice friend `ravi-6.holdup-soleimani.testnet`, with no message
+    ([send](https://testnet.near.rocks/tx/5EkBMH8Rr157ipf4UheG4cnpiawuJm3BXHUPuSHzWZM1) at
+    09:59:10). With no message there was nothing for a model to read, so none was asked; the rules
+    found no reason to brake (the payee's age, under an hour, is shown as context only), and the
+    keeper released it at 10:04:16, after the 5-minute wait
+    ([release](https://testnet.near.rocks/tx/4bt5ZTK6LfMGq9WowUCE5bdK5sgg6fDczU1C7pJBzrAK)).
 - **Gateway probes, 2026-10-31, mostly between 12:06 and 12:29.** Direct calls to the gateway, not
   through the app, to learn its behaviour. Some are in `fixtures/otari/recorded/`. They show what
   the gateway does, not what HoldUp does, so no item below counts as verified on a probe alone.
@@ -61,11 +88,11 @@ Every model HoldUp asks for is listed as `open_weights: true` in the gateway's c
 
 | Model | Role | Status |
 |---|---|---|
-| `openai/gpt-oss-20b` | triage: reads the forwarded message and reports signals; also the gate request that carries the blocking guardrail | **Verified live on 2026-10-31** (runs 1 and 2; for example triage request `77016f08-7f60-406f-a360-bc4768a11ef8`, provider deepinfra, USD 0.000081) |
-| `openai/gpt-oss-120b` | investigator: checks the payee and the links with MCP, web search, web fetch and code execution | **Verified live on 2026-10-31** (runs 1 and 2; for example request `7a358dcb-447b-4996-ba4b-1d4d1c15accd`, deepinfra, USD 0.010647) |
+| `openai/gpt-oss-20b` | triage: reads the forwarded message and reports signals; also the gate request that carries the blocking guardrail | **Verified live on 2026-10-31** (runs 1 and 2; for example triage request `77016f08-7f60-406f-a360-bc4768a11ef8`, provider deepinfra, USD 0.000081) **and on 2026-11-01** (run 3, triage request `07cf8e8a-2500-4459-bdfb-e6ad9ab9839d`, deepinfra, USD 0.000062) |
+| `openai/gpt-oss-120b` | investigator: checks the payee and the links with MCP, web search, web fetch and code execution | **Verified live on 2026-10-31** (runs 1 and 2; for example request `7a358dcb-447b-4996-ba4b-1d4d1c15accd`, deepinfra, USD 0.010647) **and on 2026-11-01** (run 3, request `c24673f3-c063-41be-83b0-8b4500731150`, deepinfra, 56 seconds, USD 0.010738) |
 | `deepseek/deepseek-v4.1-flash-1017` | reviewer: a blind second opinion from another model family; also the investigator's first fallback | **Verified live on 2026-10-31** (request `72b3f1d9-c7d7-45de-a1eb-6e92c4fc75f2`, deepinfra, served as `deepseek-ai/DeepSeek-V4.1-Flash-1017`, USD 0.010138) |
 | `z-ai/glm-5.3-flash` | vision: reads an image the sender shares; also the last fallback family | **Implemented, not yet shown live** in the app. The web console takes text only; Telegram images reach it. A gateway probe on 2026-10-31 read an invoice image with it. |
-| `openai/gpt-oss-safeguard-120b` | the `checker-injection` classifier behind HoldUp's `/validate` endpoint, with HoldUp's written policy (`holdup/risk/guard_models.py`) | **Partly verified.** In run 2 the gateway called `/validate` and its verdicts came back (see Guardrails). The endpoint falls back to phrase rules when the classifier fails, and the saved pages do not record which of the two answered, so this model's part is not verified. |
+| `openai/gpt-oss-safeguard-120b` | the `checker-injection` classifier behind HoldUp's `/validate` endpoint, with HoldUp's written policy (`holdup/risk/guard_models.py`) | **Partly verified.** In runs 2 and 3 the gateway called `/validate` and its verdicts came back (see Guardrails). The endpoint falls back to phrase rules when the classifier fails, and the saved pages do not record which of the two answered, so this model's part is not verified. |
 | `meta/llama-guard-4-12b` | the `safety` profile behind `/validate` | **Implemented, not used.** The pipeline never requests the `safety` profile. |
 
 A check can involve three model families: gpt-oss, deepseek and, for images, glm. The reviewer,
@@ -90,14 +117,15 @@ about 60 seconds, and each attempt has a wall-clock limit. Gateway errors become
 pipeline can tell a budget refusal from an outage (`otari.py`). `usage.cost_usd` is recorded per
 step and shown on `/why/<id>`.
 
-**Status: partly verified live on 2026-10-31.** Routing and the headers are shown: in run 2 every
-model step that a provider served recorded provider deepinfra, attempts 1 and fallback no (the two
-refused gate requests recorded no provider), and the catalog id
+**Status: partly verified live on 2026-10-31 and 2026-11-01.** Routing and the headers are shown:
+in run 2 every model step that a provider served recorded provider deepinfra, attempts 1 and
+fallback no (the two refused gate requests recorded no provider), and the catalog id
 `deepseek/deepseek-v4.1-flash-1017` was served as the provider's
-`deepseek-ai/DeepSeek-V4.1-Flash-1017`. **Fallbacks: implemented, not yet shown live.** No fallback
-happened in either run (run 2's `/stats.json`: 0 fallbacks over 18 steps), and the public console
-cannot force one. The offline tests replay one (`fixtures/otari/all_candidates_failed.json`,
-synthetic).
+`deepseek-ai/DeepSeek-V4.1-Flash-1017`. Run 3's triage and investigator recorded the same
+(deepinfra, attempts 1, fallback no; the blocked gate request recorded no provider).
+**Fallbacks: implemented, not yet shown live.** No fallback happened in any run (`/stats.json`: 0
+fallbacks over 18 steps in run 2, 0 over 3 in run 3), and the public console cannot force one.
+The offline tests replay one (`fixtures/otari/all_candidates_failed.json`, synthetic).
 
 ## MCP integrations
 
@@ -108,7 +136,8 @@ tools: `payee_profile`, `payee_reputation`, `sender_history`, `hold_status`, `fe
 server logs each call, and `/why/<id>` lists them, because Chat Completions does not report MCP
 calls.
 
-**Status: verified live on 2026-10-31** (run 2). The gateway called `/mcp` with the per-hold token:
+**Status: verified live on 2026-10-31** (run 2) **and again on NEAR testnet on 2026-11-01** (run
+3). In run 2 the gateway called `/mcp` with the per-hold token:
 
 - hold 0: `payee_profile(safe-wallet-77.testnet)` and
   `fetch_page(<training host>/fixtures/coinhaven/verify)`; the investigator's findings
@@ -121,9 +150,17 @@ calls.
 - hold 3: `payee_profile(mum.testnet)`;
 - hold 5: `fetch_page(<training host>/fixtures/northwind/invoices/NP-2291)`.
 
-Run 2 also showed two faults, fixed in 9e03a8b and not yet shown live: `payee_reputation` counted
-the hold under check and the sender's own earlier payments, and the model had to guess the
-sender's account for `sender_history` (the history tools now default to the hold's own parties).
+In run 3, hold 0 (investigator request `c24673f3-c063-41be-83b0-8b4500731150`), the gateway called
+`payee_profile(safe-wallet-77.holdup-soleimani.testnet)`,
+`payee_reputation(safe-wallet-77.holdup-soleimani.testnet)` and `sender_history()`, and near-intel
+refused none of them. The investigator's reading of the payee's age is tagged `[MCP near-intel]`
+next to the rules' own, and `/why` lists the three calls among the step's tools.
+
+Run 2 also showed two faults, fixed in 9e03a8b: `payee_reputation` counted the hold under check
+and the sender's own earlier payments, and the model had to guess the sender's account for
+`sender_history` (the history tools now default to the hold's own parties). Run 3 shows the second
+fix at work: `sender_history()` came with no arguments and was answered. Whether the reputation
+now leaves out the hold under check is not visible on the saved pages.
 
 ## Web search or web fetch
 
@@ -133,8 +170,8 @@ public warning counts only if it cites a page the gateway reports the search ret
 phishing-page claim only if the page was read. If the workspace has web access off, the tool is
 dropped, the step is retried without it and a note says so on `/why`.
 
-**Status: web search verified live on 2026-10-31 (run 1); web fetch implemented, not yet shown
-working live.**
+**Status: web fetch verified live on 2026-11-01 (run 3); web search verified live on 2026-10-31
+(run 1), and not used since.**
 
 - Run 1, hold 1 (the Northwind invoice): investigator request
   `17299991-165c-49e9-be2a-adf5bc22bb79` (deepinfra, USD 0.020652) ran `otari_web_search` for
@@ -145,7 +182,15 @@ working live.**
 - Run 2: with near-intel attached, the investigator read both linked pages with near-intel's
   `fetch_page` and used neither gateway tool. Commit 9e03a8b leaves `fetch_page` out while the
   gateway's web fetch is offered (it comes back if that fetch fails) and asks for at least one
-  search. Whether the model now searches and fetches through the gateway has not been seen live.
+  search.
+- Run 3, hold 0 (investigator request `c24673f3-c063-41be-83b0-8b4500731150`, near-intel
+  attached): the investigator called `otari_web_fetch` on the training page the forwarded message
+  linked, and the gateway reported the fetch completed. HoldUp counts a page finding as
+  `[web fetch]` only when it cites a page the gateway reports fetching, and three did: the page
+  asks for a 12-word recovery phrase, it asks for that phrase and a login, and it says the account
+  will be frozen in 30 minutes. The first two are what the full check added to the rules' brake.
+- Not yet seen: the investigator made no web search in run 3, so a search on 9e03a8b, and a
+  finding that rests on a search, have not been seen live.
 
 ## Code execution
 
@@ -192,8 +237,10 @@ The models are listed under Open-weight models above.
 (`gpt-oss-20b`), investigator (`gpt-oss-120b`) and reviewer (`deepseek-v4.1-flash`), all in run 2.
 Run 1 used triage and the investigator; its only reviewer answer was rejected as malformed
 (`bad_json`, request `87240c05-29af-452c-914b-e8e8699a5a2e`), and the 19:01 CLI rerun had a usable
-reviewer answer (request `fe20a3d6-d52e-48d4-9ccb-d5106f923fec`). The vision and classifier roles
-are as stated in the model table.
+reviewer answer (request `fe20a3d6-d52e-48d4-9ccb-d5106f923fec`). Run 3 (2026-11-01, on testnet)
+used triage (`gpt-oss-20b`) and the investigator (`gpt-oss-120b`), with a gate request between
+them that the guardrail blocked before any model ran; the reviewer was not asked. The vision and
+classifier roles are as stated in the model table.
 
 ## Guardrails
 
@@ -205,7 +252,8 @@ carries it in block mode, and text that is blocked, or that the gate could not j
 reaches the models with tools (`_guardrails`, `_gate` and `withheld` in `pipeline.py`). Each
 request carries a per-hold token in `validate_kwargs`.
 
-**Status: monitor mode verified live on 2026-10-31; block mode partly verified.**
+**Status: monitor mode verified live on 2026-10-31 and 2026-11-01; block mode verified live, with
+a pass on 2026-10-31 and a block on 2026-11-01.**
 
 - Monitor (run 2): the triage rows show `checker-injection, monitor: flagged` with score 1.0 on
   hold 0 (request `77016f08-7f60-406f-a360-bc4768a11ef8`) and hold 4 (request
@@ -221,8 +269,16 @@ request carries a per-hold token in `validate_kwargs`.
   `19034f6a-028e-4558-a397-f3a0aad70598`), and the text stayed withheld from the investigator.
   HoldUp then recorded this as a failed step (`request_refused`). Since commit 9e03a8b a bare 403
   on a request with a block-mode guardrail is recorded as the guardrail's block, with a note that
-  the gateway answered 403 with no error code; that has not run live yet, and the saved pages do
-  not record the status of the 2026-10-31 refusals.
+  the gateway answered 403 with no error code; that case has not come up live since, and the saved
+  pages do not record the status of the 2026-10-31 refusals.
+- Monitor (run 3, hold 0): triage request `07cf8e8a-2500-4459-bdfb-e6ad9ab9839d` shows
+  `checker-injection, monitor: flagged` with score 1.0, and the hold carries a `CHECKER_INJECTION`
+  finding from source `guardrail`.
+- Block, blocked (run 3, hold 0): the gate request `fad581a8-01fc-422a-8a3a-3863a59811d7` was
+  refused after 470 ms, with no provider and no cost, by a 403 that this time carried the error
+  code `guardrail_violation` ("Request blocked by guardrail policy.", profile
+  `checker-injection`). HoldUp recorded it as "blocked the text", not as a failure, and the
+  investigator then saw only the facts HoldUp extracted from the message.
 - Which classifier produced each verdict (the safeguard model or the fallback rules) is not on the
   saved pages.
 
@@ -250,7 +306,7 @@ limits: [THREAT_MODEL.md](THREAT_MODEL.md).
 
 Outcomes as the run recorded them, on code older than 009c73e. Hold 3's 72-hour brake has no fix
 yet ([JUDGES.md, Known issues](JUDGES.md#known-issues)); the other mistaken brakes are fixed in
-9e03a8b, not yet run live.
+9e03a8b, and these honest payments have not been repeated live on it.
 
 | Hold | Payment | Outcome then | Cost (USD) |
 |---|---|---|---|

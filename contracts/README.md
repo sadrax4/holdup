@@ -68,11 +68,11 @@ Rebuilding in another directory with the same toolchain produced byte-identical 
 
 `wasm-tools validate --features=-all,floats,mutable-global,sign-extension,saturating-float-to-int,bulk-memory,reference-types` (wasm-tools 1.263.0, the same wasmparser feature set nearcore configures) accepts both files; without `bulk-memory` it rejects them, which is expected for rustc 1.87+ and why protocol 84+ is required. The inspector was also run against hand-written modules using SIMD, multi-value, tail calls, atomics, a foreign import, an unknown host function, a protocol-88 host function and an 8,800-byte operand stack: it rejected each one.
 
-Deployed and called on NEAR testnet in a rehearsal on 2026-10-31, with throwaway accounts (see the main [README](../README.md#status)). The sandbox tests have not run here (no sandbox binary or Docker in the build environment): `tests/test_contract_sandbox.py` deploys and calls the files against a sandbox you start.
+Deployed and called on NEAR testnet in a rehearsal on 2026-10-31, with throwaway accounts, and since 2026-11-01 as the hosted bot's vault, `vault.holdup-soleimani.testnet`, with the token `husd.holdup-soleimani.testnet` (see the main [README](../README.md#status)). The sandbox tests have not run here (no sandbox binary or Docker in the build environment): `tests/test_contract_sandbox.py` deploys and calls the files against a sandbox you start.
 
 ## Configuration (`new`)
 
-`new(config: ConfigInput)` can be called once, by the vault account itself or by its parent account (the deployer, normally batching `CreateAccount`, `DeployContract` and `new` in one transaction). Anything else panics with `E_BAD_CONFIG`.
+`new(config: ConfigInput)` can be called once, by the vault account itself or by its parent account (the deployer). Anything else panics with `E_BAD_CONFIG`. `holdup deploy` calls it as the vault, in the transaction that deploys the code, signed with a temporary key it deletes later; the sandbox test batches `CreateAccount`, `DeployContract` and `new` in one transaction from the parent instead.
 
 | Field | JSON | Rule |
 |---|---|---|
@@ -195,15 +195,17 @@ NEAR_SANDBOX_URL=http://127.0.0.1:3030 .venv/bin/pytest -m sandbox tests/test_co
 
 If `rustup` tries to download 1.97.0 although `stable` is 1.97.0, run with `RUSTUP_TOOLCHAIN=stable` (the build script does this by itself).
 
-The sandbox test deploys both files from `res/` the way production does (create account, deploy and `new` in one transaction from the parent, then delete the vault's key), checks the code hash against `res/CODE_HASHES`, and runs registration, token deposit, a braked and cancelled payment, NEAR and token releases to an outside account, a failed payout refund, a guardian cancel, an instant internal payment to a trusted user, the private callback and deposit guards, and solvency. It needs a node with protocol 85+.
+The sandbox test deploys both files from `res/` (create account, deploy and `new` in one transaction from the parent, then delete the vault's key; `holdup deploy` splits the first step in two, see below), checks the code hash against `res/CODE_HASHES`, and runs registration, token deposit, a braked and cancelled payment, NEAR and token releases to an outside account, a failed payout refund, a guardian cancel, an instant internal payment to a trusted user, the private callback and deposit guards, and solvency. It needs a node with protocol 85+.
 
 ## Deploying (for `holdup/chain/deploy.py`)
 
-1. One transaction from the root to the vault account: `CreateAccount`, `Transfer` (code storage is about 3.2 NEAR, plus the reserve), `AddKey` (temporary full-access key), `DeployContract`, `new`. The root is the vault's parent, so it may call `new`.
-2. The same for the token: `new(owner_id, total_supply)` must come from the token account or its parent.
+1. For the vault: one transaction from the root creates the account (`CreateAccount`, `Transfer` for code storage of about 3.2 NEAR plus the reserve, `AddKey` with a temporary full-access key), and a second, signed by the vault with that key, runs `DeployContract` and `new`.
+2. The same for the token, which the deploy makes first: `new(owner_id, total_supply)` must come from the token account or its parent.
 3. Register the vault on each token (`storage_deposit`, 0.00125 NEAR).
 4. Users must be sub-accounts of the treasury that registers them (`deposit_near_for` from the parent), or register themselves.
-5. Delete the vault's key; `view_access_key_list` must be empty and `view_account.code_hash` must equal `res/CODE_HASHES`.
+5. Delete the token's and the vault's temporary keys; the vault's `view_access_key_list` must be empty and its `view_account.code_hash` must equal `res/CODE_HASHES`.
+
+The deploy also creates the oracle and the keeper, each with one function-call key for the vault, and the keyless payees of the training samples. The bot's deployment of 2026-11-01 ran these steps; its vault transactions are linked from the main [README](../README.md).
 
 With near-kit, `call` raises `ContractPanicError` when any receipt of the transaction failed. A `release` whose transfer fails (for example, a deleted payee account) therefore raises even though the vault settled it correctly as `failed` and refunded the sender: read the hold afterwards rather than treating that error as a failed release.
 

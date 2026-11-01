@@ -231,8 +231,9 @@ HoldUp puts in each request.
   the rules nor the models brake, the payment goes through after the normal wait.
 - **False brakes cost time.** An honest payment can wait up to 72 hours. ScamBench measures how
   often (README, ScamBench section). The live public-URL run on 2026-10-31 braked all six payments,
-  including two honest ones. The cause of one is fixed in commit 9e03a8b, not yet re-run live; the
-  other is the open issue under "A compromised or lying model".
+  including two honest ones. The cause of one is fixed in commit 9e03a8b, which has run live on
+  testnet since 2026-11-01 but has not met that case again; the other is the open issue under "A
+  compromised or lying model".
 - **One server, one secret.** HOLDUP_SECRET, the oracle key, the keeper key and the treasury key
   live on the same machine as the public web app.
 - **Quick tunnels.** No uptime guarantee, a new address on every restart, TLS terminated by
