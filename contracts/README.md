@@ -68,7 +68,7 @@ Rebuilding in another directory with the same toolchain produced byte-identical 
 
 `wasm-tools validate --features=-all,floats,mutable-global,sign-extension,saturating-float-to-int,bulk-memory,reference-types` (wasm-tools 1.263.0, the same wasmparser feature set nearcore configures) accepts both files; without `bulk-memory` it rejects them, which is expected for rustc 1.87+ and why protocol 84+ is required. The inspector was also run against hand-written modules using SIMD, multi-value, tail calls, atomics, a foreign import, an unknown host function, a protocol-88 host function and an 8,800-byte operand stack: it rejected each one.
 
-Not verified here: deploying and calling the files on a live node (no sandbox binary or Docker in the build environment). `tests/test_contract_sandbox.py` does exactly that against a sandbox you start.
+Deployed and called on NEAR testnet in a rehearsal on 2026-10-31, with throwaway accounts (see the main [README](../README.md#status)). The sandbox tests have not run here (no sandbox binary or Docker in the build environment): `tests/test_contract_sandbox.py` deploys and calls the files against a sandbox you start.
 
 ## Configuration (`new`)
 

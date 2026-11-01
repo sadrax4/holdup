@@ -2,19 +2,45 @@
 
 **Give AI the brakes, not the keys.**
 
+A scam that talks someone into paying ends in a payment the victim signs themselves, and on-chain
+that payment is final. HoldUp puts time between the decision and the settlement, and the sender can
+take the payment back while it waits.
+
 HoldUp is a Telegram payments bot on NEAR (with a web console that drives the same engine). Money
 sits in HoldVault, a contract with no access keys, no owner and no upgrade path. A payment to
 someone you have not trusted yet becomes a *hold*: it waits (5 minutes on a hosted bot, 20 seconds
 in the demo) while HoldUp checks it. If anything looks wrong, an oracle makes the wait longer and
-records why on-chain. The oracle's only key can call `extend_hold`, which can only add time, up to
-72 hours after the payment. It cannot release, cancel, redirect or move money. Only the sender, or a
-guardian the sender chose, can cancel, and the money then goes back to the sender. Anyone can
-release a hold once its time has come.
+records why on-chain. The oracle's only key is a NEAR function-call access key for `extend_hold`,
+which can only add time, up to 72 hours after the payment. It cannot release, cancel, redirect or
+move money. Only the sender, or a guardian the sender chose, can cancel, and the money then goes
+back to the sender. Anyone can release a hold once its time has come.
 
 The checks are deterministic rules (milliseconds, no model) plus open-weight models routed through
 the [Otari](https://otari.ai) gateway: triage, image reading, an investigator with web search, web
 fetch, code execution and HoldUp's own MCP server, a reviewer from another model family, and
 guardrails. When the AI step fails or runs out of budget, the brake stays on (fail-closed).
+
+**Try it.** On Telegram, open [@HoldUp_HoldUp_bot](https://t.me/HoldUp_HoldUp_bot), send `/start`,
+then `/demo`. Without Telegram: `make setup`, then `make demo-offline`, `make attack` and
+`make prove` (no network after setup, about two seconds each). Judges:
+[docs/JUDGES.md](docs/JUDGES.md) is the five-minute path.
+
+**What has run live** (dates are UTC). The AI checks ran on Otari on 2026-10-31: the scripted
+story, then six payments through the hosted server's public URL, both on the in-memory vault
+([docs/OTARI.md](docs/OTARI.md)). The same day a rehearsal with throwaway accounts deployed the
+contracts to NEAR testnet and ran three held payments on them with the AI checks off: one
+cancelled, one braked by the oracle and then cancelled, one released by the keeper. The only hosted
+run in the saved evidence used offline network mode (in-memory vault, simulated transactions, live
+Otari); each web page's footer and `/health` say which network the bot is on. What has not run
+live yet: [Status](#status).
+
+**Owner's NEAR testnet deployment (2026-11-01): the vault, oracle, keeper and token account ids
+will be listed here once it is done.**
+
+More: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (keys, attacks and limits),
+[docs/OTARI.md](docs/OTARI.md) (each rubric item, where it is in the code and what has run live),
+[docs/WHY_NOT.md](docs/WHY_NOT.md) (why not a multisig, a delay, a blocklist or a custodian) and
+[How this was built](#how-this-was-built).
 
 ## What the vault guarantees
 
@@ -63,15 +89,21 @@ Details, error codes, events and the tests behind each property: [contracts/READ
 
 ## Otari features used
 
-| Feature | Where |
-|---|---|
-| Open-weight models: `openai/gpt-oss-20b` (triage), `openai/gpt-oss-120b` (investigator), `z-ai/glm-5.3-flash` (images), `deepseek/deepseek-v4.1-flash-1017` (reviewer, another model family) | `holdup/risk/otari.py`, `holdup/risk/pipeline.py` |
-| Gateway tools `otari_web_search`, `otari_web_fetch`, `otari_code_execution` (every number the investigator relies on is computed) | investigator and reviewer steps in `pipeline.py` |
-| MCP servers passed per request: HoldUp's `near-intel` server with a bearer token that only covers one hold's parties | `pipeline.py`, `holdup/mcp_server.py` |
-| Request guardrails: `checker-injection` in monitor mode on triage and the investigator, and a blocking gate that keeps flagged text away from the tool-using models; `gpt-oss-safeguard-120b` and `llama-guard-4-12b` behind HoldUp's guardrail endpoint | `pipeline.py`, `holdup/guard.py`, `holdup/risk/guard_models.py` |
-| Response headers (`Otari-Provider`, `Otari-Model`, `Otari-Fallback`, `Otari-Attempt-Count`, `Otari-Request-ID`, `Otari-Guardrails`) and `usage.cost_usd`, shown per step on `/why/<hold>` and hashed into the on-chain evidence | `otari.py`, `holdup/web/` |
-| Streaming for tool-using calls, typed errors (budget, guardrail, all candidates failed, firewall), an app-level fallback chain across model families | `otari.py` |
-| Per-user keys, budgets and spend ceilings (`organizations/me/keys`, `budgets`, `spend-ceilings`) | `holdup/risk/budgets.py` |
+One row per item of the Otari "Devs Wilding" rubric. "Live" means a saved record of the app
+running against the hosted gateway on 2026-10-31; request ids, costs and what is still open are in
+[docs/OTARI.md](docs/OTARI.md).
+
+| Rubric item | What HoldUp does | Live | Where |
+|---|---|---|---|
+| Open-weight models | `openai/gpt-oss-20b` (triage and the guardrail gate), `openai/gpt-oss-120b` (investigator), `deepseek/deepseek-v4.1-flash-1017` (reviewer, another model family), `z-ai/glm-5.3-flash` (images); `gpt-oss-safeguard-120b` classifies text behind HoldUp's guardrail endpoint | Yes: 3 models in 4 roles. Images: not yet | `holdup/risk/otari.py`, `holdup/risk/pipeline.py` |
+| Model routing and fallbacks | Catalog ids, so the gateway picks the provider; provider, fallback, attempts and request id recorded per step, shown on `/why` and put in the evidence whose sha256 goes on-chain; HoldUp's own fallback chain across model families | Routing: yes. A fallback: not yet | `otari.py` |
+| MCP integrations | HoldUp's `near-intel` MCP server, passed per request with a bearer token that only covers one hold's sender and payee | Yes | `pipeline.py`, `holdup/mcp_server.py` |
+| Web search or web fetch | `otari_web_search` and, when the message has links, `otari_web_fetch` for the investigator | Search: yes. Fetch: not yet shown working | `pipeline.py` |
+| Code execution | `otari_code_execution` for the investigator and the reviewer, asked to compute every number they rely on; HoldUp redoes the arithmetic | Yes | `pipeline.py`, `otari.py` |
+| Budgets and spending limits | A budget refusal from the gateway becomes a fail-closed brake (`BUDGET_EXHAUSTED`); `/budget` and `/stats` show the spend | Not yet | `otari.py`, `holdup/engine.py` |
+| Multiple models serving distinct roles | Triage, gate, investigator, reviewer, vision and the guardrail classifier | Yes: 4 roles | `pipeline.py` |
+| Guardrails | `checker-injection`, served by HoldUp's `/validate`: monitor mode on triage and the investigator, block mode on a gate that keeps flagged text away from the models with tools | Monitor: yes. Block: partly | `pipeline.py`, `holdup/guard.py`, `holdup/risk/guard_models.py` |
+| Per-user budgets | Each account is mapped to one key in `OTARI_USER_KEYS`, each meant to carry its own spend ceiling. The ceilings are set in the Otari dashboard, because the API answers 401 to an ordinary key | Not yet | `holdup/risk/budgets.py` |
 
 ## Try it offline
 
@@ -142,22 +174,84 @@ long-polls Telegram. A supervisor restarts whatever fails. `status`, `logs`, `ur
 [docs/SERVER.md](docs/SERVER.md) explains how it works. A quick tunnel's address changes whenever
 it restarts and has no uptime guarantee.
 
+## ScamBench
+
+`bench/` holds ScamBench 1.1: 170 labelled payment requests, 85 scams that each follow a public US
+or UK government warning and 85 honest payments, many of them built to look risky (real deadlines,
+busy shops, brand-new accounts). Items have a fixed dev (102) or test (68) split. They were written
+with AI assistance and have had no independent annotation; [bench/DATASHEET.md](bench/DATASHEET.md)
+says how they were made and what they cannot show.
+
+Counts are dev / test.
+
+| What brakes | Scams braked | Honest payments braked |
+|---|---|---|
+| Rules only | 36 of 53 / 22 of 32 | 3 of 49 / 0 of 36 |
+| Rules and live triage answers, the other models silent (floor) | 43 of 53 / 25 of 32 | 3 of 49 / 1 of 36 |
+| Same, the reviewer always agreeing (ceiling) | 52 of 53 / 31 of 32 | 20 of 49 / 9 of 36 |
+| The floor before commit 009c73e weighed the models' findings | 51 of 53 / 30 of 32 | 19 of 49 / 9 of 36 |
+
+- Rules: `make bench-rules` reproduces them offline (`SPLIT=all` for every row). The rules were
+  tuned with both splits in view, so both splits are in-sample. On 24 items written outside the set
+  they braked 5 of 12 scams and 1 of 12 honest payments. Details:
+  [bench/results-rules.md](bench/results-rules.md).
+- AI layer: the triage model (`gpt-oss-20b`) answered all 170 items live on Otari on 2026-10-31.
+  Those cached answers were replayed through the pipeline. In the floor the investigator and the
+  reviewer answer "nothing found"; in the ceiling the reviewer answers "hold it" every time it is
+  asked. The live pipeline lies between the two; it has not been run on the whole set.
+- Commit 009c73e traded some scams braked for far fewer honest payments braked.
+- The test split is not clean held-out data for the AI rows either: earlier work had seen test
+  results, and the weighing leans on rules tuned on test.
+- The cached answers and the scoring scripts are not in this repository. The message of commit
+  009c73e gives the floor before and after and the ceiling's scam counts; the same AI-row counts
+  came out on commit 9e03a8b (rerun 2026-11-01).
+- With 32 scams and 36 honest items in test, a rate on it carries roughly 10 to 17 percentage
+  points of uncertainty either way (DATASHEET, section 4a).
+
 ## Status
 
-- Verified offline: the Python and Rust test suites, the offline demo and the attack walkthrough.
-  The contracts are built with cargo-near 0.22.0, checked against nearcore's preparation rules and
-  validated with wasm-tools; rebuilding gives byte-identical files.
-- Not yet run: a testnet deployment, `make demo` on testnet, and the sandbox contract tests
-  (`tests/test_contract_sandbox.py`, which need a running NEAR sandbox).
-- Otari: individual gateway features were probed live and those responses are recorded in
-  `fixtures/otari/recorded/`. The full pipeline has run here only on recorded answers
-  (`fixtures/otari/*.json`, marked synthetic); it has not run live end to end.
-- The Telegram bot (long polling by default, a webhook with `TELEGRAM_MODE=webhook`) is tested
-  against a fake Bot API, in-process and through the whole server setup; it has not served real
-  users yet.
-- The server setup (`scripts/server.sh`) was rehearsed end to end as an ordinary user with stand-ins
-  for cloudflared, Telegram and NEAR testnet; the real tunnels and the real testnet step have not
-  run yet.
+Checked on 2026-11-01 at commit 9e03a8b unless a line gives another date. Dates are UTC.
+
+- Offline: `make test` (1273 passed, 23 skipped) and the contract unit tests (80 vault tests, 6
+  token tests) pass; `make demo-offline`, `make attack` and `make prove` run in about two seconds
+  each. The contracts are built with cargo-near 0.22.0, checked against nearcore's preparation
+  rules and validated with wasm-tools; rebuilding them in a scratch copy gives byte-identical files.
+- AI checks, live (2026-10-31): the scripted story ran with its AI steps live on Otari, on the
+  in-memory vault. Later that day the hosted server was driven through its public URL with live
+  Otari, the in-memory vault and simulated transactions: six payments, 18 model steps, USD 0.0434
+  in total, with Otari calling HoldUp's MCP server and guardrail endpoint. Details, request ids and
+  what is still open: [docs/OTARI.md](docs/OTARI.md).
+- What that run showed, and what commit 9e03a8b changed: the payee's reputation counted the hold
+  under check, the 20-second demo hold was shorter than the check, an empty model answer ended the
+  step, the web tools went unused once MCP was attached, and a guardrail block was shown as a
+  failure. 9e03a8b fixes these; the fixes have not run live yet. One honest brake in that run has
+  no fix yet (the open issue below).
+- Hosted bot: one machine, a home server, reached only through two Cloudflare quick tunnels, with
+  the bot long-polling Telegram (`scripts/server.sh`). During the 2026-10-31 run its `/health`
+  showed the Telegram poller running for `@HoldUp_HoldUp_bot` with no error; the saved evidence of
+  that run comes from the web console, not from a Telegram chat. On 2026-11-01 the hosted server
+  still ran a build from before 9e03a8b: its pages said new payees wait 20 seconds.
+- NEAR testnet (2026-10-31, a rehearsal with throwaway accounts): the deploy (the root spent 9.57
+  test NEAR), `verify-deploy` and `prove`, then onboarding and three held payments (a cancel, an
+  oracle brake followed by a cancel, a keeper release), all as real transactions with the AI checks
+  off. A new key was not visible at final finality for a block or two; commit 65d3b96 fixed that,
+  and a deploy stopped on purpose then resumed where it stopped. `make demo` on testnet has not
+  run. The owner's own deployment: see the line near the top of this page.
+- Not yet run: the sandbox tests (`tests/test_contract_sandbox.py`, `tests/test_chain_sandbox.py`;
+  they need a running NEAR sandbox). Not yet shown live: the image step, a model fallback, a budget
+  refusal, per-user keys and the `safety` guardrail profile.
+- Known open issue: a model's claim of text aimed at the checker still brakes for 72 hours on its
+  own, even when the guardrail passed the text (seen live on 2026-10-31 on an honest message that
+  said "pre-approved"). A change that let the guardrail's pass override the models was rejected in
+  review: it released a payment even when every model, the reviewer included, read an injection
+  that the guardrail had missed.
+
+## How this was built
+
+HoldUp was built by its author with substantial help from an AI coding assistant (Claude Code).
+The assistant wrote most of the code and most of the documentation in this repository, under the
+author's direction. The ScamBench items were also written with AI assistance, as
+[bench/DATASHEET.md](bench/DATASHEET.md) says.
 
 ## License
 
