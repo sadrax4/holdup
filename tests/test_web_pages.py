@@ -303,6 +303,22 @@ def test_why_page_lists_every_step(world: World) -> None:
     assert "c0f2e62f40e6c23c" in text
 
 
+def test_why_page_shows_a_guardrail_block_and_the_steps_notes(world: World) -> None:
+    """Live holds #0 and #4: the gate's block read as a red 'failed: request_refused' with nothing to say why."""
+    hold = world.braked_hold()
+    note = (
+        "the gateway answered 403 with no error code while a guardrail in block mode was on the request: "
+        "read as that guardrail blocking the text"
+    )
+    gate = StepRecord("gate", "openai/gpt-oss-20b", attempts=1, latency_ms=298, error="guardrail_violation",
+                      guardrail={"profile": "checker-injection", "mode": "block", "verdict": "blocked"}, notes=[note])
+    world.engine.why_views[hold.id].steps.insert(1, gate)
+    text = visible(world.client.get(f"/why/{hold.id}").text)
+    assert "blocked the text" in text and "Error guardrail_violation" not in text
+    assert "Guardrail checker-injection, block: blocked" in text
+    assert f"Notes {note}" in text
+
+
 # ----------------------------------------------------------------------
 # proof, stats and export
 # ----------------------------------------------------------------------

@@ -61,6 +61,8 @@
         {% if step.blocked %}<dt>Outcome</dt><dd>The guardrail blocked the text, so the later steps only saw
           facts HoldUp extracted from it ({{ step.error }})</dd>
         {% elif step.error %}<dt>Error</dt><dd>{{ step.error }}</dd>{% endif %}
+        {% if step.notes %}<dt>Notes</dt>
+        <dd>{% for note in step.notes %}{{ note }}{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
       </dl>
     </li>
     {% endfor %}

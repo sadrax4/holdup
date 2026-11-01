@@ -62,6 +62,11 @@ REASON_LABELS: dict[Reason, str] = {
 }
 
 
+STILL_CHECKING = "still_checking"
+"""The source of the brake that keeps a hold while its check outlasts it: not a failure, a wait."""
+STILL_CHECKING_LABEL = "AI check still running, so the brake stays on"
+
+
 def reasons_from_bits(bits: int) -> list[Reason]:
     return [r for r in Reason if bits & r.value]
 
@@ -307,7 +312,7 @@ class Finding:
     reason: Reason
     detail: str
     # What found it: "rules", "triage", "vision", "mcp", "web_fetch", "web_search", "code_execution",
-    # "guardrail", "reviewer" or "fail_closed".
+    # "guardrail", "reviewer", "fail_closed" or "still_checking".
     source: str
     model: str | None = None
     citations: list[str] = field(default_factory=list)
@@ -342,6 +347,9 @@ class StepRecord:
     error: str | None = None
     prompt_sha256: str | None = None
     served_model: str | None = None  # the provider's own name for the model (Otari-Model header)
+    # What changed the step's course: a refusal's status and detail, a tool the workspace has off,
+    # an answer that was unusable and went to the next model. Shown on /why, never put on-chain.
+    notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

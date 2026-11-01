@@ -7,6 +7,7 @@ import json
 import shutil
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,8 @@ import httpx
 import pytest
 
 from holdup.config import Settings
-from holdup.models import Finding, Hold, HoldStatus, PaymentContext, Reason, StepRecord, Verdict
+from holdup.intel import PayeeIntel
+from holdup.models import Finding, Hold, HoldStatus, PayeeStats, PaymentContext, Reason, StepRecord, Verdict
 from holdup.risk import pipeline as P
 from holdup.risk.otari import INVESTIGATOR_MODEL, REVIEWER_MODEL, TRIAGE_MODEL, VISION_MODEL, OtariClient, family
 from holdup.risk.prompts.contracts import AmountCheck
@@ -168,7 +170,10 @@ async def test_hero_requests_have_the_documented_shapes() -> None:
     ]
     (server,) = investigator["mcp_servers"]
     assert server["name"] == "near-intel" and server["url"] == "https://holdup.example.org/mcp"
-    assert server["authorization_token"] == "m7" and "fetch_page" in server["allowed_tools"]
+    assert server["authorization_token"] == "m7"
+    # The gateway's web fetch reads the link, so near-intel does not offer its own page reader beside it.
+    assert server["allowed_tools"] == ["payee_profile", "payee_reputation", "sender_history", "hold_status"]
+    assert server["purpose_hint"] == P.MCP_PURPOSE_NO_PAGES
     assert investigator["max_tool_iterations"] == 8
 
     for body in (triage, gate, investigator):
@@ -232,6 +237,30 @@ async def test_a_benign_payment_comes_back_clean() -> None:
     assert not verdict.brake and verdict.hold_for_ms == 0 and verdict.findings == []
     assert [r.step for r in transport.requests] == ["triage", "investigator"]
     assert "triage: nothing found" in verdict.summary
+
+
+async def test_the_payee_facts_leave_out_the_senders_own_payments() -> None:
+    """The reviewer read 'payments to it that HoldUp held: 1, released: 0' for a first payment: its own hold."""
+
+    class Vault:
+        async def get_payee_stats(self, account_id: str) -> PayeeStats:
+            return PayeeStats(holds=2, flagged=1, released=1, last_flag_ms=5)
+
+        async def get_holds_for(self, account_id: str, limit: int = 50) -> list[Hold]:
+            own = make_hold("ravi.testnet", 12.5)
+            return [replace(own, flagged=True)] if account_id == own.sender else []
+
+        async def account_exists(self, account_id: str) -> bool:
+            return True
+
+        async def now_ms(self) -> int:
+            return 0
+
+    risk, _ = make_risk("benign", intel=PayeeIntel(SETTINGS, Vault(), fixtures={}))  # type: ignore[arg-type]
+    case = risk._case(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    facts = await risk._payee(case)
+    assert facts is not None and (facts["holds"], facts["released"]) == (1, 1)
+    assert "- payments of other senders to it that HoldUp held: 1" in risk._facts(case, payee=facts)
 
 
 async def test_an_injection_alone_keeps_the_brake_on() -> None:
@@ -404,9 +433,11 @@ async def test_a_phishing_claim_after_a_failed_fetch_is_dropped(tmp_path: Path) 
     hero = json.loads((FIXTURES_DIR / "hero.json").read_text())["steps"]["triage"]
     steps = {"triage": hero, "investigator": investigator_answer(content, [failed])}
     folder = scenario_dir(tmp_path, "deadlink", steps)
-    risk, _ = make_risk("deadlink", fixtures_dir=folder)
+    risk, transport = make_risk("deadlink", fixtures_dir=folder)
     risk.guard_url = None  # as on 127.0.0.1: the message is withheld from the investigator
     verdict = await risk.assess(make_hold("safe-wallet-77.testnet", 50), PaymentContext(forwarded_text=HERO))
+    # fetch_page reads no private address either, so the investigator is not asked again for the page
+    assert [r.step for r in transport.requests].count("investigator") == 1
 
     assert {f.reason for f in by(verdict, "investigator")} == {Reason.NEW_ACCOUNT, Reason.MULE_PATTERN}
     assert not any(f.reason == Reason.PHISHING_LINK for f in verdict.findings)
@@ -526,7 +557,8 @@ async def test_a_phishing_page_read_through_near_intel_counts_once_its_log_shows
     offered = {t["type"] for r in transport.requests if r.step == "investigator" for t in r.body["tools"]}
     assert "otari_web_fetch" in offered
     # Replayed without a log while web fetch was offered: nothing shows that fetch_page read the page.
-    risk, _ = make_risk("paged", fixtures_dir=folder)
+    scenario_dir(tmp_path, "unfailed", {"investigator": investigator_answer(content)})
+    risk, _ = make_risk("unfailed", fixtures_dir=folder)
     assert await phishing() == []
 
 
@@ -1039,3 +1071,166 @@ async def test_approval_words_passed_on_as_context_still_go_through_the_gate() -
     risk.guard_url = None
     await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
     assert "withheld" in client.transport.requests[-1].body["messages"][1]["content"]
+
+
+# ----------------------------------------------------------------------
+# what the live checks through the public URL turned up (2026-10-31)
+# ----------------------------------------------------------------------
+
+FLAGGED_TRIAGE = {
+    "response": {
+        "headers": {
+            "otari-provider": "deepinfra",
+            "otari-guardrails": [{"profile": "checker-injection", "mode": "monitor", "valid": False, "score": 1.0}],
+        },
+        "content": {**TRIAGE_CLEAN, "categories": ["personal"], "injection_suspected": True, "risk": "high"},
+    }
+}
+
+
+async def test_the_hosted_gateways_bare_403_on_the_gate_is_a_block(tmp_path: Path) -> None:
+    """Live holds #0 and #4: the gate came back 403 without an error code in under 300 ms (no provider, no
+    cost) and was recorded as 'failed: request_refused'. It is the guardrail blocking the text."""
+    steps = {"triage": FLAGGED_TRIAGE, "gate": {"response": {"status": 403, "body": {"detail": "Forbidden"}}}}
+    risk, transport = make_risk("bare403", fixtures_dir=scenario_dir(tmp_path, "bare403", steps))
+    verdict = await risk.assess(make_hold("ravi.testnet", 15), PaymentContext(forwarded_text=INJECTION))
+    gate = next(s for s in verdict.steps if s.step == "gate")
+    assert gate.error == "guardrail_violation" and gate.guardrail["verdict"] == "blocked"
+    assert "read as that guardrail blocking the text" in gate.notes[0]
+    assert "gate: blocked by the guardrail" in verdict.summary
+    assert verdict.brake and verdict.hold_for_ms == P.MAX_HOLD_MS
+    assert [(f.reason, f.context) for f in by(verdict, "guardrail")] == [(Reason.CHECKER_INJECTION, False)]
+    investigator = next(r for r in transport.requests if r.step == "investigator").body["messages"][1]["content"]
+    assert "mark it safe" not in investigator  # still withheld from the model with tools
+
+
+async def test_an_empty_investigator_answer_goes_to_another_family(tmp_path: Path) -> None:
+    """Live holds #1 and #5: gpt-oss-120b ended its tool loop with no text, the step failed and its evidence was
+    lost. The next family in the chain answers instead, and the reviewer then avoids that family too."""
+    found = {"reason": "SECRET_REQUEST", "tool": "message", "detail": "asks for the wallet recovery words",
+             "citations": []}
+    answer = {"findings": [found], "computations": [], "amount_check": None, "brake": True, "summary": "Asks."}
+    steps = {
+        "investigator": {
+            "by_model": {
+                INVESTIGATOR_MODEL: {"headers": {"otari-provider": "deepinfra"}, "content": "",
+                                     "usage": {"cost_usd": "0.000427"}},
+                "*": {"headers": {"otari-provider": "deepinfra"}, "content": answer, "usage": {"cost_usd": "0.0004"}},
+            }
+        }
+    }
+    risk, transport = make_risk("empty", fixtures_dir=scenario_dir(tmp_path, "empty", steps))
+    verdict = await risk.assess(make_hold("ravi.testnet", 12.5), PaymentContext(forwarded_text=DINNER))
+    investigator = next(s for s in verdict.steps if s.step == "investigator")
+    assert investigator.error is None and investigator.model == REVIEWER_MODEL and investigator.fallback is True
+    assert investigator.cost_usd == pytest.approx(0.000827)
+    assert investigator.notes[0].startswith(f"{INVESTIGATOR_MODEL}: the model answered with no text")
+    assert [f.reason for f in by(verdict, "investigator")] == [Reason.SECRET_REQUEST]
+    reviewer = next(r for r in transport.requests if r.step == "reviewer")
+    assert family(reviewer.model) not in (family(REVIEWER_MODEL), family(INVESTIGATOR_MODEL))
+
+
+async def test_a_workspace_without_web_access_is_noted_and_near_intel_reads_the_page_again() -> None:
+    """Live: a run without search left no trace on /why; only the server log said 'retrying without'."""
+    calls: list[dict[str, Any]] = [{"tool": "payee_profile", "args": {"account_id": "earlier.check"}}]
+    bodies: list[dict[str, Any]] = []
+    content = {"findings": [], "computations": [], "amount_check": None, "brake": False, "summary": "Clean."}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if not body.get("stream"):
+            message = {"role": "assistant", "content": json.dumps(TRIAGE_CLEAN)}
+            completion = {"id": "t", "object": "chat.completion", "created": 1, "model": body["model"]}
+            choices = [{"index": 0, "message": message, "finish_reason": "stop"}]
+            return httpx.Response(200, json={**completion, "choices": choices, "usage": {"cost_usd": "0.00006"}})
+        if any(t["type"] == "otari_web_search" for t in body.get("tools") or []):
+            return httpx.Response(403, json={"detail": "web access is not enabled for this workspace"})
+        calls.append({"tool": "payee_profile", "args": {"account_id": "safe-wallet-77.testnet"}})
+        calls.append({"tool": "fetch_page", "args": {"url": VERIFY_URL, "refused": "not fetched: too slow"}})
+        chunk = {"id": "c", "object": "chat.completion.chunk", "created": 1, "model": body["model"]}
+        events = [{**chunk, "choices": [{"index": 0, "delta": {"content": json.dumps(content)},
+                                         "finish_reason": "stop"}]}]
+        text = "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=text.encode())
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = OtariClient(SETTINGS, http=http, api_key="otk_v1_us_test")
+    risk = P.OtariRisk(SETTINGS, client, Intel(), Rules(), "https://holdup.example.org/mcp", None,
+                       mcp_token_fn=lambda h: f"m{h}", mcp_log=lambda hold_id: list(calls))
+    verdict = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=HERO))
+    first, second = (b for b in bodies if b.get("stream"))
+    assert "fetch_page" not in first["mcp_servers"][0]["allowed_tools"]
+    assert [t["type"] for t in second["tools"]] == ["otari_code_execution"]
+    assert "fetch_page" in second["mcp_servers"][0]["allowed_tools"]  # the page reader comes back
+    investigator = next(s for s in verdict.steps if s.step == "investigator")
+    assert investigator.notes[0].startswith("otari_web_fetch, otari_web_search: not enabled for this workspace")
+    # The near-intel calls of this check are on the step; the earlier check's call is not.
+    assert [c for c in investigator.tool_calls if c.get("server") == "near-intel"] == [
+        {"name": "payee_profile", "server": "near-intel", "status": "done"},
+        {"name": "fetch_page", "server": "near-intel", "status": "refused"},
+    ]
+
+
+PAGE_URL = "https://coinhaven-verify.example/login"
+UNLOCK = f"Your wallet is locked. Unlock it within the hour here: {PAGE_URL} then send 5 to restore access."
+
+
+async def test_a_link_the_gateways_fetch_could_not_read_is_read_again_with_fetch_page(tmp_path: Path) -> None:
+    """Review of the live fixes: with the gateway's web fetch offered, near-intel's fetch_page is left out, so a
+    fetch of the gateway that failed left the investigator no page reader, and a phishing page went unread. The
+    model that answered is asked again with fetch_page in its place; what it found first still counts, and the
+    reviewer gives its opinion. When that request fails, the check fails closed."""
+    failed = {"id": "otari_wf_1", "type": "web_fetch", "status": "failed", "url": PAGE_URL,
+              "error": {"provider": "builtin", "status": 403, "tag": "fetch_failed", "retryable": False}}
+    hurried = {"reason": "URGENCY", "tool": "message", "detail": "asks to unlock the wallet within the hour"}
+    phishing = {"reason": "PHISHING_LINK", "tool": "near-intel", "detail": "fetch_page shows a wallet login form"}
+    first = investigator_answer({"findings": [hurried], "brake": False}, [failed])
+    first["response"]["usage"] = {"cost_usd": "0.0011"}
+    again = investigator_answer({"findings": [phishing], "brake": True})
+    again["response"]["usage"] = {"cost_usd": "0.0009"}
+    unreachable = {"status": 502, "body": {"detail": "All upstream providers failed"}}
+    calls: list[dict[str, Any]] = []
+
+    def route(step: str, body: dict[str, Any]) -> str:
+        if step != "investigator" or any(t["type"] == P.WEB_FETCH for t in body.get("tools") or []):
+            return "first"
+        calls.append({"tool": "fetch_page", "args": {"url": PAGE_URL}})
+        return "again"
+
+    async def checked(answers: dict[str, Any]) -> tuple[Verdict, list[Any], StepRecord]:
+        folder = tmp_path / f"case{len(list(tmp_path.iterdir()))}"
+        folder.mkdir()
+        for name, answer in answers.items():
+            scenario_dir(folder, name, {"investigator": answer})
+        risk, transport = make_risk(route, fixtures_dir=folder, mcp_log=lambda hold_id: list(calls))
+        verdict = await risk.assess(make_hold("safe-wallet-77.testnet", 5), PaymentContext(forwarded_text=UNLOCK))
+        step = next(s for s in verdict.steps if s.step == "investigator")
+        return verdict, list(transport.requests), step
+
+    note = "otari_web_fetch: the gateway could not read a link of the message, so the request was sent again"
+    verdict, requests, step = await checked({"first": first, "again": again})
+    asked = [r for r in requests if r.step == "investigator"]
+    assert [r.model for r in asked] == [INVESTIGATOR_MODEL, INVESTIGATOR_MODEL]
+    assert [P.WEB_FETCH in {t["type"] for t in r.body["tools"]} for r in asked] == [True, False]
+    assert ["fetch_page" in r.body["mcp_servers"][0]["allowed_tools"] for r in asked] == [False, True]
+    assert "reviewer" in [r.step for r in requests]
+    assert verdict.brake
+    assert [(f.reason, f.source, f.citations) for f in verdict.findings if not f.context] == [
+        (Reason.PHISHING_LINK, "mcp", [PAGE_URL]),
+        (Reason.URGENCY, "investigator", []),
+    ]
+    assert step.error is None and step.notes[0].startswith(note)
+    assert [(c["name"], c["status"]) for c in step.tool_calls] == [
+        ("otari_web_fetch", "failed"),
+        ("fetch_page", "done"),
+    ]
+    assert step.cost_usd == pytest.approx(0.002)
+
+    calls.clear()
+    verdict, requests, step = await checked({"first": investigator_answer({"findings": []}, [failed]),
+                                              "again": unreachable})
+    assert [r.step for r in requests].count("investigator") == 2 and "reviewer" in [r.step for r in requests]
+    assert verdict.brake and verdict.hold_for_ms == HOUR and verdict.summary.startswith("fail-closed")
+    assert step.error is not None and step.notes[0].startswith(note)
+    assert [(c["name"], c["status"]) for c in step.tool_calls] == [("otari_web_fetch", "failed")]

@@ -165,8 +165,62 @@ async def test_payee_reputation_counts_reports() -> None:
     async with served() as world:
         result = await call(world, 5, "payee_reputation", account_id="safe-wallet-77.testnet")
     record = result.structured_content
-    assert (record["reports"], record["recent_reports"], record["holds"]) == (2, True, 3)
-    assert "each sender once" in record["meaning"]
+    # Hold 5, the one being checked, is one of the 3 holds and 3 flags: only the other senders' count.
+    assert (record["reports"], record["recent_reports"], record["holds"], record["flagged"]) == (2, True, 2, 2)
+    assert "each sender once" in record["meaning"] and "is not a report" in record["meaning"]
+
+
+async def test_a_holds_own_flag_is_not_the_payees_record() -> None:
+    """Live hold #2: a dinner payment to ravi.testnet outlasted its 20 s hold, so its own check flagged it;
+    payee_reputation then showed one flagged hold and the investigator braked 24 h on 'payee reported'."""
+    async with served() as world:
+        world.vault.holds[12] = hold(12, PRIYA, "ravi.testnet", HoldStatus.HELD, flagged=True)
+        world.vault.stats["ravi.testnet"] = PayeeStats(holds=2, flagged=1, released=1, last_flag_ms=NOW)
+        reputation = await call(world, 12, "payee_reputation", account_id="ravi.testnet")
+        profile = await call(world, 12, "payee_profile", account_id="ravi.testnet")
+    record = reputation.structured_content
+    assert (record["holds"], record["flagged"], record["released"], record["last_flag_ms"]) == (1, 0, 1, None)
+    assert (record["reports"], record["recent_reports"]) == (0, False)
+    assert profile.structured_content["reputation"]["flagged"] == 0  # the same record inside the profile
+
+
+async def test_the_senders_own_earlier_payments_are_left_out_of_the_payees_record() -> None:
+    async with served() as world:
+        # Dana paid northwindpaper.testnet four times (two released, one cancelled after a flag, one held now);
+        # another sender's cancel after a flag stays.
+        world.vault.stats["northwindpaper.testnet"] = PayeeStats(
+            holds=5, flagged=2, cancelled=2, cancelled_after_flag=2, released=2, last_report_ms=NOW - HOUR
+        )
+        result = await call(world, 9, "payee_reputation", account_id="northwindpaper.testnet")
+    record = result.structured_content
+    baseline = load_payee_fixtures()["payees"]["northwindpaper.testnet"]["reputation"]
+    assert (record["holds"], record["released"]) == (1 + baseline["holds"], baseline["released"])
+    assert (record["flagged"], record["cancelled"], record["reports"], record["recent_reports"]) == (1, 1, 1, True)
+
+
+async def test_the_senders_own_latest_report_and_flag_leave_no_time_behind() -> None:
+    """Review of the live fixes: with another sender's report left, the times stayed, so the sender's own report
+    an hour ago read as a recent report of other senders."""
+    async with served() as world:
+        world.vault.holds[3] = hold(3, DANA, "northwindpaper.testnet", HoldStatus.CANCELLED, age_h=2, flagged=True)
+        world.vault.stats["northwindpaper.testnet"] = PayeeStats(
+            holds=5, flagged=2, cancelled=2, cancelled_after_flag=2, released=2,
+            last_flag_ms=NOW - 2 * HOUR + 60_000, last_report_ms=NOW - HOUR,
+        )
+        result = await call(world, 9, "payee_reputation", account_id="northwindpaper.testnet")
+    record = result.structured_content
+    assert (record["reports"], record["last_report_ms"], record["recent_reports"]) == (1, None, False)
+    assert (record["flagged"], record["last_flag_ms"]) == (1, None)  # no hold says when it was flagged
+
+
+async def test_unreadable_payments_leave_the_reputation_unavailable() -> None:
+    async def broken(account_id: str, limit: int = 50) -> list[Hold]:
+        raise TimeoutError
+
+    async with served() as world:
+        world.vault.get_holds_for = broken  # type: ignore[method-assign]
+        result = await call(world, 5, "payee_reputation", account_id="safe-wallet-77.testnet")
+    assert "statistics are unavailable" in error_text(result)
 
 
 async def test_old_reports_are_not_recent_after_a_fresh_flag() -> None:
@@ -186,6 +240,22 @@ async def test_sender_history_summarizes_earlier_payments() -> None:
     assert history["released_amounts"] == {HUSD: "1850000000"}
     assert history["first_payment_ms"] == NOW - 24 * 90 * HOUR
     assert history["last_release_ms"] == NOW - 24 * 60 * HOUR + HOUR
+
+
+async def test_the_history_tools_default_to_the_holds_own_parties() -> None:
+    """Live hold #1: the facts never name the sender, so the model guessed one and the call was refused."""
+    async with served() as world, world.client(9) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+        history = await client.call_tool("sender_history", {})
+        status = await client.call_tool("hold_status", {})
+        guessed = await client.call_tool("sender_history", {"sender": "unknown_sender.testnet"})
+    assert not tools["sender_history"].input_schema.get("required")
+    found = history.structured_content
+    assert (found["sender"], found["payee"]) == (DANA, "northwindpaper.testnet")
+    assert history.structured_content["earlier_payments"] == 3
+    assert status.structured_content["hold_id"] == 9
+    assert "only covers the sender and the payee" in error_text(guessed)  # a guess is still refused
+    assert world.calls[:2] == [(9, "sender_history", {}), (9, "hold_status", {})]
 
 
 async def test_hold_status_is_limited_to_the_tokens_hold() -> None:

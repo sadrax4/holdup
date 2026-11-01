@@ -415,6 +415,8 @@ async def test_prove_stats_and_budget(dialog: Dialog, engine: FakeEngine) -> Non
     assert "replaying recorded Otari responses" in budget.text
     assert "$0.0213 over 9 checks" in budget.text
     assert "fail-closed" in budget.text
+    # Live: it claimed "a hard ceiling", which nothing on the server could show or check.
+    assert "hard ceiling" not in budget.text and "spend limit on the AI key" in budget.text
 
 
 async def test_help_lists_every_command(dialog: Dialog) -> None:

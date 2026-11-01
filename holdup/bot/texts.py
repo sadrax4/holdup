@@ -316,8 +316,9 @@ def budget_text(settings: Settings, stats: Mapping[str, Any]) -> str:
             f"AI checks: {_MODES.get(settings.otari_mode, settings.otari_mode)}.",
             f"Spent so far on this server: ${cost:.4f} over {stats.get('ai_checks', 0)} checks.",
             (
-                "The AI budget has a hard ceiling. If it runs out, payments stay on hold (fail-closed) "
-                "instead of going through without a check."
+                # Nothing here can read the gateway's budgets, so this says what HoldUp does, not that one is set.
+                "If the gateway refuses a check because a spend limit on the AI key is reached, the payment stays "
+                "on hold (fail-closed) instead of going through without a check."
             ),
         ]
     )

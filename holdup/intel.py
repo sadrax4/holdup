@@ -21,7 +21,7 @@ import re
 import socket
 import time
 import zlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
@@ -32,6 +32,7 @@ import httpx
 
 from .config import Settings
 from .interfaces import VaultPort
+from .models import Hold, HoldStatus
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,37 @@ FASTNEAR_TX_API = {
     "mainnet": "https://tx.main.fastnear.com",
 }
 MAX_SIGNER_LOOKUPS = 40
+OWN_PAYMENTS_WINDOW = 100
+"""How many of a sender's latest payments ``others_reputation`` looks through (the vault's page limit)."""
+
+
+def without_payments(record: dict[str, Any], holds: Iterable[Hold]) -> dict[str, Any]:
+    """A payee's vault statistics ``record`` less what ``holds``, payments of one sender to it, added.
+
+    The vault counts a payment that is held (not one paid instantly) once in ``holds``, once in
+    ``flagged`` when a check first kept it longer, once as cancelled or released when it settles, and
+    a sender's cancel after a flag once per sender as a report.
+    """
+    held = [hold for hold in holds if not hold.instant]
+    out = dict(record)
+    taken = {
+        "holds": len(held),
+        "flagged": sum(1 for hold in held if hold.flagged),
+        "cancelled": sum(1 for hold in held if hold.status == HoldStatus.CANCELLED),
+        "released": sum(1 for hold in held if hold.status == HoldStatus.RELEASED),
+        "cancelled_after_flag": int(any(hold.status == HoldStatus.CANCELLED and hold.flagged for hold in held)),
+    }
+    for key, count in taken.items():
+        out[key] = max(int(record.get(key) or 0) - count, 0)
+    # The vault keeps one time for the latest flag and one for the latest report. A hold carries no time
+    # of its flag, so once one of the sender's payments was flagged the latest flag may be theirs; a report
+    # is counted the moment its payment is cancelled, so the latest report is theirs when the times match.
+    reported = {hold.settled_ms for hold in held if hold.status == HoldStatus.CANCELLED and hold.flagged}
+    if not out["flagged"] or taken["flagged"]:
+        out["last_flag_ms"] = None
+    if not out["cancelled_after_flag"] or record.get("last_report_ms") in reported:
+        out["last_report_ms"] = None
+    return out
 
 
 def load_payee_fixtures(path: str | Path | None = None) -> dict[str, Any]:
@@ -163,6 +195,29 @@ class PayeeIntel:
             if record[key] is None and baseline.get(key) is not None:
                 record[key] = int(baseline[key])
         return record
+
+    async def others_reputation(
+        self, account_id: str, sender: str, record: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None:
+        """``reputation(account_id)`` (or ``record``) without the payments ``sender`` made to the account.
+
+        What other senders' payments show. The sender's own payments are their own story, which their
+        history tells, and the payment being checked carries the flag of its own check whenever that
+        check outlasted the hold: read as a mark on the payee, it braked honest payments (live
+        2026-10-31). ``None`` when either record cannot be read, since then nobody can tell whose
+        flags they are.
+        """
+        if record is None:
+            record = await self.reputation(account_id)
+            if record is None:
+                return None
+        try:
+            async with asyncio.timeout(self.timeout_s):
+                sent = await self.vault.get_holds_for(sender, limit=OWN_PAYMENTS_WINDOW)
+        except Exception as exc:
+            log.warning("payments of %s unavailable: %r", sender, exc)
+            return None
+        return without_payments(record, (hold for hold in sent if hold.payee == account_id))
 
     # ------------------------------------------------------------------
 

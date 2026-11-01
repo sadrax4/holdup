@@ -452,7 +452,8 @@ def test_the_app_is_started_with_uv_locked_on_loopback(tmp_path: Path) -> None:
         "holdup", "serve", "--network", "testnet", "--host", "127.0.0.1", "--port", "47900",
     ]
     offline = supervisor_for(tmp_path, HOLDUP_NETWORK="offline")
-    assert offline.app_argv()[7:9] == ["serve", "--offline"]
+    # The hosted profile's 5 min hold gives a live AI check time to finish before the payment is due.
+    assert offline.app_argv()[7:11] == ["serve", "--offline", "--profile", "hosted"]
 
 
 def test_the_app_environment_comes_from_holdup_env_with_our_urls_on_top(tmp_path: Path) -> None:

@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from .chain import errors as E
 from .chain.treasury import TREASURY_EMPTY
 from .config import Settings
-from .models import NEAR, REASON_LABELS, Finding, Hold, Reason, format_amount
+from .models import NEAR, REASON_LABELS, STILL_CHECKING, STILL_CHECKING_LABEL, Finding, Hold, Reason, format_amount
 
 Buttons = list[list[tuple[str, str]]]
 
@@ -31,6 +31,7 @@ _PLAIN_TAGS = {
     "code_execution": "code execution",
     "guardrail": "guardrail",
     "fail_closed": "fail-closed",
+    "still_checking": "still checking",
 }
 
 
@@ -118,6 +119,8 @@ def _grouped_lines(findings: Iterable[Finding]) -> list[str]:
     lines = []
     for reason, items in grouped.items():
         label = REASON_LABELS.get(reason, reason.name)
+        if all(item.source == STILL_CHECKING for item in items):
+            label = STILL_CHECKING_LABEL
         tags: list[str] = []
         for item in items:
             tag = finding_tag(item)

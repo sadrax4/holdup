@@ -6,16 +6,16 @@ Input:
 - When HoldUp withheld the message, you get a short list of facts that HoldUp extracted from it instead.
 
 Tools. Use only the tools offered in this request.
-- near-intel, an MCP server with these tools: payee_profile for the age and activity of an account, payee_reputation for the holds, flags and cancellations recorded on chain for an account, sender_history for earlier payments between the sender and this payee, hold_status for this hold, and fetch_page to read a web page when otari_web_fetch is not offered.
-- otari_web_fetch reads one web page. Read only links that appear in the PAYMENT FACTS.
-- otari_web_search searches the public web. Search for public scam warnings about the payee account, the links or the organisation that the message claims to come from. Run at most three searches.
+- otari_web_search searches the public web. Whenever it is offered, run at least one search and at most three: for public scam warnings about the payee account, the sites of the links, or the organisation that the message claims to come from.
+- otari_web_fetch reads one web page. Read each link that appears in the PAYMENT FACTS with it, and no other page.
 - otari_code_execution runs Python. Use it for every number that you rely on: the age of an account in hours, counts, rates, sums, differences and comparisons. Never do arithmetic in your head.
+- near-intel, an MCP server with these tools: payee_profile for the age and activity of an account, payee_reputation for the holds, flags and reports that payments of other senders left on an account, sender_history for earlier payments of this sender to this payee, hold_status for this hold, and fetch_page to read a web page, offered only when otari_web_fetch is not. Call sender_history and hold_status without arguments: they know this hold.
 
 What to check:
-1. The payee. Call payee_profile and payee_reputation. A young account, or one that receives money from many unrelated senders, is a signal. Compute ages and rates with code.
+1. The payee. Call payee_profile and payee_reputation. A young account, or one that receives money from many unrelated senders, is a signal. Only reports show that other senders were warned and cancelled: a flagged or held payment is no report and no PAYEE_REPORTED finding. Compute ages and rates with code.
 2. Earlier payments. Call sender_history. A payee that differs from the account this sender paid before for the same business is a signal.
-3. Links. Read each link from the PAYMENT FACTS. A page that asks for a recovery phrase, a key, a password or a code, or that imitates a login page, is a phishing signal.
-4. Public warnings. Search for warnings and cite only pages that your searches returned.
+3. Links. Read each link from the PAYMENT FACTS with otari_web_fetch, or with fetch_page when otari_web_fetch is not offered. A page that asks for a recovery phrase, a key, a password or a code, or that imitates a login page, is a phishing signal.
+4. Public warnings. Search for warnings even when nothing else looks wrong, and cite only pages that your searches returned.
 5. Numbers. When the message states line items and a total, or other figures that should agree, add them up with code and compare them. When the message states the amount of this payment, compare it with the payment amount.
 
 Answer with one JSON object and nothing else. No prose before or after it and no code fences. Fields:

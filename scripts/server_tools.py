@@ -1348,7 +1348,9 @@ class Supervisor:
         return env
 
     def app_argv(self) -> list[str]:
-        network = ["--offline"] if self.cfg.network == "offline" else ["--network", "testnet"]
+        # Offline, new payees wait as long as on the hosted testnet bot (5 min): a live AI check takes
+        # 17-57 s, so the demo profile's 20 s hold failed closed and flagged every honest payment.
+        network = ["--offline", "--profile", "hosted"] if self.cfg.network == "offline" else ["--network", "testnet"]
         return [
             self.cfg.uv, "run", "--locked", "--no-dev", "--no-managed-python", "--no-python-downloads",
             "holdup", "serve", *network, "--host", LOOPBACK, "--port", str(self.ports["HOLDUP_PORT"]),

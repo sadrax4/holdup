@@ -21,6 +21,8 @@ SANDBOX_CREDENTIALS ?= .holdup/sandbox-credentials.json
 BENCH_ARGS ?= $(if $(OTARI_API_KEY),,--replay)
 
 net_flag = $(if $(filter offline,$(NETWORK)),--offline,--network $(NETWORK))
+# Offline, PROFILE sets the in-memory vault's waits; on a network the deployed vault's own configuration does.
+serve_profile = $(if $(filter offline,$(NETWORK)),--profile $(PROFILE) )
 # Offline, the stories replay their recorded AI answers even when OTARI_MODE=live is exported.
 story_env = $(if $(filter offline,$(NETWORK)),OTARI_MODE=replay )
 
@@ -37,6 +39,7 @@ cargo = cd contracts && $(if $(RUST_TOOLCHAIN),RUSTUP_TOOLCHAIN=$(RUST_TOOLCHAIN
 help: ## list the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-15s %s\n", $$1, $$2}'
 	@echo "  Variables: NETWORK=offline|sandbox|testnet (default offline), PROFILE=demo|hosted, HOST, PORT"
+	@echo "  An offline serve with PROFILE=hosted holds new payees 5 min, long enough for a live AI check"
 	@echo "  serve listens on 127.0.0.1; another HOST needs SERVE_ARGS=--allow-public. On a server: scripts/server.sh"
 
 setup: ## install the Python environment exactly as uv.lock pins it (uv sync)
@@ -95,7 +98,7 @@ verify-deploy: ## code hash and access keys of the deployment (offline: a clearl
 	$(HOLDUP) verify-deploy $(net_flag)
 
 serve: ## web app, web console, Telegram bot (polling), MCP, guardrail and keeper on http://HOST:PORT
-	$(HOLDUP) serve $(net_flag) --host $(HOST) --port $(PORT) $(SERVE_ARGS)
+	$(HOLDUP) serve $(net_flag) $(serve_profile)--host $(HOST) --port $(PORT) $(SERVE_ARGS)
 
 chat: ## line-based console on the same engine (offline: recorded AI answers, simulated time)
 	$(HOLDUP) chat $(net_flag)

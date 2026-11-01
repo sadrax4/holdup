@@ -616,7 +616,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         settings.secret = secrets.token_urlsafe(32)
     logging.getLogger("holdup").setLevel(min(logging.INFO, logging.getLogger().getEffectiveLevel()))
     try:
-        runtime = _runtime(settings)
+        runtime = _runtime(settings, profile=args.profile)
     except BaseException:
         sock.close()
         raise
@@ -736,6 +736,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve.add_argument(
         "--interval", type=float, default=None, help="keeper interval in seconds (default 15 on testnet, else 5)"
+    )
+    serve.add_argument(
+        "--profile",
+        choices=("demo", "hosted"),
+        default="demo",
+        help="offline only: how long new payees wait (demo 20 s; hosted 5 min, long enough for a live AI check). "
+        "On a network the deployed vault's configuration decides.",
     )
     serve.set_defaults(func=cmd_serve)
 

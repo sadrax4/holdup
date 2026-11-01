@@ -89,6 +89,30 @@ def test_a_busy_port_is_reported_before_anything_starts(capsys: pytest.CaptureFi
     assert f"cannot listen on 127.0.0.1:{port}" in capsys.readouterr().err
 
 
+async def test_the_offline_server_can_give_new_payees_the_hosted_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live 2026-10-31: the public offline server ran the demo profile, so its 20 s hold ended before a live
+    AI check (17-57 s) did, and every honest payment to a new payee failed closed and was flagged."""
+    from holdup import cli
+    from holdup.runtime import build_runtime
+
+    asked: dict[str, Any] = {}
+
+    def runtime(settings: Settings, **kwargs: Any) -> Any:
+        asked.update(kwargs)
+        raise SystemExit(3)
+
+    monkeypatch.setattr(cli, "_runtime", runtime)
+    with pytest.raises(SystemExit):
+        main(["serve", "--offline", "--port", "0", "--profile", "hosted"])
+    assert asked == {"profile": "hosted"}
+    assert build_parser().parse_args(["serve", "--offline"]).profile == "demo"
+    built = build_runtime(offline_settings(), web=False, profile="hosted")
+    try:
+        assert (await built.vault.get_config()).new_payee_hold_ms == 5 * 60_000
+    finally:
+        await built.aclose()
+
+
 def test_ports_are_checked(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main(["serve", "--offline", "--port", "70000"])

@@ -13,7 +13,17 @@ from holdup.chain.errors import VaultError
 from holdup.chain.fake import FakeVault, SimClock
 from holdup.config import offline_settings
 from holdup.engine import Engine
-from holdup.models import Finding, Hold, HoldStatus, PaymentContext, Reason, Verdict
+from holdup import messages
+from holdup.models import (
+    STILL_CHECKING,
+    STILL_CHECKING_LABEL,
+    Finding,
+    Hold,
+    HoldStatus,
+    PaymentContext,
+    Reason,
+    Verdict,
+)
 from holdup.runtime import offline_vault
 from holdup.store import Store
 
@@ -205,6 +215,36 @@ async def test_a_check_slower_than_the_hold_keeps_the_brake_on(clock, setup) -> 
     assert fresh is not None and fresh.release_at_ms == clock() + 24 * HOUR
     assert fresh.reason_bits == Reason.AI_UNAVAILABLE | Reason.URGENCY
     assert await engine.tick() == 0  # the slow check finished, so there is nothing to retry
+
+
+async def test_a_slow_check_is_recorded_as_still_running_not_as_a_failure(clock, setup) -> None:  # type: ignore[no-untyped-def]
+    """Live 2026-10-31: every honest payment to a new payee showed 'AI check could not run ... AI check failed:
+    it is still running [fail-closed]', and /stats counted it as fail-closed."""
+    from holdup.web import views
+
+    vault, store, notifier = setup
+
+    class Slow:
+        async def assess(self, hold: Hold, ctx: PaymentContext) -> Verdict:
+            clock.advance(20_000)
+            await asyncio.sleep(0.2)
+            return replace(CLEAN, hold_id=hold.id)
+
+    settings = offline_settings()
+    engine = Engine(settings, vault, Scripted(CLEAN), Slow(), store, notifier, clock=clock)
+    engine.deadline_margin_ms = 19_950
+    await engine.start("tg:1", "Priya")
+    outcome = await engine.pay("tg:1", PAYEE, settings.husd_token or "", HUSD)
+    await engine.wait_idle()
+    slow = store.list_verdicts(outcome.hold.id)[0]  # type: ignore[union-attr]
+    (finding,) = [f for f in slow["findings"] if f["reason"] == "AI_UNAVAILABLE"]
+    assert finding["source"] == STILL_CHECKING and "failed" not in finding["detail"]
+    stats = await engine.stats()
+    assert (stats["fail_closed"], stats["braked_holds"]) == (0, 1)
+    shown = Finding(Reason.AI_UNAVAILABLE, finding["detail"], finding["source"])
+    (row,) = views.reason_rows([shown])
+    assert row.label == STILL_CHECKING_LABEL and "[still checking]" in messages.reason_lines([shown])[0]
+    assert views._extension_title([shown], {}) == STILL_CHECKING_LABEL
 
 
 async def test_a_check_slower_than_the_hold_in_real_time_only_is_not_braked(clock, setup) -> None:  # type: ignore[no-untyped-def]

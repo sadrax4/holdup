@@ -60,6 +60,19 @@ INSTRUCTIONS = (
 )
 
 AccountId = Annotated[str, Field(description="NEAR account id, for example alice.testnet", max_length=64)]
+# The model is never told the sender's account id, so the history tools default to the hold's own parties.
+SenderId = Annotated[
+    str | None, Field(description="Leave out: the sender of this hold. A NEAR account id otherwise.", max_length=64)
+]
+PayeeId = Annotated[
+    str | None, Field(description="Leave out: the payee of this hold. A NEAR account id otherwise.", max_length=64)
+]
+REPUTATION_MEANING = (
+    "Other senders only: this payment and every earlier payment of its sender to the account are left out "
+    "(sender_history has those). flagged counts holds that HoldUp kept longer for any reason, a check that took "
+    "longer than the hold included, and is not a report. reports count senders who cancelled a payment after a "
+    "HoldUp warning, each sender once."
+)
 
 
 def mcp_token(secret: str, hold_id: int) -> str:
@@ -129,11 +142,16 @@ class NearIntelTools:
     # ------------------------------------------------------------------
 
     async def payee_profile(self, scope: HoldScope, account_id: str) -> dict[str, Any]:
-        return await self.intel.profile(self._party(scope, account_id))
+        account_id = self._party(scope, account_id)
+        profile = await self.intel.profile(account_id)
+        if isinstance(profile.get("reputation"), dict):
+            # The same record payee_reputation gives: other senders' payments only.
+            profile["reputation"] = await self.intel.others_reputation(account_id, scope.sender, profile["reputation"])
+        return profile
 
     async def payee_reputation(self, scope: HoldScope, account_id: str) -> dict[str, Any]:
         account_id = self._party(scope, account_id)
-        record = await self.intel.reputation(account_id)
+        record = await self.intel.others_reputation(account_id, scope.sender)
         if record is None:
             raise ToolError("the vault statistics are unavailable right now")
         now = await self.vault.now_ms()
@@ -145,11 +163,14 @@ class NearIntelTools:
             "recent_reports": bool(record["cancelled_after_flag"])
             and last_report is not None
             and now - last_report <= REPORT_WINDOW_MS,
-            "meaning": "reports count senders who cancelled a payment after a HoldUp warning, each sender once",
+            "meaning": REPUTATION_MEANING,
         }
 
-    async def sender_history(self, scope: HoldScope, sender: str, payee: str) -> dict[str, Any]:
-        sender, payee = self._party(scope, sender), self._party(scope, payee)
+    async def sender_history(
+        self, scope: HoldScope, sender: str | None = None, payee: str | None = None
+    ) -> dict[str, Any]:
+        sender = self._party(scope, sender) if sender else scope.sender
+        payee = self._party(scope, payee) if payee else scope.payee
         holds = await self.vault.get_holds_for(sender, limit=HISTORY_WINDOW)
         earlier = [h for h in holds if h.payee == payee and h.id != scope.hold_id]
         released = [h for h in earlier if h.status == HoldStatus.RELEASED]
@@ -172,7 +193,8 @@ class NearIntelTools:
             "window": f"the sender's latest {HISTORY_WINDOW} payments",
         }
 
-    async def hold_status(self, scope: HoldScope, hold_id: int) -> dict[str, Any]:
+    async def hold_status(self, scope: HoldScope, hold_id: int | None = None) -> dict[str, Any]:
+        hold_id = scope.hold_id if hold_id is None else hold_id
         if hold_id != scope.hold_id:
             raise ToolError("this token only covers its own hold")
         hold = await self.vault.get_hold(hold_id)
@@ -253,20 +275,24 @@ def _build_server(tools: NearIntelTools, secret: str) -> MCPServer:
     @server.tool(
         name="sender_history",
         description="Earlier HoldUp payments from the sender to the payee of this hold: how many were released, "
-        "cancelled or flagged, and when the first one was made.",
+        "cancelled or flagged, and when the first one was made. Call it without arguments.",
     )
-    async def sender_history(sender: AccountId, payee: AccountId, ctx: Context) -> dict[str, Any]:
+    async def sender_history(ctx: Context, sender: SenderId = None, payee: PayeeId = None) -> dict[str, Any]:
         scope = await scope_of(ctx)
-        args = {"sender": sender, "payee": payee}
+        args = {k: v for k, v in (("sender", sender), ("payee", payee)) if v}
         return await tools.run(scope, "sender_history", args, lambda: tools.sender_history(scope, sender, payee))
 
     @server.tool(
         name="hold_status",
-        description="The current state of this hold: amount, asset, release time, flags and reason codes.",
+        description="The current state of this hold: amount, asset, release time, flags and reason codes. "
+        "Call it without arguments.",
     )
-    async def hold_status(hold_id: Annotated[int, Field(ge=0)], ctx: Context) -> dict[str, Any]:
+    async def hold_status(
+        ctx: Context, hold_id: Annotated[int | None, Field(ge=0, description="Leave out: this hold.")] = None
+    ) -> dict[str, Any]:
         scope = await scope_of(ctx)
-        return await tools.run(scope, "hold_status", {"hold_id": hold_id}, lambda: tools.hold_status(scope, hold_id))
+        args = {"hold_id": hold_id} if hold_id is not None else {}
+        return await tools.run(scope, "hold_status", args, lambda: tools.hold_status(scope, hold_id))
 
     @server.tool(
         name="fetch_page",

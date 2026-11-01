@@ -18,6 +18,8 @@ from ..config import Settings
 from ..messages import finding_tag, fmt_amount, fmt_duration, fmt_utc, short_model, split_context
 from ..models import (
     REASON_LABELS,
+    STILL_CHECKING,
+    STILL_CHECKING_LABEL,
     Finding,
     Hold,
     HoldStatus,
@@ -108,6 +110,7 @@ class StepRow:
     error: str
     blocked: bool = False  # a block-mode guardrail refused the text: the check worked, nothing failed
     served_model: str = ""  # the provider's own name for the model, when the gateway reported it
+    notes: tuple[str, ...] = ()  # what changed the step's course (a refusal, a tool switched off, a fallback)
 
 
 # ----------------------------------------------------------------------
@@ -157,6 +160,8 @@ def _rows(findings: Iterable[Finding]) -> list[ReasonRow]:
                 tags.append(tag)
             citations += [c for c in item.citations if c not in citations]
         label = REASON_LABELS.get(reason, reason.name or str(int(reason)))
+        if all(item.source == STILL_CHECKING for item in items):
+            label = STILL_CHECKING_LABEL  # the same bit on chain, but nothing failed
         detail = next((i.detail.strip() for i in items if i.detail.strip()), "")
         rows.append(
             ReasonRow(label, "" if detail.lower() == label.lower() else detail, tuple(tags), tuple(citations[:4]))
@@ -194,7 +199,10 @@ def _load_json(text: str) -> dict[str, Any]:
 
 def _extension_title(findings: Sequence[Finding], document: Mapping[str, Any]) -> str:
     """What kind of check led to one extension, from its evidence."""
-    if any(f.reason in FAILURE_REASONS for f in findings):
+    failures = [f for f in findings if f.reason in FAILURE_REASONS]
+    if failures and all(f.source == STILL_CHECKING for f in failures):
+        return STILL_CHECKING_LABEL
+    if failures:
         return "AI check failed, so the brake stays on"
     steps = [s for s in document.get("steps") or [] if isinstance(s, Mapping)]
     if findings and all(f.source in RULE_SOURCES for f in findings) and not any(s.get("model") for s in steps):
@@ -428,6 +436,7 @@ def step_rows(steps: Iterable[StepRecord]) -> list[StepRow]:
                 error=step.error or "",
                 blocked=step.error == "guardrail_violation",
                 served_model=step.served_model or "",
+                notes=tuple(str(note) for note in step.notes or ()),
             )
         )
     return rows

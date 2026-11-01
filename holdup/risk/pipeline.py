@@ -11,10 +11,12 @@ through the Otari gateway:
    steps only get the facts that HoldUp extracted from it;
 4. the investigator (gpt-oss-120b) checks the payee and the links with the
    near-intel MCP server, web search and web fetch, and computes every number
-   with code execution;
+   with code execution. When the gateway's fetch fails on a link, the same
+   model is asked again with near-intel's page reader in its place;
 5. a reviewer from another model family gives a blind second opinion on large
-   payments, when triage and the investigator disagree, and when a judgement
-   of theirs waits for a model of another family to agree.
+   payments, when triage and the investigator disagree, when the investigator
+   was asked again for a page, and when a judgement of theirs waits for a
+   model of another family to agree.
 
 Model claims are checked before they count: a web search citation must be a
 page the gateway reports the search returned, a fetched page one it reports
@@ -100,6 +102,7 @@ from .otari import (
     ToolNotEnabled,
     fallbacks_for,
     family,
+    graver_verdict,
 )
 from .prompts.contracts import (
     AmountCheck,
@@ -124,11 +127,14 @@ ending the model calls before that leaves the decision, with what the steps foun
 INJECTION_PROFILE = "checker-injection"
 MCP_SERVER = "near-intel"
 MCP_TOOLS = ("payee_profile", "payee_reputation", "sender_history", "hold_status", "fetch_page")
-MCP_PURPOSE = (
+MCP_FACTS = (
     "HoldUp facts about NEAR accounts and this payment: the age and activity of an account, holds and "
     "cancellations recorded on chain, earlier payments between the sender and the payee, the status of "
-    "this hold, and a bounded reader for web pages."
+    "this hold"
 )
+MCP_PURPOSE = f"{MCP_FACTS}, and a bounded reader for web pages."
+MCP_PURPOSE_NO_PAGES = f"{MCP_FACTS}."
+"""What near-intel is for when the gateway's web fetch reads the pages instead of its fetch_page."""
 REPLAY_BASE_URL = "https://replay.holdup.invalid"
 """Where the recorded exchanges say the MCP server and guardrail lived; replayed requests never leave the process."""
 
@@ -257,7 +263,7 @@ _PAYEE_LABELS = {
     "age_hours": "account age in hours",
     "distinct_inbound_senders_24h": "distinct senders in the last 24 hours",
     "tx_count": "transactions seen",
-    "holds": "payments to it that HoldUp held",
+    "holds": "payments of other senders to it that HoldUp held",
     "released": "of those, released",
     "cancelled_after_flag": "reports: senders who cancelled a payment after a HoldUp warning",
 }
@@ -418,9 +424,9 @@ def _claim_text(claim: MoneyClaim) -> str:
 
 def _gateway_can_reach(url: str, *, with_token: bool) -> bool:
     """Whether a hosted gateway could call ``url`` (public host; https when a token is sent)."""
-    parts = urlsplit(url)
-    host = (parts.hostname or "").lower()
-    if parts.scheme not in ("http", "https") or not host:
+    parts = _split(url)
+    host = ((parts and parts.hostname) or "").lower()
+    if parts is None or parts.scheme not in ("http", "https") or not host:
         return False
     if with_token and parts.scheme != "https":
         return False  # mcp: an authorization_token requires https
@@ -678,6 +684,7 @@ class _Outcome:
     blocked: bool = False  # a guardrail in block mode refused the request
     replaced: bool = False  # asked again on another model family; only its step record still counts
     contradicted: int = 0  # claims about the payee that the facts HoldUp read contradict, left out
+    reread: bool = False  # asked again with near-intel's page reader after the gateway could not fetch a link
 
     @property
     def label(self) -> str:
@@ -730,6 +737,33 @@ def _systemic(failure: Exception | None) -> bool:
 
 async def _nothing() -> None:
     return None
+
+
+def _noted(record: StepRecord | None, notes: list[str], seen: dict[str, Any] | None = None) -> StepRecord | None:
+    """``record`` with ``notes`` (what happened before its request) ahead of its own, and with the graver of its
+    guardrail verdict and ``seen``, the gravest on the requests sent before it: they carried the same message,
+    so a flag on one of them still stands when the guardrail passed the last."""
+    if record is not None:
+        if notes:
+            record.notes[:0] = [n for n in notes if n not in record.notes]
+        record.guardrail = graver_verdict(seen, record.guardrail)
+    return record
+
+
+def _joined(first: StepRecord, record: StepRecord | None, note: str) -> StepRecord:
+    """``record``, of a request sent again after ``first`` answered, with what ``first`` noted, called, cost and
+    took ahead of its own, ``note`` saying why it was sent, and the graver of their guardrail verdicts."""
+    if record is None:
+        first.notes.append(note)
+        return first
+    _noted(record, [*first.notes, note], first.guardrail)
+    record.tool_calls[:0] = first.tool_calls
+    if first.cost_usd:
+        record.cost_usd = round(first.cost_usd + (record.cost_usd or 0.0), 6)
+    record.latency_ms = (first.latency_ms or 0) + (record.latency_ms or 0)
+    record.attempts = (first.attempts or 0) + (record.attempts or 0)
+    record.fallback = first.fallback or record.fallback
+    return record
 
 
 # ----------------------------------------------------------------------
@@ -844,7 +878,11 @@ class OtariRisk:
             # The first review was paid for, so its step stays on record.
             outcomes.append(_Outcome("reviewer", reviewer.record, replaced=True))
             reviewer = await self._guarded("reviewer", self._review(case, avoid=avoid))
-        if reviewer is None and (self._disagree(triage, investigator, case) or self._unsettled(case, rules, outcomes)):
+        if reviewer is None and (
+            investigator.reread
+            or self._disagree(triage, investigator, case)
+            or self._unsettled(case, rules, outcomes)
+        ):
             reviewer = await self._guarded("reviewer", self._review(case, avoid=avoid))
         if reviewer is not None:
             outcomes.append(reviewer)
@@ -932,14 +970,18 @@ class OtariRisk:
             entry["validate_kwargs"] = {"token": self.guard_token_fn(case.hold.id)}
         return [entry]
 
-    def _mcp_servers(self, case: _Case) -> list[dict[str, Any]] | None:
+    def _mcp_servers(self, case: _Case, *, web_fetch: bool = False) -> list[dict[str, Any]] | None:
+        """near-intel for this hold. With the gateway's web fetch offered, without its own page reader:
+        given both, gpt-oss-120b read every link with fetch_page and never used the gateway's (live 2026-10-31).
+        A fetch of the gateway that fails brings the page reader back (``_reread``)."""
         if not self.mcp_url:
             return None
+        allowed = [tool for tool in MCP_TOOLS if not (web_fetch and tool == "fetch_page")]
         server: dict[str, Any] = {
             "name": MCP_SERVER,
             "url": self.mcp_url,
-            "purpose_hint": MCP_PURPOSE,
-            "allowed_tools": list(MCP_TOOLS),
+            "purpose_hint": MCP_PURPOSE_NO_PAGES if web_fetch else MCP_PURPOSE,
+            "allowed_tools": allowed,
         }
         if self.mcp_token_fn is not None:
             # A bearer token per hold: the server only answers about this hold and its parties.
@@ -1004,6 +1046,14 @@ class OtariRisk:
                 profile = {}
             profile = profile if isinstance(profile, dict) else {}
             reputation = profile.get("reputation") if isinstance(profile.get("reputation"), dict) else {}
+            if reputation:
+                # Other senders' payments only, as near-intel gives them: this payment's own hold is no record.
+                try:
+                    others = self.intel.others_reputation(case.hold.payee, case.hold.sender, reputation)
+                    reputation = await asyncio.wait_for(others, 5) or {}
+                except Exception as exc:
+                    log.warning("payments of %s unavailable: %r", case.hold.sender, exc)
+                    reputation = {}
             merged = {**{k: reputation.get(k) for k in ("holds", "released", "cancelled_after_flag")}, **profile}
             case.payee_facts = {k: merged[k] for k in _PAYEE_LABELS if merged.get(k) is not None}
         return case.payee_facts or None
@@ -1133,8 +1183,7 @@ class OtariRisk:
             # Fetch accepts no options: the live gateway refuses max_uses on it with a 400.
             tools.append({"type": WEB_FETCH})
         tools.append({"type": CODE_EXECUTION})
-        mcp = self._mcp_servers(case)
-        payee = None if mcp else await self._payee(case)
+        payee = None if self.mcp_url else await self._payee(case)
         messages = [
             {"role": "system", "content": prompt.text},
             {
@@ -1142,41 +1191,57 @@ class OtariRisk:
                 "content": f"{self._facts(case, payee=payee, context=True)}\n\n{self._message_view(case)}",
             },
         ]
+
+        def ask(
+            model: str, offered: list[dict[str, Any]], servers: list[dict[str, Any]] | None, fallbacks: tuple[str, ...]
+        ) -> Awaitable[tuple[Any, StepRecord]]:
+            return case.client.chat(
+                "investigator",
+                model,
+                messages,
+                output=InvestigatorResult,
+                tools=offered or None,
+                mcp_servers=servers,
+                guardrails=self._guardrails(case, "monitor"),
+                metadata=self._metadata(case, "investigator"),
+                max_tokens=4_000,
+                reasoning_effort="medium",
+                max_tool_iterations=8,
+                fallbacks=fallbacks,
+                prompt_sha256=prompt.sha256,
+                deadline=case.deadline,
+            )
+
         disabled: set[str] = set()
+        notes: list[str] = []  # why a request was sent again, for the step's record
+        seen: dict[str, Any] | None = None  # the gravest guardrail verdict on the requests sent before
+        logged = len(self.mcp_log(case.hold.id)) if self.mcp_log is not None else 0
         while True:
             offered = [t for t in tools if t["type"] not in disabled]
-            servers = mcp if "mcp" not in disabled else None
+            fetching = any(t["type"] == WEB_FETCH for t in offered)
+            servers = self._mcp_servers(case, web_fetch=fetching) if "mcp" not in disabled else None
             try:
-                result, record = await case.client.chat(
-                    "investigator",
-                    INVESTIGATOR_MODEL,
-                    messages,
-                    output=InvestigatorResult,
-                    tools=offered or None,
-                    mcp_servers=servers,
-                    guardrails=self._guardrails(case, "monitor"),
-                    metadata=self._metadata(case, "investigator"),
-                    max_tokens=4_000,
-                    reasoning_effort="medium",
-                    max_tool_iterations=8,
-                    fallbacks=fallbacks_for(INVESTIGATOR_MODEL),
-                    prompt_sha256=prompt.sha256,
-                    deadline=case.deadline,
-                )
+                result, record = await ask(INVESTIGATOR_MODEL, offered, servers, fallbacks_for(INVESTIGATOR_MODEL))
                 break
             except ToolNotEnabled as exc:
+                seen = graver_verdict(seen, exc.record.guardrail if exc.record else None)
                 if not exc.tools - disabled:
-                    return _Outcome("investigator", exc.record, failure=exc)
-                log.warning("investigator: %s; retrying without %s", exc, ", ".join(sorted(exc.tools)))
+                    return _Outcome("investigator", _noted(exc.record, notes, seen), failure=exc)
+                dropped = ", ".join(sorted(exc.tools))
+                # Only the server log showed this before: a judge saw a run without search and no reason why.
+                log.warning("investigator: %s; retrying without %s", exc, dropped)
+                notes.append(f"{dropped}: not enabled for this workspace, so the request was sent again without")
                 disabled |= exc.tools
             except GuardrailViolation as exc:
                 return self._blocked("investigator", exc)
             except AllCandidatesFailed as exc:
                 # The gateway reports an MCP server it cannot reach as a generic 502 for every
                 # offering (observed on the hosted gateway), so try once more without it.
+                seen = graver_verdict(seen, exc.record.guardrail if exc.record else None)
                 if servers is None:
-                    return _Outcome("investigator", exc.record, failure=exc)
+                    return _Outcome("investigator", _noted(exc.record, notes, seen), failure=exc)
                 log.warning("investigator failed with near-intel attached (%s); retrying without it", exc.label)
+                notes.append(f"failed with near-intel attached ({exc.label}), so the request was sent again without it")
                 disabled.add("mcp")
                 payee = await self._payee(case)
                 messages[1] = {
@@ -1184,10 +1249,78 @@ class OtariRisk:
                     "content": f"{self._facts(case, payee=payee, context=True)}\n\n{self._message_view(case)}",
                 }
             except OtariError as exc:
-                return _Outcome("investigator", exc.record, failure=exc)
+                return _Outcome("investigator", _noted(exc.record, notes, seen), failure=exc)
+        _noted(record, notes, seen)
+        outcome = self._investigated(case, result, record, offered, servers, logged)
+        if not (servers and fetching and self._unread(case, record)):
+            return outcome
+        return await self._reread(case, outcome, record, ask, [t for t in offered if t["type"] != WEB_FETCH])
+
+    async def _reread(
+        self,
+        case: _Case,
+        first: _Outcome,
+        answered: StepRecord,
+        ask: Callable[..., Awaitable[tuple[Any, StepRecord]]],
+        offered: list[dict[str, Any]],
+    ) -> _Outcome:
+        """The investigator asked again with near-intel's fetch_page in place of the gateway's web fetch, which
+        could not read a link of the message: given the gateway's fetch, the step has no other page reader.
+
+        ``first`` is the answer the gateway's fetch failed in, ``answered`` its record. The model that gave it
+        answers again, with no fallback, so that every finding of the step is of one family, and what it found
+        first still counts. The reviewer then gives its opinion, as it would have on the first answer alone.
+        When the request fails, the step fails with the first findings; when a guardrail blocks it, it brakes.
+        """
+        note = (
+            f"{WEB_FETCH}: the gateway could not read a link of the message, so the request was sent again "
+            f"with fetch_page of {MCP_SERVER} in its place"
+        )
+        log.warning("investigator: the gateway could not read a link of hold %s; asking again", case.hold.id)
+        servers = self._mcp_servers(case)
+        logged = len(self.mcp_log(case.hold.id)) if self.mcp_log is not None else 0
+        try:
+            result, record = await ask(answered.model or INVESTIGATOR_MODEL, offered, servers, ())
+        except GuardrailViolation as exc:
+            blocked = self._blocked("investigator", exc)
+            record = _joined(answered, blocked.record, note)
+            return replace(blocked, record=record, findings=[*first.findings, *blocked.findings], reread=True)
+        except OtariError as exc:
+            record = _joined(answered, exc.record, note)
+            return _Outcome("investigator", record, list(first.findings), failure=exc, reread=True)
+        again = self._investigated(case, result, record, offered, servers, logged)
+        _joined(answered, record, note)
+        return replace(again, findings=[*first.findings, *again.findings], reread=True)
+
+    def _investigated(
+        self,
+        case: _Case,
+        result: InvestigatorResult,
+        record: StepRecord,
+        offered: list[dict[str, Any]],
+        servers: list[dict[str, Any]] | None,
+        logged: int,
+    ) -> _Outcome:
+        """One answer of the investigator with its claims checked against what the request offered and ran."""
+        if servers and self.mcp_log is not None:
+            # The gateway does not report MCP calls on Chat Completions; near-intel logged them for this hold.
+            record.tool_calls += [
+                {"name": call.get("tool"), "server": MCP_SERVER, "status": "refused" if "refused" in args else "done"}
+                for call in self.mcp_log(case.hold.id)[logged:]
+                if isinstance(args := call.get("args") or {}, dict)
+            ]
         available = {t["type"] for t in offered} | ({"mcp"} if servers else set())
         findings = self._investigator_findings(case, result, record, available)
         return _Outcome("investigator", record, findings + self._monitored(record), result=result)
+
+    @staticmethod
+    def _unread(case: _Case, record: StepRecord) -> list[str]:
+        """The public links of the message that no fetch read, when the gateway reports one of its fetches failing."""
+        fetches = [call for call in record.tool_calls if call.get("name") == WEB_FETCH]
+        if all(call.get("status") == "completed" for call in fetches):
+            return []
+        read = {_url_key(call["url"]) for call in fetches if call.get("status") == "completed" and call.get("url")}
+        return [u for u in case.links if _url_key(u) not in read and _gateway_can_reach(u, with_token=False)]
 
     async def _review(self, case: _Case, *, avoid: tuple[str, ...]) -> _Outcome:
         """A second opinion from a model of none of the families in ``avoid``, so that it can agree with any of them.
@@ -1208,6 +1341,7 @@ class OtariRisk:
             {"role": "user", "content": f"{self._facts(case, payee=payee)}\n\n{self._message_view(case)}"},
         ]
         tools: list[dict[str, Any]] | None = [{"type": CODE_EXECUTION}]
+        notes: list[str] = []
         while True:
             try:
                 result, record = await case.client.chat(
@@ -1226,13 +1360,15 @@ class OtariRisk:
                 break
             except ToolNotEnabled as exc:
                 if tools is None:
-                    return _Outcome("reviewer", exc.record, failure=exc)
+                    return _Outcome("reviewer", _noted(exc.record, notes), failure=exc)
                 log.warning("reviewer: %s; reviewing without code execution", exc)
+                notes.append(f"{CODE_EXECUTION}: not enabled for this workspace, so the request was sent again without")
                 tools = None
             except GuardrailViolation as exc:
                 return self._blocked("reviewer", exc)
             except OtariError as exc:
-                return _Outcome("reviewer", exc.record, failure=exc)
+                return _Outcome("reviewer", _noted(exc.record, notes), failure=exc)
+        _noted(record, notes)
         findings = []
         for item in result.reasons:
             reason = Reason[item.reason]

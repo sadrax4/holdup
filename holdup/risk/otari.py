@@ -277,6 +277,33 @@ def _error_fields(body: Any) -> tuple[str, str | None]:
     return str(detail), (str(code) if code else None)
 
 
+def _guardrail_refusal(code: str | None, detail: str) -> bool:
+    """Whether a 403 names a guardrail as what refused it (a code or a detail other than the documented one)."""
+    if code:
+        return code.startswith("guardrail") and code != "guardrail_unavailable"
+    return "guardrail" in detail.lower()
+
+
+def as_guardrail_block(exc: OtariError, guardrails: Sequence[Mapping[str, Any]] | None) -> OtariError:
+    """``exc``, or the block of a guardrail in block mode when ``exc`` is the gateway's bare refusal of one.
+
+    The docs promise 403 guardrail_violation, but the hosted gateway refused a flagged text with a
+    403 that carried no error code (live 2026-10-31: 267 and 298 ms, no provider, no cost), while
+    the same request went through whenever the guardrail passed the text. A 403 without a code, on
+    a request that carries a guardrail in block mode, is therefore that guardrail's block.
+    """
+    blocking = [g for g in guardrails or () if g.get("mode") == "block"]
+    if not blocking or type(exc) is not OtariRequestError or exc.status != 403 or exc.code:
+        return exc
+    return GuardrailViolation(
+        str(exc),
+        guardrails=[{"profile": g.get("profile")} for g in blocking],
+        status=exc.status,
+        request_id=exc.request_id,
+        retry_after=exc.retry_after,
+    )
+
+
 def _seconds(value: str | None) -> float | None:
     try:
         return float(value) if value else None
@@ -307,7 +334,7 @@ def error_from_response(status: int, headers: Mapping[str, str], content: bytes 
         return BudgetExceeded(
             detail or "a budget refused the request", scope=lowered.get("otari-budget-scope"), **kwargs
         )
-    if code == "guardrail_violation":
+    if code == "guardrail_violation" or (status == 403 and _guardrail_refusal(code, detail)):
         guardrails = body.get("guardrails") if isinstance(body, dict) else None
         return GuardrailViolation(
             detail or "a guardrail blocked the request",
@@ -458,6 +485,66 @@ def guardrail_verdict(entries: list[dict[str, Any]], profile: str | None = None)
         "score": first.get("score"),
         "verdict": verdict,
     }
+
+
+_SEVERITY = {"passed": 0, "inconclusive": 1, "flagged": 2, "blocked": 3}
+
+
+def graver_verdict(kept: dict[str, Any] | None, new: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The more severe of two guardrail verdicts on the same request text; ``new`` when they are as severe.
+
+    A step that asks another model after an unusable answer sends the same text again, so a flag
+    on the first request still stands when the guardrail could not judge or passed the second.
+    """
+    if kept is None or new is None:
+        return kept if new is None else new
+    return kept if _SEVERITY.get(kept.get("verdict"), 1) > _SEVERITY.get(new.get("verdict"), 1) else new
+
+
+_NOTE_CHARS = 160
+_QUOTE_WINDOW = 24
+_URL_TEXT = re.compile(r"https?://\S+", re.IGNORECASE)
+_SECRET_TEXT = re.compile(r"[0-9a-f]{16,}|[a-z0-9+/_=-]{40,}", re.IGNORECASE)
+"""Runs that look like a key or a token, such as the per-hold tokens a request carries for near-intel and /validate."""
+
+
+def _plain_words(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+
+def _request_text(messages: Sequence[Mapping[str, Any]]) -> str:
+    parts = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts += [p["text"] for p in content if isinstance(p, Mapping) and isinstance(p.get("text"), str)]
+    return _plain_words(" ".join(parts))
+
+
+def gateway_words(text: str, messages: Sequence[Mapping[str, Any]]) -> str:
+    """``text`` from the gateway, fit for a public page: short, no links or tokens, nothing that repeats the request.
+
+    A refusal or an exception may echo what it refused, and the request carries the forwarded
+    message, which no page may show, and per-hold tokens, which open near-intel and /validate for
+    that hold and never expire. Text that repeats a run of the request is left out.
+    """
+    text = _SECRET_TEXT.sub("[redacted]", _URL_TEXT.sub("", str(text)))
+    text = " ".join(text.split()).strip(" .;:,-")
+    words, sent = _plain_words(text), _request_text(messages)
+    if not text or any(words[i : i + _QUOTE_WINDOW] in sent for i in range(len(words) - _QUOTE_WINDOW + 1)):
+        return ""
+    return text[:_NOTE_CHARS]
+
+
+def refusal_note(exc: OtariError, messages: Sequence[Mapping[str, Any]]) -> str:
+    """What the gateway answered to a request it refused, for the step's notes."""
+    head = f"the gateway answered {exc.status}" if exc.status is not None else "the request failed"
+    if exc.code:
+        head += f" {exc.code}"
+    detail = gateway_words(str(exc), messages)
+    return f"{head}: {detail}" if detail else head
 
 
 def _cost(usage: Mapping[str, Any]) -> float | None:
@@ -667,6 +754,7 @@ class OtariClient:
         chain = [model, *(m for m in fallbacks if m != model)]
         # Sandbox runs are the one gateway tool that the stream does not report.
         sandbox = any(t.get("type") == CODE_EXECUTION for t in tools or []) and not mcp_servers
+        paid = 0.0  # what earlier candidates' unusable answers cost
         for index, candidate in enumerate(chain):
             params = self._params(
                 candidate,
@@ -682,9 +770,19 @@ class OtariClient:
             )
             try:
                 reply = await self._attempt(params, streaming, deadline)
-            except OtariError as exc:
+            except OtariError as error:
+                exc = as_guardrail_block(error, guardrails)
                 record.attempts = (record.attempts or 0) + 1
                 record.request_id = exc.request_id or record.request_id
+                if exc.status is not None:
+                    log.warning("%s: %s refused with %s %s: %s", step, candidate, exc.status, exc.label, exc)
+                if exc is not error:
+                    record.notes.append(
+                        "the gateway answered 403 with no error code while a guardrail in block mode was on the "
+                        "request: read as that guardrail blocking the text"
+                    )
+                elif exc.status is not None:
+                    record.notes.append(f"{candidate}: {refusal_note(exc, messages)}")
                 if exc.fallback_ok and index + 1 < len(chain):
                     log.warning("%s: %s failed (%s); trying %s", step, candidate, exc.label, chain[index + 1])
                     continue
@@ -692,14 +790,30 @@ class OtariClient:
                 record.fallback = index > 0
                 record.error = exc.label
                 record.latency_ms = round((time.monotonic() - started) * 1000)
+                record.cost_usd = paid or record.cost_usd
                 if isinstance(exc, GuardrailViolation):
                     record.guardrail = exc.verdict()
                 exc.record = record
+                if exc is not error:
+                    raise exc from error
                 raise
             self._fill(record, reply, candidate, fell_back=index > 0, started=started, sandbox=sandbox)
+            if paid:
+                record.cost_usd = round(paid + (record.cost_usd or 0.0), 6)
             try:
                 return self._value(reply, output), record
             except BadModelOutput as exc:
+                if index + 1 < len(chain) and (deadline is None or deadline > time.monotonic()):
+                    # The model answered, but with nothing usable: an empty answer after a tool loop (gpt-oss
+                    # wrote its last tool call into its reasoning, or reasoned until max_tokens), or text that
+                    # breaks the contract. Another family can still answer; what this answer cost stays counted.
+                    rounds = f" after {reply.rounds} rounds of tools" if reply.rounds else ""
+                    record.notes.append(f"{candidate}: {exc}{rounds} ({exc.label}); asked {chain[index + 1]}")
+                    log.warning("%s: %s answered unusably (%s); trying %s", step, candidate, exc, chain[index + 1])
+                    paid = record.cost_usd or paid
+                    record.provider = record.served_model = None
+                    record.tool_calls = []
+                    continue
                 record.error = exc.label
                 exc.record = record
                 raise
@@ -820,7 +934,8 @@ class OtariClient:
         if sandbox and unreported > 0:
             # Rounds of tools in which the gateway reported no call were sandbox runs.
             record.tool_calls.append({"name": CODE_EXECUTION, "status": "inferred", "rounds": unreported})
-        record.guardrail = guardrail_verdict(parse_guardrails_header(headers.get("otari-guardrails")))
+        verdict = guardrail_verdict(parse_guardrails_header(headers.get("otari-guardrails")))
+        record.guardrail = graver_verdict(record.guardrail, verdict)
 
     @staticmethod
     def _value(reply: _Reply, output: type[T] | None) -> Any:

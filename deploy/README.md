@@ -108,8 +108,10 @@ the testnet step (the vault's token list is fixed when it is deployed); without 
 is paid in HUSD, and the bot says so.
 
 A rehearsal without NEAR: `bash scripts/server.sh install --offline` runs everything except the
-testnet step, with the in-memory demo vault (the real bot, real tunnels). A later
-`bash scripts/server.sh install` adds the testnet step and switches the running HoldUp over.
+testnet step, with the in-memory demo vault (the real bot, real tunnels). New payees wait 5 minutes
+there, as on the hosted testnet bot (`holdup serve --offline --profile hosted`), so that a live AI
+check (17-57 s) ends before the payment is due. A later `bash scripts/server.sh install` adds the
+testnet step and switches the running HoldUp over.
 
 Without a terminal (for scripts), give the keys as `HOLDUP_OTARI_API_KEY` and
 `HOLDUP_TELEGRAM_BOT_TOKEN` in the environment; the testnet step reads its answers from standard

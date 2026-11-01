@@ -43,6 +43,7 @@ from .config import OFFLINE_SECRET, Settings
 from .interfaces import Notifier, RiskPort, VaultPort
 from .models import (
     NEAR,
+    STILL_CHECKING,
     Finding,
     Hold,
     HoldStatus,
@@ -658,7 +659,10 @@ class Engine:
             state.failures += 1
             budget = verdict is not None and bool(verdict.reason_bits & Reason.BUDGET_EXHAUSTED)
             reason = Reason.BUDGET_EXHAUSTED if budget else Reason.AI_UNAVAILABLE
-            findings = [Finding(reason, f"AI check failed: {detail}", source="fail_closed")]
+            if slow:  # nothing failed: the check needs longer than the hold had left (a wait, on the same bit)
+                findings = [Finding(reason, "the AI check was still running when the hold was due", STILL_CHECKING)]
+            else:
+                findings = [Finding(reason, f"AI check failed: {detail}", source="fail_closed")]
             if verdict is not None:
                 findings += [f for f in verdict.findings if not _is_failure(f)]
             if asks_to_brake(fast):
@@ -694,7 +698,7 @@ class Engine:
                 return
             final = not slow and (state.failures >= MAX_FAILURES or result.release_at_ms >= cap)
             self.store.log_event(
-                "fail_closed",
+                "check_slow" if slow else "fail_closed",
                 {"hold_id": hold.id, "failures": state.failures, "release_at_ms": result.release_at_ms},
             )
             tx_text = self._tx_text(result.tx)
@@ -1076,7 +1080,7 @@ class Engine:
             "provisional_brakes": count("brake_provisional"),
             "brakes": count("brake"),
             # A payment braked quickly and then again by the full check counts once here.
-            "braked_holds": self.store.count_event_holds("brake_provisional", "brake", "fail_closed"),
+            "braked_holds": self.store.count_event_holds("brake_provisional", "brake", "fail_closed", "check_slow"),
             "fail_closed": count("fail_closed"),
             "cancels": count("cancel"),
             "guardian_cancels": count("guardian_cancel"),
