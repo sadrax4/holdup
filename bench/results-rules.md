@@ -6,7 +6,7 @@ profile in place of the chain, and counts as braked when the engine's `asks_to_b
 the test the engine applies before it puts the quick provisional brake on chain. No model is called.
 A rules brake holds a payment for at least an hour, and no later check can shorten it.
 
-"Before" is the rules at commit 98941a1; "after" is this branch. The full report for all items is
+"Before" is the rules at commit 2d2c1ee; "after" is this branch. The full report for all items is
 at the end of this file.
 
 ## Summary
@@ -27,7 +27,7 @@ in-sample numbers just like the dev rows.
 | | after | 58 | 3 | 95% | 68% | 4% |
 
 "Weighting only" applies the new weighting (below) to the message patterns, invoice check and
-look-alike check of 98941a1. It separates the two parts of the change: the weighting removes 36 of
+look-alike check of 2d2c1ee. It separates the two parts of the change: the weighting removes 36 of
 the 40 false holds and costs 24 scams; the new and changed patterns then win back 11 scams and remove
 one more false hold. Those patterns were written with the dataset in view, and the benign items
 trigger none of them, so the bench cannot show what they cost on honest text.
@@ -60,7 +60,7 @@ review quoted four of them (three benign phrasings and one payee name), so two o
 | after | 5 of 12 | 1 of 12 | 83% | 42% | 8% |
 
 On this set the new and changed patterns brake no additional scam; they remove one false hold (an
-approval phrase that 98941a1 treated as an injection). Recall falls much further here than on
+approval phrase that 2d2c1ee treated as an injection). Recall falls much further here than on
 ScamBench (75 to 42 percent against 84 to 68), which is what one would expect if the patterns fit
 ScamBench's wording. The rules' recall on real messages should be taken from sets like this one,
 not from ScamBench; with 12 scams the interval is wide (about 19 to 68 percent).
@@ -77,7 +77,7 @@ not from ScamBench; with 12 scams the interval is wide (about 19 to 68 percent).
    dataset was test items.
 3. A review of that round found that many new patterns copied the wording of a single item, that
    the young-and-busy payee profile no longer braked, and that some changes had dropped forms
-   98941a1 caught (lines addressed to an assistant or a reviewer, obligations such as "you will
+   2d2c1ee caught (lines addressed to an assistant or a reviewer, obligations such as "you will
    need to pay within", payment-address changes, daily percentages, escrow). The second round
    restored those forms, removed or narrowed the patterns that copied one item or also match
    honest messages, and added the honest phrasings from the review as tests. Its examples name

@@ -1,6 +1,6 @@
 # Threat model
 
-This covers HoldUp as it is in this repository (commit 9e03a8b), set up the way the hosted demo is
+This covers HoldUp as it is in this repository (commit a98a483), set up the way the hosted demo is
 meant to run: one server, demo money, on NEAR testnet or the in-memory vault, with the hosted
 profile's waits (`holdup/chain/profiles.py`). It is not a production design. The last section says
 what a production version would change.
@@ -212,7 +212,7 @@ HoldUp puts in each request.
 - `fetch_page` reads public web pages for the model: http or https on ports 80, 443, 8080 or 8443,
   no user names in links, addresses checked after DNS resolution and pinned so private and
   internal addresses are refused, at most 100 KB, 8 seconds and 3 redirects (`holdup/intel.py`).
-  Since commit 9e03a8b it is left out while the gateway's own web fetch is offered, and comes back
+  Since commit a98a483 it is left out while the gateway's own web fetch is offered, and comes back
   when that fetch fails or the workspace has no web access.
 - Limits: tokens do not expire while HOLDUP_SECRET stays the same, `/mcp` has no rate limit, and
   `fetch_page` will read any public page, not only the links in the message. A leaked token thus
@@ -232,7 +232,7 @@ HoldUp puts in each request.
   the rules nor the models brake, the payment goes through after the normal wait.
 - **False brakes cost time.** An honest payment can wait up to 72 hours. ScamBench measures how
   often (README, ScamBench section). The live public-URL run on 2026-10-31 braked all six payments,
-  including two honest ones. The cause of one is fixed in commit 9e03a8b, which has run live on
+  including two honest ones. The cause of one is fixed in commit a98a483, which has run live on
   testnet since 2026-11-01: an honest payment of that kind (a new payee, a short message) was
   released there with no brake, once. The other is the open issue under "A compromised or lying
   model", which has not been repeated live since.

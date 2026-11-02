@@ -40,7 +40,7 @@ with throwaway accounts ran three held payments on testnet with the AI checks of
 footer and `/health` say which network the bot is on. Details:
 [docs/OTARI.md](docs/OTARI.md#the-live-evidence); what has not run live yet: [Status](#status).
 
-**The bot's deployment on NEAR testnet**, live since 2026-11-01 09:08 UTC (commit 9e03a8b, hosted
+**The bot's deployment on NEAR testnet**, live since 2026-11-01 09:08 UTC (commit a98a483, hosted
 profile: new payees wait 5 minutes):
 
 | Account | Role | Access keys |
@@ -214,7 +214,7 @@ Counts are dev / test.
 | Rules only | 36 of 53 / 22 of 32 | 3 of 49 / 0 of 36 |
 | Rules and live triage answers, the other models silent (floor) | 43 of 53 / 25 of 32 | 3 of 49 / 1 of 36 |
 | Same, the reviewer always agreeing (ceiling) | 52 of 53 / 31 of 32 | 20 of 49 / 9 of 36 |
-| The floor before commit 009c73e weighed the models' findings | 51 of 53 / 30 of 32 | 19 of 49 / 9 of 36 |
+| The floor before commit af98044 weighed the models' findings | 51 of 53 / 30 of 32 | 19 of 49 / 9 of 36 |
 
 - Rules: `make bench-rules` reproduces them offline (`SPLIT=all` for every row). The rules were
   tuned with both splits in view, so both splits are in-sample. On 24 items written outside the set
@@ -224,18 +224,18 @@ Counts are dev / test.
   Those cached answers were replayed through the pipeline. In the floor the investigator and the
   reviewer answer "nothing found"; in the ceiling the reviewer answers "hold it" every time it is
   asked. The live pipeline lies between the two; it has not been run on the whole set.
-- Commit 009c73e traded some scams braked for far fewer honest payments braked.
+- Commit af98044 traded some scams braked for far fewer honest payments braked.
 - The test split is not clean held-out data for the AI rows either: earlier work had seen test
   results, and the weighing leans on rules tuned on test.
 - The cached answers and the scoring scripts are not in this repository. The message of commit
-  009c73e gives the floor before and after and the ceiling's scam counts; the same AI-row counts
-  came out on commit 9e03a8b (rerun 2026-11-01).
+  af98044 gives the floor before and after and the ceiling's scam counts; the same AI-row counts
+  came out on commit a98a483 (rerun 2026-11-01).
 - With 32 scams and 36 honest items in test, a rate on it carries roughly 10 to 17 percentage
   points of uncertainty either way (DATASHEET, section 4a).
 
 ## Status
 
-Checked on 2026-11-01 at commit 9e03a8b unless a line gives another date. Dates are UTC.
+Checked on 2026-11-01 at commit a98a483 unless a line gives another date. Dates are UTC.
 
 - Offline: `make test` (1273 passed, 23 skipped) and the contract unit tests (80 vault tests, 6
   token tests) pass; `make demo-offline`, `make attack` and `make prove` run in about two seconds
@@ -246,10 +246,10 @@ Checked on 2026-11-01 at commit 9e03a8b unless a line gives another date. Dates 
   Otari, the in-memory vault and simulated transactions: six payments, 18 model steps, USD 0.0434
   in total, with Otari calling HoldUp's MCP server and guardrail endpoint. Details, request ids and
   what is still open: [docs/OTARI.md](docs/OTARI.md).
-- What that run showed, and what commit 9e03a8b changed: the payee's reputation counted the hold
+- What that run showed, and what commit a98a483 changed: the payee's reputation counted the hold
   under check, the 20-second demo hold was shorter than the check, an empty model answer ended the
   step, the web tools went unused once MCP was attached, and a guardrail block was shown as a
-  failure. 9e03a8b fixes these. In its live runs on 2026-11-01 (next items) four of the fixes
+  failure. a98a483 fixes these. In its live runs on 2026-11-01 (next items) four of the fixes
   showed: the checks ended well within the 5-minute wait, the investigator used Otari's web fetch
   and web search with MCP attached, the guardrail's block was recorded as a block, and an empty
   model answer moved the step to a model of another family instead of ending it. The reputation
@@ -257,7 +257,7 @@ Checked on 2026-11-01 at commit 9e03a8b unless a line gives another date. Dates 
   saved pages do not show what the reputation lookup answered. One honest brake in the 2026-10-31
   run has no fix yet (the open issue below).
 - NEAR testnet with live AI checks (2026-11-01): the bot's deployment (accounts near the top of
-  this page) has run commit 9e03a8b with the hosted profile since 09:08. The public faucet was rate
+  this page) has run commit a98a483 with the hosted profile since 09:08. The public faucet was rate
   limited, so the treasury was funded with test NEAR from NEAR's account helper; no code changed.
   `verify-deploy` and `prove` passed at install. At about 09:58 two payments went through Telegram:
   50 HUSD to `safe-wallet-77` after the fake exchange-support sample, braked by the rules one
@@ -292,7 +292,7 @@ Checked on 2026-11-01 at commit 9e03a8b unless a line gives another date. Dates 
 - NEAR testnet rehearsal (2026-10-31, throwaway accounts): the deploy (the root spent 9.57 test
   NEAR), `verify-deploy` and `prove`, then onboarding and three held payments (a cancel, an oracle
   brake followed by a cancel, a keeper release), all as real transactions with the AI checks off.
-  A new key was not visible at final finality for a block or two; commit 65d3b96 fixed that, and a
+  A new key was not visible at final finality for a block or two; commit da6e4aa fixed that, and a
   deploy stopped on purpose then resumed where it stopped. `make demo` on testnet has not run.
 - Not yet run: the sandbox tests (`tests/test_contract_sandbox.py`, `tests/test_chain_sandbox.py`;
   they need a running NEAR sandbox). Not yet shown live: the image step, a fallback made by the

@@ -26,7 +26,7 @@ The web pages the bot links to sit behind a Cloudflare quick tunnel. Its address
 time the server restarts, so this page gives no address. Each bot message carries the current
 links; use those.
 
-Since 2026-11-01 09:08 UTC the bot has run commit 9e03a8b on NEAR testnet with the hosted profile:
+Since 2026-11-01 09:08 UTC the bot has run commit a98a483 on NEAR testnet with the hosted profile:
 new payees wait 5 minutes. The wait given in each hold message and the network in the page footer
 are what count.
 
@@ -90,7 +90,7 @@ are what count.
    `ravi-9` under the root. It should get no brake and be released after the 5-minute wait, as two
    were on 2026-11-01. One carried no message, so no model looked at it. The other carried a short
    message; triage, the investigator and the reviewer read it and found nothing to brake. On
-   2026-10-31 an honest payment like it was braked by mistake; the cause is fixed in commit 9e03a8b,
+   2026-10-31 an honest payment like it was braked by mistake; the cause is fixed in commit a98a483,
    and one such payment has since been released on it (see [Known issues](#known-issues)). If it
    is braked, `/why` shows which step braked it and on what.
 
@@ -168,7 +168,7 @@ Contract test names are in `contracts/holdvault/src/tests/`;
 
 ## Check the deployment on-chain
 
-The bot uses this deployment on NEAR testnet, live since 2026-11-01 09:08 UTC (commit 9e03a8b,
+The bot uses this deployment on NEAR testnet, live since 2026-11-01 09:08 UTC (commit a98a483,
 hosted profile). Account pages are on testnet.nearblocks.io:
 
 | Account | Role | What the chain shows |
@@ -245,7 +245,7 @@ is not the deployment the bot uses.
 - The run through the public URL on 2026-10-31 braked all six payments, including two honest
   ones. The dinner split was braked because the payee's reputation counted the hold under check,
   and a 20-second hold was shorter than the check; an empty model answer also ended a step. These
-  are fixed in commit 9e03a8b, which has run live on testnet since 2026-11-01. On it, an honest
+  are fixed in commit a98a483, which has run live on testnet since 2026-11-01. On it, an honest
   12.5 HUSD payment with a short message was released with no brake, an empty model answer moved
   the step to another model family, and every check ended within about 70 seconds. The saved pages
   do not show whether the reputation lookup now leaves out the hold under check. The other honest

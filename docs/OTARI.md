@@ -23,7 +23,7 @@ characters; the full ids are in the sections below.
 | Open-weight models (20, +10 for two or more) | Verified live: three open-weight models | 2026-10-31: triage `77016f08`, investigator `7a358dcb`, reviewer `72b3f1d9`; run 3: triage `07cf8e8a`, investigator `c24673f3`; run 4: triage `434e9135`, investigator `fe379661`, reviewer `a52d662f`; all served by deepinfra | `holdup/risk/otari.py`, `holdup/risk/pipeline.py` |
 | Model routing and fallbacks | Routing and headers verified live. A fallback shown once, in run 4, and it was HoldUp's own switch to another model family after an empty answer; the gateway's own fallback is not shown | runs 2 to 4: provider, served model, fallback and attempts on every step a provider served. Run 4, hold 2: investigator `718804c7`, fallback yes, attempts 2, note `empty_answer`; `/stats.json`: 1 fallback in 12 steps | `FALLBACK_CHAIN`, `fallbacks_for`, `chat` in `otari.py` |
 | MCP integrations | Verified live, again on testnet in runs 3 and 4 | run 2: the gateway called near-intel on every hold; an out-of-scope call refused on hold 1. Run 3: three near-intel calls in `c24673f3`. Run 4: calls on holds 2, 3 and 5, none refused | `holdup/mcp_server.py`, `_mcp_servers` in `pipeline.py` |
-| Web search or web fetch | Both verified live on commit 9e03a8b (fetch in runs 3 and 4, search in run 4); search also in run 1 | fetch in `c24673f3` (run 3) and `718804c7` (run 4); search in `17299991` (run 1) and `718804c7` (run 4), where a finding rests on two search sources; `otari_web_search` also on the investigator steps `439d9bb7` and `fe379661` | `_investigate` in `pipeline.py` |
+| Web search or web fetch | Both verified live on commit a98a483 (fetch in runs 3 and 4, search in run 4); search also in run 1 | fetch in `c24673f3` (run 3) and `718804c7` (run 4); search in `17299991` (run 1) and `718804c7` (run 4), where a finding rests on two search sources; `otari_web_search` also on the investigator steps `439d9bb7` and `fe379661` | `_investigate` in `pipeline.py` |
 | Code execution | Verified live; on testnet in run 4 | `17299991` (run 1), `72b3f1d9` (run 2); run 4: reviewer `a52d662f` (line items 1,150 against a total of 1,250) and `253fdee8` | `pipeline.py`, `_fill` in `otari.py` |
 | Budgets and spending limits | Implemented, not yet shown live | none | `BudgetExceeded` in `otari.py`, `_fail_closed` in `holdup/engine.py` |
 | Multiple models serving distinct roles | Verified live: 4 roles on 3 models, on testnet too | run 2, as for open-weight models, plus the gate `1db2c093`; run 3: triage and investigator on two models, and a gate blocked before any model ran; run 4: triage, a blocked gate, investigator (also by fallback on deepseek) and reviewer | `_review` in `pipeline.py` |
@@ -40,9 +40,9 @@ Times are UTC.
 
 - **Run 1, 2026-10-31, 18:21 to 18:23.** The scripted story of `holdup demo --offline` on the
   in-memory vault, run through a capture script that builds the same runtime with live Otari
-  (until commit b138afb the CLI itself ignored `OTARI_MODE=live`). Every AI step went to the
+  (until commit d50aff5 the CLI itself ignored `OTARI_MODE=live`). Every AI step went to the
   gateway. No MCP server or guardrail endpoint was attached, because the gateway can only call
-  public URLs. The real CLI, with fixes later committed as b138afb, ran the same story live from
+  public URLs. The real CLI, with fixes later committed as d50aff5, ran the same story live from
   19:01 to 19:04.
 - **Run 2, 2026-10-31, 23:09 to 23:30.** The hosted server on a public quick-tunnel URL, in offline
   network mode (in-memory vault, simulated transactions) with live Otari, driven through its web
@@ -52,10 +52,10 @@ Times are UTC.
   copies of `/h`, `/why`, `/v`, `/stats`, `/profiles` and `/health` are kept by the author; they
   are not in this repository. A quick-tunnel URL changes whenever the server restarts, so these
   docs do not give it.
-- Run 2 ran code older than 009c73e (inferred from the wording on its pages), so it predates all
-  the 9e03a8b fixes. Run 3 is the first live run of 9e03a8b.
+- Run 2 ran code older than af98044 (inferred from the wording on its pages), so it predates all
+  the a98a483 fixes. Run 3 is the first live run of a98a483.
 - **Run 3, 2026-11-01, 09:58 to 10:05.** The bot's own deployment on NEAR testnet (accounts and
-  deploy transactions in the [README](../README.md)), commit 9e03a8b with the hosted profile (new
+  deploy transactions in the [README](../README.md)), commit a98a483 with the hosted profile (new
   payees wait 5 minutes), driven through Telegram: two payments as real transactions, 3 model
   steps, 0 fallbacks, 0 fail-closed, USD 0.0108 in total (`/stats.json`, saved at 10:05). The
   gateway called HoldUp's MCP server and guardrail endpoint. Saved copies of `/h`, `/why`, `/v`
@@ -80,7 +80,7 @@ Times are UTC.
     found no reason to brake (the payee's age, under an hour, is shown as context only), and the
     keeper released it at 10:04:16, after the 5-minute wait
     ([release](https://testnet.near.rocks/tx/4bt5ZTK6LfMGq9WowUCE5bdK5sgg6fDczU1C7pJBzrAK)).
-- **Run 4, 2026-11-01, 10:51 to 11:10 (filming).** The same deployment (commit 9e03a8b, hosted
+- **Run 4, 2026-11-01, 10:51 to 11:10 (filming).** The same deployment (commit a98a483, hosted
   profile), while the demo videos were filmed. Five payments, holds 2 to 6, as real transactions,
   from three more sender accounts, made through the web console (the saved pages do not name the
   channel). The deployment's `/stats.json`, saved when it counted all seven
@@ -183,7 +183,7 @@ the provider. From every answer it records `Otari-Provider`, `Otari-Model` (show
 and puts provider, fallback, attempts and request id into the evidence JSON whose hash goes
 on-chain. On top of the gateway's routing it has its own fallback chain across model families for
 the investigator: `gpt-oss-120b`, then `deepseek-v4.1-flash`, then `glm-5.3-flash` (`FALLBACK_CHAIN`
-and `fallbacks_for` in `holdup/risk/otari.py`). Since commit 9e03a8b an empty or malformed answer
+and `fallbacks_for` in `holdup/risk/otari.py`). Since commit a98a483 an empty or malformed answer
 also moves to the next family while time is left.
 
 Calls that use gateway tools are streamed, because the hosted CDN cuts non-streamed responses after
@@ -267,7 +267,7 @@ the logged calls is marked refused:
 Findings tagged `[MCP near-intel]` came from these: the payee's age on holds 2, 3 (as context) and
 5, and on hold 2 a note that the hold was flagged for injection attempts in the withheld message.
 
-Run 2 also showed two faults, fixed in 9e03a8b: `payee_reputation` counted the hold under check
+Run 2 also showed two faults, fixed in a98a483: `payee_reputation` counted the hold under check
 and the sender's own earlier payments, and the model had to guess the sender's account for
 `sender_history` (the history tools now default to the hold's own parties). Run 3 shows the second
 fix at work: `sender_history()` came with no arguments and was answered, and run 4 shows it again
@@ -283,7 +283,7 @@ phishing-page claim only if the page was read. If the workspace has web access o
 dropped, the step is retried without it and a note says so on `/why`.
 
 **Status: web fetch verified live on 2026-11-01 (runs 3 and 4); web search verified live on
-2026-10-31 (run 1) and again on 2026-11-01 (run 4), so both are shown on commit 9e03a8b.**
+2026-10-31 (run 1) and again on 2026-11-01 (run 4), so both are shown on commit a98a483.**
 
 - Run 1, hold 1 (the Northwind invoice): investigator request
   `17299991-165c-49e9-be2a-adf5bc22bb79` (deepinfra, USD 0.020652) ran `otari_web_search` for
@@ -292,7 +292,7 @@ dropped, the step is retried without it and a note says so on `/why`.
   failed with `url_invalid`, because the training page was then on `127.0.0.1`, which the gateway
   cannot reach.
 - Run 2: with near-intel attached, the investigator read both linked pages with near-intel's
-  `fetch_page` and used neither gateway tool. Commit 9e03a8b leaves `fetch_page` out while the
+  `fetch_page` and used neither gateway tool. Commit a98a483 leaves `fetch_page` out while the
   gateway's web fetch is offered (it comes back if that fetch fails) and asks for at least one
   search.
 - Run 3, hold 0 (investigator request `c24673f3-c063-41be-83b0-8b4500731150`, near-intel
@@ -312,7 +312,7 @@ dropped, the step is retried without it and a note says so on `/why`.
   citing two public pages, one on foxwallet.com and one on robinhood.com. HoldUp counts a
   public-warning finding only if it cites a page the gateway reports its search returned, so the
   search completed with those results. This is a finding that rests on a search, seen live on
-  9e03a8b.
+  a98a483.
   The query is not on the page, and the evidence JSON of this hold dropped its citations to fit
   its size cap (see Run 4 above), so the sources are on `/h/2` and `/why/2` only.
 - Run 4, holds 3 and 5: the gpt-oss-120b investigator steps (`439d9bb7-d6ae-4206-9974-bf81be83de3c`
@@ -320,7 +320,7 @@ dropped, the step is retried without it and a note says so on `/why`.
   line lists a call whether or not it completed. No finding of either carries a search tag (hold 3
   had no finding, and hold 5's findings are tagged rules, triage, investigator, near-intel,
   code execution and reviewer). So all three investigator steps of run 4 called the search, as
-  9e03a8b asks.
+  a98a483 asks.
 
 ## Code execution
 
@@ -340,7 +340,7 @@ call, when no MCP server is attached (`_fill` in `otari.py`).
   `otari_code_execution` among its tools and cost USD 0.010138, against USD 0.000051 for a reviewer
   step without a sandbox run on hold 3; its finding "line items add up to 1150.00 but the stated
   total is 1250.00 (off by 100.00)" matched HoldUp's own arithmetic.
-- Run 4, hold 5 (the Northwind invoice, commit 9e03a8b): the reviewer step (request
+- Run 4, hold 5 (the Northwind invoice, commit a98a483): the reviewer step (request
   `a52d662f-f64f-44e9-84f3-e219be034de0`, deepseek, deepinfra, 4.0 seconds, USD 0.010155) lists
   `otari_code_execution` as its tool and cost about what run 2's sandbox reviewer did, against USD
   0.000051 for a reviewer without one. The reviewer has no MCP server, so HoldUp infers the sandbox
@@ -418,7 +418,7 @@ a pass on 2026-10-31 and blocks on 2026-11-01 (runs 3 and 4).**
 - Block, refused (run 2, holds 0 and 4): the gateway refused the gate request in 298 ms and 267 ms,
   with no provider and no cost (requests `8bef9162-5d48-410a-82ab-9917306cda45` and
   `19034f6a-028e-4558-a397-f3a0aad70598`), and the text stayed withheld from the investigator.
-  HoldUp then recorded this as a failed step (`request_refused`). Since commit 9e03a8b a bare 403
+  HoldUp then recorded this as a failed step (`request_refused`). Since commit a98a483 a bare 403
   on a request with a block-mode guardrail is recorded as the guardrail's block, with a note that
   the gateway answered 403 with no error code; that case has not come up live since, and the saved
   pages do not record the status of the 2026-10-31 refusals.
@@ -440,7 +440,7 @@ a pass on 2026-10-31 and blocks on 2026-11-01 (runs 3 and 4).**
   refused after 468 ms, with no provider and no cost, by a 403 with the error code
   `guardrail_violation` and profile `checker-injection`. HoldUp recorded it as "blocked the text",
   so the later steps saw only facts HoldUp extracted from the message. As in run 3, the bare-403
-  case of 9e03a8b has not come up.
+  case of a98a483 has not come up.
 - Which classifier produced each verdict (the safeguard model or the fallback rules) is not on the
   saved pages.
 
@@ -468,9 +468,9 @@ are burned into the picture. The payments made while the demo videos were filmed
 
 ## Appendix: the six payments of run 2
 
-Outcomes as the run recorded them, on code older than 009c73e. Hold 3's 72-hour brake has no fix
+Outcomes as the run recorded them, on code older than af98044. Hold 3's 72-hour brake has no fix
 yet ([JUDGES.md, Known issues](JUDGES.md#known-issues)); the other mistaken brakes are fixed in
-9e03a8b. Of these honest payments, only a payment of the kind of hold 2 has been repeated live on
+a98a483. Of these honest payments, only a payment of the kind of hold 2 has been repeated live on
 it: 12.5 HUSD to a practice friend with a short message, released with no brake (run 4, hold 3).
 The note from Mum (hold 3 below) has not been repeated live.
 

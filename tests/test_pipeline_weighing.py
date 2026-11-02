@@ -450,10 +450,10 @@ def passed(answer: dict[str, Any]) -> dict[str, Any]:
     return answer
 
 
-async def test_one_models_injection_reading_brakes_alone_as_on_009c73e(tmp_path: Path) -> None:
+async def test_one_models_injection_reading_brakes_alone_as_on_af98044(tmp_path: Path) -> None:
     """Live hold #3: the rules noted approval words as context, the guardrail passed the text in monitor and in
     block mode, and the investigator alone read an instruction to the checker into it, in its own words. As on
-    009c73e that reading brakes 72 h on its own, whatever the reviewer answers: honest text with such words pays
+    af98044 that reading brakes 72 h on its own, whatever the reviewer answers: honest text with such words pays
     for it with a brake, the price of not letting a pass of the guardrail turn a model's reading into one that a
     single clean reviewer can release."""
     for brake in (False, True):
@@ -466,7 +466,7 @@ async def test_one_models_injection_reading_brakes_alone_as_on_009c73e(tmp_path:
         assert (Reason.CHECKER_INJECTION, "investigator", False) in found(verdict)
 
 
-async def test_injection_read_by_every_model_brakes_after_a_guardrail_pass_as_on_009c73e(tmp_path: Path) -> None:
+async def test_injection_read_by_every_model_brakes_after_a_guardrail_pass_as_on_af98044(tmp_path: Path) -> None:
     """Review of the live fixes: the guardrail passed this text (its classifier missed it, or /validate answered
     from the phrase rules after the classifier failed), and triage, the investigator and the reviewer all read it
     as aimed at the checker, the reviewer answering that the payment should wait. Each reading brakes on its own,
@@ -485,11 +485,11 @@ async def test_injection_read_by_every_model_brakes_after_a_guardrail_pass_as_on
         assert injection == asked - {"gate"}, units
 
 
-async def test_a_reviewer_naming_injection_brakes_whatever_it_answers_as_on_009c73e(tmp_path: Path) -> None:
+async def test_a_reviewer_naming_injection_brakes_whatever_it_answers_as_on_af98044(tmp_path: Path) -> None:
     """Review of the live fixes: the gate passed this text, triage and the investigator read it as aimed at the
     checker, and the reviewer of another family named it too, but answered that the payment need not wait: the
     answer such text asks for. Its reading of text aimed at the checker brakes on its own, also with nothing else
-    beside it, as on 009c73e: on Mum's honest text that mentions approval too."""
+    beside it, as on af98044: on Mum's honest text that mentions approval too."""
     steps = {
         "triage": triage(injection_suspected=True),
         "investigator": investigation(TOLD),
@@ -507,7 +507,7 @@ async def test_a_reviewer_naming_injection_brakes_whatever_it_answers_as_on_009c
     assert (Reason.CHECKER_INJECTION, "reviewer", False) in found(verdict)
 
 
-async def test_an_injection_claim_brakes_alone_quoted_or_not_as_on_009c73e(tmp_path: Path) -> None:
+async def test_an_injection_claim_brakes_alone_quoted_or_not_as_on_af98044(tmp_path: Path) -> None:
     """The guardrail passed the text and the reviewer saw no reason to hold, and the claim brakes on its own
     whether or not the message holds the words it quotes. A quote the message holds never reaches the evidence."""
     for detail in (QUOTE, MADE_UP):
@@ -526,7 +526,7 @@ async def test_an_injection_claim_brakes_alone_quoted_or_not_as_on_009c73e(tmp_p
 
 
 async def test_with_no_guardrail_a_models_injection_reading_brakes_alone(tmp_path: Path) -> None:
-    """No guardrail read the text (its endpoint unreachable): triage's reading brakes 72 h as on 009c73e, and the
+    """No guardrail read the text (its endpoint unreachable): triage's reading brakes 72 h as on af98044, and the
     text stays away from the tools."""
     steps = {"triage": triage(injection_suspected=True), "reviewer": reviewer(False)}
     risk, transport = make_risk("case", fixtures_dir=scenario_dir(tmp_path, "case", steps))
@@ -537,7 +537,7 @@ async def test_with_no_guardrail_a_models_injection_reading_brakes_alone(tmp_pat
     assert (Reason.CHECKER_INJECTION, "triage", False) in found(verdict)
 
 
-def test_a_models_injection_claim_is_strong_as_on_009c73e() -> None:
+def test_a_models_injection_claim_is_strong_as_on_af98044() -> None:
     """Whatever the guardrail said of the text, and whatever the reviewer that names it answered."""
     risk, _ = make_risk("benign")
     case = risk._case(make_hold("ravi.testnet", 150), PaymentContext(forwarded_text=SUBTLE))
@@ -571,7 +571,7 @@ async def test_a_guardrail_flag_still_brakes_on_its_own(tmp_path: Path) -> None:
 async def test_a_flag_on_an_answer_triage_could_not_use_still_brakes(tmp_path: Path) -> None:
     """Review of the live fixes: triage's first model answered empty while the monitor flagged the text, and the
     request to the next family came back with a verdict that could not judge it (a /validate flake). That verdict
-    replaced the flag, and the payment released with no hold where 009c73e failed closed. Both requests carried
+    replaced the flag, and the payment released with no hold where af98044 failed closed. Both requests carried
     the same text, so the flag stands."""
     flagged = [{"profile": "checker-injection", "mode": "monitor", "valid": False, "score": 1.0}]
     unknown = [{"profile": "checker-injection", "mode": "monitor", "valid": None, "score": None}]
@@ -597,7 +597,7 @@ async def test_a_flag_on_a_request_the_investigator_sent_again_still_brakes(tmp_
     """Review of the live fixes: the investigator's first model answered empty while the monitor flagged the text,
     and the next family failed in a way that sends the request again (every candidate 502 with near-intel attached,
     or a web tool the workspace has switched off). The request sent again passed the monitor, and its verdict
-    replaced the flag: the payment released with no hold where 009c73e failed closed. Every request carried the
+    replaced the flag: the payment released with no hold where af98044 failed closed. Every request carried the
     same message, so the flag stands."""
     flagged = [{"profile": "checker-injection", "mode": "monitor", "valid": False, "score": 0.97}]
     passed = [{"profile": "checker-injection", "mode": "monitor", "valid": True, "score": 0.01}]
@@ -648,9 +648,9 @@ SELF_FLAG = {"reason": "PAYEE_REPORTED", "tool": "near-intel", "detail": "Payee 
              "reputation record", "citations": []}
 
 
-async def test_a_contradicted_payee_claim_still_summons_the_reviewer_as_on_009c73e(tmp_path: Path) -> None:
+async def test_a_contradicted_payee_claim_still_summons_the_reviewer_as_on_af98044(tmp_path: Path) -> None:
     """Live hold #2: dinner with Ravi. The investigator read the hold's own fail-closed flag as a report. The facts
-    say no report, so the claim is left out; as on 009c73e it still summons the reviewer, whose reading of the
+    say no report, so the claim is left out; as on af98044 it still summons the reviewer, whose reading of the
     message counts. The reviewer's first model answered text that is not JSON; the next family answers now, and
     the honest payment releases. Only when every reviewer model fails does it wait the hour of a failed check."""
     bad = {"headers": {"otari-provider": "deepinfra"}, "content": "not json at all"}

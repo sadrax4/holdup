@@ -1039,7 +1039,7 @@ def test_rules_context_adds_to_a_reason_the_ai_found_but_is_none_itself() -> Non
     triage = Finding(Reason.URGENCY, "message sets a deadline", "triage", TRIAGE_MODEL)
     assert P.hold_for([YOUNG, BUSY]) == 0  # no reason to hold, so no wait
     assert P.hold_for([triage]) == P.DAY_MS
-    assert P.hold_for([triage, YOUNG, BUSY]) == P.MAX_HOLD_MS  # three signals, as at 98941a1
+    assert P.hold_for([triage, YOUNG, BUSY]) == P.MAX_HOLD_MS  # three signals, as at 2d2c1ee
     # Approval words alone are context: they count towards three signals but are no strong injection.
     approval = Finding(Reason.CHECKER_INJECTION, "says the payment is pre-approved", "rules", context=True)
     assert P.hold_for([triage, approval]) == P.DAY_MS
