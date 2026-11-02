@@ -300,7 +300,9 @@ keys are made in the dashboard.
 How to try it, and what is live and what is simulated: [JUDGES.md](JUDGES.md). Keys, attacks and
 limits: [THREAT_MODEL.md](THREAT_MODEL.md).
 
-**Video: (link to be added by the author).**
+**Video (4:25): https://youtu.be/nX-clzhrwfU.** It was filmed on 2026-11-01 against the bot's
+testnet deployment, through the web console that drives the same engine as the Telegram bot. Captions
+are burned into the picture.
 
 ## Appendix: the six payments of run 2
 
