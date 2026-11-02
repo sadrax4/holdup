@@ -36,8 +36,9 @@ In short:
   `holdup-credentials.json` (mode 600).
 - **Forwarded messages.** Kept private by HoldUp: they are not put on-chain or on the web pages
   (the evidence holds short findings, with quoted text redacted, `holdup/risk/evidence.py`),
-  except the address (host and path) of any link a finding cites. They are sent to the Otari
-  gateway and the model providers it routes to.
+  except the address (host and path) of a link a finding cites, which the 4,096-byte evidence
+  drops when a verdict is large. They are sent to the Otari gateway and the model providers it
+  routes to.
 - **The Otari API key and its spend, and the Telegram bot token.**
 - **Payee reputation.** The vault's public per-payee counts of holds, flags and reports. A false
   report harms an honest payee.
@@ -232,8 +233,9 @@ HoldUp puts in each request.
 - **False brakes cost time.** An honest payment can wait up to 72 hours. ScamBench measures how
   often (README, ScamBench section). The live public-URL run on 2026-10-31 braked all six payments,
   including two honest ones. The cause of one is fixed in commit 9e03a8b, which has run live on
-  testnet since 2026-11-01 but has not met that case again; the other is the open issue under "A
-  compromised or lying model".
+  testnet since 2026-11-01: an honest payment of that kind (a new payee, a short message) was
+  released there with no brake, once. The other is the open issue under "A compromised or lying
+  model", which has not been repeated live since.
 - **One server, one secret.** HOLDUP_SECRET, the oracle key, the keeper key and the treasury key
   live on the same machine as the public web app.
 - **Quick tunnels.** No uptime guarantee, a new address on every restart, TLS terminated by

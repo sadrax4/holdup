@@ -53,9 +53,9 @@ are what count.
      **Cancel & refund** and **Why?** buttons and a `Details:` link.
    - Within seconds, "Brakes on" from the rules alone, tagged `[rules]`: a quick brake of at
      least an hour that no model took part in.
-   - When the full check ends (17 to 65 seconds in the live runs so far), a second brake message
+   - When the full check ends (17 to 68 seconds in the live runs so far), a second brake message
      whose findings are tagged by source: `[rules]`, `[triage gpt-oss-20b]`, `[guardrail]`,
-     `[MCP near-intel]`, `[web fetch]`, `[code execution]`,
+     `[MCP near-intel]`, `[web fetch]`, `[web search, 2 sources]`, `[code execution]`,
      `[reviewer deepseek-v4.1-flash-1017]` and so on.
 4. **Open the links.**
    - `/h/<id>` (the `Details:` link): the timeline, the release time, the hold length against the
@@ -65,11 +65,16 @@ are what count.
    - `/why/<id>` (tap **Why?**, or send `/why <id>`): every step that looked at the payment, with
      the model, the provider that served it and the model id it served ("Served as"), fallback,
      attempts, latency, cost, guardrail verdict, Otari request id and the prompt version (a sha256
-     prefix), plus the calls the model made to HoldUp's own MCP server (`near-intel`).
+     prefix), plus the calls the model made to HoldUp's own MCP server (`near-intel`). A step that
+     HoldUp moved to a model of another family, as happened once on 2026-11-01, carries a
+     "fallback" badge and a note that says why.
    - `/v/<id>.json`: the evidence JSON. Its sha256 is what the oracle stored with the hold, and the
      response carries `X-Evidence-Sha256` and `X-Onchain-Evidence-Hash` headers. The text of the
      message you forwarded is not in it, not on-chain and not on the pages; findings describe it
-     in a few words. The exception is the address (host and path) of any link a finding cites.
+     in a few words. The exception is the address (host and path) of a link a finding cites; the
+     evidence JSON is capped at 4,096 bytes, and when a verdict is large its citations are dropped
+     and its details clipped to fit (hold 2 of 2026-11-01 was such a case; its `/why` page still
+     lists the sources).
    - `/prove` (or send `/prove`): the vault's code hash against `res/CODE_HASHES`, the vault's empty
      key list, the oracle's single `extend_hold` key, the keeper's single `release` key, the fixed
      configuration, and a table of forbidden transactions (oracle sends money, oracle calls another
@@ -82,11 +87,12 @@ are what count.
 6. **Cancel** a held payment with **Cancel & refund**; `/balance` shows the money back. Nobody
    else can cancel it, except a guardian you invite with `/guardian`.
 7. **The friend payment** from `/demo` goes to your own practice friend, one of `ravi-0` to
-   `ravi-9` under the root. It should get no brake and be released after the 5-minute wait, as one
-   was on 2026-11-01. That payment carried no message, so no model looked at it. On 2026-10-31 an
-   honest payment like it was braked by mistake; the cause is fixed in commit 9e03a8b, but that
-   case has not been repeated live (see [Known issues](#known-issues)). If it is braked, `/why`
-   shows which step braked it and on what.
+   `ravi-9` under the root. It should get no brake and be released after the 5-minute wait, as two
+   were on 2026-11-01. One carried no message, so no model looked at it. The other carried a short
+   message; triage, the investigator and the reviewer read it and found nothing to brake. On
+   2026-10-31 an honest payment like it was braked by mistake; the cause is fixed in commit 9e03a8b,
+   and one such payment has since been released on it (see [Known issues](#known-issues)). If it
+   is braked, `/why` shows which step braked it and on what.
 
 Optional: `/stats` (payments, brakes, releases, model steps, fallbacks, AI cost), `/budget` (AI
 spend so far on this server). An image you send (a screenshot of a message, say) is checked with
@@ -154,8 +160,8 @@ Contract test names are in `contracts/holdvault/src/tests/`;
 | Part | State | Evidence |
 |---|---|---|
 | Contracts on NEAR testnet | The bot's own deployment, live since 2026-11-01 09:08 UTC. Before it, a rehearsal on 2026-10-31 with throwaway accounts. | The chain itself ([below](#check-the-deployment-on-chain)); rehearsal logs (not in the repository) |
-| Payments with real transactions | Two through Telegram on the bot's deployment on 2026-11-01, with the AI checks live: one braked (rules, then the full check, to 72 hours) and later cancelled by its sender, one released by the keeper. Earlier, onboarding and three held payments in the rehearsal, with the AI checks off. `make demo` on testnet has not run. | Transactions [below](#check-the-deployment-on-chain); rehearsal logs |
-| AI checks on Otari | Live: the scripted story on 2026-10-31, six payments through the hosted server's public URL later that day, and the two testnet payments on 2026-11-01. | [OTARI.md](OTARI.md) |
+| Payments with real transactions | Seven on the bot's deployment on 2026-11-01. Two through Telegram, with the AI checks live: one braked (rules, then the full check, to 72 hours) and later cancelled by its sender, one released by the keeper. Five through the web console while the demo videos were filmed: three braked and cancelled (one by the rules alone, on reports from earlier senders), one honest payment with a message released, one trusted payee paid instantly. Earlier, onboarding and three held payments in the rehearsal, with the AI checks off. `make demo` on testnet has not run. | Transactions [below](#check-the-deployment-on-chain); rehearsal logs |
+| AI checks on Otari | Live: the scripted story on 2026-10-31, six payments through the hosted server's public URL later that day, and four of the seven testnet payments on 2026-11-01 (the other three had no message to read or were paid instantly). | [OTARI.md](OTARI.md) |
 | Hosted server | On 2026-10-31 in offline network mode (in-memory vault, simulated transactions, live Otari, real quick tunnels); since 2026-11-01 on NEAR testnet. The page footer and `"network"` on `/health` say which. | [OTARI.md](OTARI.md) |
 | `make demo-offline`, `make attack`, `make prove` | Simulated chain and recorded AI answers, labelled as such. | Run them |
 | ScamBench numbers | Offline: the rules live in code; the AI rows replay triage answers recorded live. | [README](../README.md#scambench), [bench/results-rules.md](../bench/results-rules.md) |
@@ -225,6 +231,12 @@ testnet.near.rocks):
   [release](https://testnet.near.rocks/tx/4bt5ZTK6LfMGq9WowUCE5bdK5sgg6fDczU1C7pJBzrAK) by the
   keeper after the 5-minute wait.
 
+Five more payments (holds 2 to 6) followed the same day, while the demo videos were filmed. Holds
+2, 4 and 5 were braked and then cancelled by their senders, and each one's `evidence_hash` is the
+sha256 of its published `/v/<id>.json`. Hold 3, an honest payment with a message, was released
+after the 5-minute wait, and hold 6 was paid instantly to a trusted payee. Their transactions and
+request ids: [OTARI.md](OTARI.md#the-live-evidence).
+
 The 2026-10-31 rehearsal's vault, `vault.holdup-rh-yivs64.testnet`, passes the same checks, but it
 is not the deployment the bot uses.
 
@@ -233,8 +245,11 @@ is not the deployment the bot uses.
 - The run through the public URL on 2026-10-31 braked all six payments, including two honest
   ones. The dinner split was braked because the payee's reputation counted the hold under check,
   and a 20-second hold was shorter than the check; an empty model answer also ended a step. These
-  are fixed in commit 9e03a8b, which has run live on testnet since 2026-11-01, but those honest
-  payments have not been repeated on it. The other honest brake is the next item.
+  are fixed in commit 9e03a8b, which has run live on testnet since 2026-11-01. On it, an honest
+  12.5 HUSD payment with a short message was released with no brake, an empty model answer moved
+  the step to another model family, and every check ended within about 70 seconds. The saved pages
+  do not show whether the reputation lookup now leaves out the hold under check. The other honest
+  brake is the next item.
 - A model's lone claim that a message addresses the checker still brakes for 72 hours, even when
   the guardrail passed the text. This happened live on an honest message that said
   "pre-approved".
